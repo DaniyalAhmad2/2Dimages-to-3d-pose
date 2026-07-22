@@ -33,9 +33,15 @@ uv pip install --no-deps rtmlib      # avoid pulling duplicate opencv wheels
 
 ## 3. Run the app
 
+Use the venv's Python directly. Do **not** use plain `uv run` here: it re-syncs
+the venv against `pyproject.toml` on every launch, which (a) undoes the
+imperative install below and (b) hangs on this machine's IPv6/DNS issue. Either
+run the interpreter directly, or pass `uv run --no-sync`.
+
 ```bash
-uv run python -m pose3d.app                     # empty session
-uv run python -m pose3d.app data/demo_project   # load a saved project
+.venv/bin/python -m pose3d.app                     # empty session
+.venv/bin/python -m pose3d.app data/demo_project   # load a saved project
+# equivalently: uv run --no-sync python -m pose3d.app data/demo_project
 ```
 
 ## 4. Validate the pipeline on real data (CMU Panoptic)
@@ -60,7 +66,7 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/ -q \
 ## 6. Package (one-click app)
 
 ```bash
-uv run pyinstaller pose3d.spec --noconfirm --clean
+.venv/bin/python -m PyInstaller pose3d.spec --noconfirm --clean
 # result: dist/pose3d/pose3d
 ```
 
