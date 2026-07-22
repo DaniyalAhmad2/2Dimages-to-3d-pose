@@ -30,22 +30,27 @@ COCO17_INDEX: dict[str, int] = {n: i for i, n in enumerate(COCO17_NAMES)}
 
 
 class Joint(IntEnum):
-    """Canonical joint set used everywhere downstream of detection."""
-    HEAD = 0          # derived: nose
-    NECK = 1          # derived: midpoint(shoulders)
+    """Canonical joint set used everywhere downstream of detection.
+
+    Feet (indices 15, 16) are appended so existing joint indices are unchanged.
+    """
+    HEAD = 0          # nose (COCO) or native head (Halpe26)
+    NECK = 1          # derived midpoint(shoulders) (COCO) or native (Halpe26)
     LEFT_SHOULDER = 2
     RIGHT_SHOULDER = 3
     LEFT_ELBOW = 4
     RIGHT_ELBOW = 5
     LEFT_WRIST = 6
     RIGHT_WRIST = 7
-    PELVIS = 8        # derived: midpoint(hips)
+    PELVIS = 8        # derived midpoint(hips) (COCO) or native (Halpe26)
     LEFT_HIP = 9
     RIGHT_HIP = 10
     LEFT_KNEE = 11
     RIGHT_KNEE = 12
     LEFT_ANKLE = 13
     RIGHT_ANKLE = 14
+    LEFT_FOOT = 15    # Halpe26 left big toe (NaN if the model has no feet)
+    RIGHT_FOOT = 16   # Halpe26 right big toe
 
 
 NUM_JOINTS = len(Joint)
@@ -68,6 +73,8 @@ BONES: list[tuple[Joint, Joint]] = [
     (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     (Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
     (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
+    (Joint.LEFT_ANKLE, Joint.LEFT_FOOT),
+    (Joint.RIGHT_ANKLE, Joint.RIGHT_FOOT),
 ]
 
 # Direct COCO-17 index for each canonical joint that maps 1:1 (derived = None).
@@ -106,6 +113,8 @@ MIXAMO_BONE: dict[Joint, str] = {
     Joint.RIGHT_KNEE: "mixamorig:RightLeg",
     Joint.LEFT_ANKLE: "mixamorig:LeftFoot",
     Joint.RIGHT_ANKLE: "mixamorig:RightFoot",
+    Joint.LEFT_FOOT: "mixamorig:LeftToeBase",
+    Joint.RIGHT_FOOT: "mixamorig:RightToeBase",
 }
 
 
@@ -127,7 +136,9 @@ def derive_joints(
     coco_xy = np.asarray(coco_xy, dtype=float).reshape(17, 2)
     coco_scores = np.asarray(coco_scores, dtype=float).reshape(17)
 
-    xy = np.zeros((NUM_JOINTS, 2), dtype=float)
+    # NaN-init so unmapped joints (feet — COCO-17 has none) are excluded from
+    # triangulation rather than triangulated at (0, 0).
+    xy = np.full((NUM_JOINTS, 2), np.nan, dtype=float)
     scores = np.zeros(NUM_JOINTS, dtype=float)
 
     for joint, coco_idx in _DIRECT_FROM_COCO.items():
@@ -144,6 +155,46 @@ def derive_joints(
     scores[Joint.PELVIS] = min(coco_scores[lh], coco_scores[rh])
 
     return xy, scores
+
+
+# --- Halpe-26 (RTMPose BodyWithFeet) -> canonical --------------------------
+# Halpe26 order: 0-16 = COCO17, 17 head, 18 neck, 19 hip(pelvis),
+# 20 L big toe, 21 R big toe, 22 L small toe, 23 R small toe, 24 L heel, 25 R heel
+HALPE26_TO_CANONICAL: dict[int, Joint] = {
+    17: Joint.HEAD,           # native head
+    18: Joint.NECK,           # native neck
+    5: Joint.LEFT_SHOULDER,
+    6: Joint.RIGHT_SHOULDER,
+    7: Joint.LEFT_ELBOW,
+    8: Joint.RIGHT_ELBOW,
+    9: Joint.LEFT_WRIST,
+    10: Joint.RIGHT_WRIST,
+    19: Joint.PELVIS,         # native mid-hip
+    11: Joint.LEFT_HIP,
+    12: Joint.RIGHT_HIP,
+    13: Joint.LEFT_KNEE,
+    14: Joint.RIGHT_KNEE,
+    15: Joint.LEFT_ANKLE,
+    16: Joint.RIGHT_ANKLE,
+    20: Joint.LEFT_FOOT,      # left big toe
+    21: Joint.RIGHT_FOOT,     # right big toe
+}
+
+
+def map_halpe26(kp: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Map Halpe-26 keypoints to the canonical joint set (incl. feet).
+
+    kp : (26, 2), scores : (26,). All canonical joints are direct (no
+    derivation) since Halpe26 provides native neck/pelvis/head + feet.
+    """
+    kp = np.asarray(kp, dtype=float).reshape(26, 2)
+    scores = np.asarray(scores, dtype=float).reshape(26)
+    xy = np.full((NUM_JOINTS, 2), np.nan, dtype=float)
+    sc = np.zeros(NUM_JOINTS, dtype=float)
+    for h_idx, joint in HALPE26_TO_CANONICAL.items():
+        xy[int(joint)] = kp[h_idx]
+        sc[int(joint)] = scores[h_idx]
+    return xy, sc
 
 
 # --- RAG (red/amber/green) confidence banding ------------------------------

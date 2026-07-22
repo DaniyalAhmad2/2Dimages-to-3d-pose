@@ -110,9 +110,9 @@ def test_buttons_are_wired(qapp, tmp_path):
     assert model.auto_recalc is False
 
     # Show Joints toggles overlay visibility
-    before = win.cam_left._show_joints
+    before = win.cam_left.view._show_joints
     win.sidebar.cb_joints.setChecked(not before)
-    assert win.cam_left._show_joints != before
+    assert win.cam_left.view._show_joints != before
 
     # Undo starts disabled, enables after an edit, and reverts it
     assert not win.btn_undo.isEnabled()

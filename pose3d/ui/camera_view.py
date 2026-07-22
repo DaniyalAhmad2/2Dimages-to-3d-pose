@@ -11,6 +11,7 @@ from PySide6.QtCore import QObject, QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QPen, QPixmap
 from PySide6.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsLineItem, QGraphicsScene, QGraphicsView,
+    QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget,
 )
 
 from pose3d.core.skeleton import BONES, NUM_JOINTS, rag_status
@@ -146,6 +147,61 @@ class CameraView(QGraphicsView):
         self._refresh_bones()
 
     def resizeEvent(self, event):
-        if self._pixmap_item is not None:
+        if self._pixmap_item is not None and not self._zoomed:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
         super().resizeEvent(event)
+
+    # --- toolbar actions ---
+    _zoomed = False
+
+    def zoom(self, factor: float):
+        self._zoomed = True
+        self.scale(factor, factor)
+
+    def fit(self):
+        self._zoomed = False
+        if self._pixmap_item is not None:
+            self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+
+    def set_pan_mode(self, on: bool):
+        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if on
+                         else QGraphicsView.DragMode.NoDrag)
+
+    def wheelEvent(self, event):
+        self.zoom(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
+
+
+class CameraPanel(QWidget):
+    """Camera view with a header (title + filename) and a vertical toolbar."""
+
+    def __init__(self, cam: str, title: str):
+        super().__init__()
+        self.view = CameraView(cam)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(6, 6, 6, 6)
+        outer.setSpacing(4)
+
+        header = QHBoxLayout()
+        tlab = QLabel(title); tlab.setObjectName("panelTitle")
+        self.filename = QLabel(""); self.filename.setObjectName("fileLabel")
+        header.addWidget(tlab); header.addStretch(1); header.addWidget(self.filename)
+        outer.addLayout(header)
+
+        body = QHBoxLayout(); body.setSpacing(4)
+        tools = QVBoxLayout(); tools.setSpacing(4)
+        specs = [("⭱", "Select", lambda: self.view.set_pan_mode(False)),
+                 ("✋", "Pan", lambda: self.view.set_pan_mode(True)),
+                 ("＋", "Zoom in", lambda: self.view.zoom(1.25)),
+                 ("－", "Zoom out", lambda: self.view.zoom(1 / 1.25)),
+                 ("⤢", "Fit", self.view.fit)]
+        for glyph, tip, fn in specs:
+            b = QToolButton(); b.setText(glyph); b.setToolTip(tip)
+            b.setObjectName("camTool"); b.clicked.connect(fn)
+            tools.addWidget(b)
+        tools.addStretch(1)
+        body.addLayout(tools)
+        body.addWidget(self.view, 1)
+        outer.addLayout(body, 1)
+
+    def set_filename(self, name: str):
+        self.filename.setText(name)

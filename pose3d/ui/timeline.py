@@ -8,7 +8,8 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QListView, QStyledItemDelegate, QStyle,
+    QComboBox, QHBoxLayout, QLabel, QListView, QStyledItemDelegate, QStyle,
+    QWidget,
 )
 
 _STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
@@ -19,6 +20,29 @@ STATUS_COLORS = {
     "red": QColor(235, 90, 90),
     "corrected": QColor(170, 120, 240),
 }
+
+
+class TimelineHeader(QWidget):
+    """'TIMELINE (N FRAMES)' + status legend + a Show filter dropdown."""
+
+    def __init__(self):
+        super().__init__()
+        lay = QHBoxLayout(self); lay.setContentsMargins(0, 0, 0, 0)
+        self.title = QLabel("TIMELINE"); self.title.setObjectName("sectionHeader")
+        lay.addWidget(self.title); lay.addStretch(1)
+        for txt, key in (("High", "green"), ("Low", "amber"),
+                         ("Missing", "red"), ("Corrected", "corrected")):
+            dot = QLabel("●"); dot.setStyleSheet(
+                f"color: {STATUS_COLORS[key].name()};")
+            lab = QLabel(txt); lab.setObjectName("legendLabel")
+            lay.addWidget(dot); lay.addWidget(lab)
+        lay.addSpacing(10)
+        lay.addWidget(QLabel("Show"))
+        combo = QComboBox(); combo.addItems(["All Frames", "Needs Review", "Corrected"])
+        lay.addWidget(combo)
+
+    def set_count(self, n: int):
+        self.title.setText(f"TIMELINE ({n} FRAMES)")
 
 
 class _ThumbDelegate(QStyledItemDelegate):

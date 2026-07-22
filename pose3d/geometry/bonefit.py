@@ -47,6 +47,8 @@ _FALLBACK_LENGTHS: dict[tuple[Joint, Joint], float] = {
     (Joint.RIGHT_HIP, Joint.RIGHT_KNEE): 0.43,
     (Joint.LEFT_KNEE, Joint.LEFT_ANKLE): 0.44,
     (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE): 0.44,
+    (Joint.LEFT_ANKLE, Joint.LEFT_FOOT): 0.16,
+    (Joint.RIGHT_ANKLE, Joint.RIGHT_FOOT): 0.16,
 }
 
 

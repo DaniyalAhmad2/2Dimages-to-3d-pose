@@ -1,30 +1,64 @@
 QWidget {
-    background: #0f1116;
+    background: #0d0f15;
     color: #e6e8ee;
     font-family: "Segoe UI", "DejaVu Sans", sans-serif;
     font-size: 13px;
 }
-#topbar { background: #0b0d12; border-bottom: 1px solid #232633; }
+
+/* top bar */
+#topbar { background: #0a0c11; border-bottom: 1px solid #1e2230; }
 #projectTitle { font-size: 14px; font-weight: 600; }
-#sidebar { background: #0b0d12; border-right: 1px solid #232633; }
-#sectionHeader { color: #7f8698; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-#projectName { font-size: 15px; font-weight: 600; }
-#infoText { color: #aeb4c2; }
-#panelTitle { color: #aeb4c2; font-size: 12px; font-weight: 600; letter-spacing: 1px; }
-#accuracyList { background: #0b0d12; border: 1px solid #232633; font-family: monospace; }
+#savedLabel { color: #4ed67a; font-weight: 600; }
+#topTool { background: transparent; border: none; color: #aeb4c2; padding: 4px 8px; }
+#topTool:hover { color: #ffffff; }
 
+/* sidebar */
+#sidebar { background: #0a0c11; border-right: 1px solid #1e2230; }
+#sectionHeader { color: #6b7385; font-size: 10px; font-weight: 700; letter-spacing: 1.4px; }
+#projectName { font-size: 15px; font-weight: 600; padding-bottom: 2px; }
+#infoKey { color: #8a91a3; }
+#infoVal { color: #d6dae4; font-weight: 500; }
+#hintBox { background: #12151d; border: 1px solid #1e2230; border-radius: 8px;
+           color: #8a91a3; padding: 10px; font-size: 12px; }
+
+/* card panels (cameras, 3D, accuracy, etc.) */
+#cardPanel { background: #0f1219; border: 1px solid #1e2230; border-radius: 10px; }
+#panelTitle { color: #aeb4c2; font-size: 12px; font-weight: 700; letter-spacing: 1px; }
+#fileLabel { color: #7f8698; font-size: 12px; }
+#selJointName { font-size: 15px; font-weight: 600; }
+#legendLabel { color: #aeb4c2; font-size: 11px; }
+
+/* buttons */
 QPushButton {
-    background: #1a1d27;
-    border: 1px solid #2b2f3d;
-    border-radius: 6px;
-    padding: 6px 12px;
+    background: #171b26; border: 1px solid #262b3a; border-radius: 7px; padding: 7px 13px;
 }
-QPushButton:hover { background: #232838; }
-QPushButton:checked { background: #4a4fd0; border-color: #6a6ff0; }
-QPushButton:disabled { color: #565c6b; background: #14161d; }
+QPushButton:hover { background: #212636; }
+QPushButton:disabled { color: #4a505f; background: #12151d; border-color: #1a1e29; }
+#primaryBtn:checked { background: #5257e6; border-color: #6d72ff; color: #ffffff; }
+#actionRow { background: transparent; }
 
-QCheckBox { spacing: 8px; }
-QGraphicsView { background: #14161d; border: 1px solid #232633; }
-QListView { background: #0b0d12; border: 1px solid #232633; }
-QScrollBar:horizontal { height: 10px; background: #0b0d12; }
-QScrollBar::handle:horizontal { background: #2b2f3d; border-radius: 5px; }
+/* camera toolbar */
+#camTool { background: #171b26; border: 1px solid #262b3a; border-radius: 6px;
+           color: #cfd4e0; min-width: 26px; min-height: 26px; font-size: 14px; }
+#camTool:hover { background: #262c3d; }
+
+/* accuracy list */
+#accuracyList { background: #0b0d13; border: 1px solid #1a1e29; border-radius: 6px;
+                font-family: monospace; font-size: 12px; }
+#accuracyList::item { padding: 1px 2px; }
+
+/* combo boxes */
+QComboBox { background: #171b26; border: 1px solid #262b3a; border-radius: 6px; padding: 3px 8px; }
+QComboBox QAbstractItemView { background: #12151d; selection-background-color: #262c3d; }
+
+/* checkboxes */
+QCheckBox { spacing: 8px; color: #d6dae4; }
+
+/* graphics + timeline */
+QGraphicsView { background: #0b0d13; border: 1px solid #1a1e29; border-radius: 6px; }
+QListView { background: #0b0d13; border: 1px solid #1a1e29; border-radius: 6px; }
+QScrollBar:horizontal { height: 10px; background: #0b0d13; }
+QScrollBar::handle:horizontal { background: #262b3a; border-radius: 5px; min-width: 30px; }
+QScrollBar:vertical { width: 10px; background: #0b0d13; }
+QScrollBar::handle:vertical { background: #262b3a; border-radius: 5px; min-height: 30px; }
+QStatusBar { background: #0a0c11; color: #8a91a3; border-top: 1px solid #1e2230; }

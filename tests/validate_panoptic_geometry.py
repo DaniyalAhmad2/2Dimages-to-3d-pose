@@ -115,7 +115,7 @@ def main():
         for a, b in BONES:
             d = np.linalg.norm(seq[:, int(b)] - seq[:, int(a)], axis=1)
             stds.append(np.nanstd(d))
-        return np.mean(stds)
+        return np.nanmean(stds)   # skip bones with no data (e.g. feet in GT)
 
     print("\n=== [C] Bone-length fit + smoothing (5px noise) ===")
     print(f"  raw bone-length jitter (std):    {bone_len_std(raw_seq)*10:.1f} mm")
