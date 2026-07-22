@@ -21,7 +21,7 @@ from pose3d.detect.base import Detection, KeypointDetector
 
 class RTMPoseDetector(KeypointDetector):
     def __init__(self, mode: str = "balanced", device: str = "cpu",
-                 backend: str = "onnxruntime", feet: bool = True,
+                 backend: str = "onnxruntime", feet: bool = False,
                  kpt_thr: float = 0.2):
         self.feet = feet
         self.kpt_thr = kpt_thr           # below this -> treated as not detected

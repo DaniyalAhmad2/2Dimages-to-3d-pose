@@ -59,9 +59,9 @@ def default_two_cam(baseline_deg=80.0, radius=3.0, height=1.0):
 
 
 def sample_skeleton_3d():
-    """A plausible standing pose in canonical Joint order (17 joints), metres.
+    """A plausible standing pose in canonical Joint order (15 joints), metres.
 
-    Order matches pose3d.core.skeleton.Joint (incl. feet).
+    Order matches pose3d.core.skeleton.Joint.
     """
     return np.array([
         [0.00, 0.00, 1.70],   # HEAD
@@ -79,6 +79,4 @@ def sample_skeleton_3d():
         [0.11, 0.02, 0.52],   # RIGHT_KNEE
         [-0.12, 0.03, 0.08],  # LEFT_ANKLE
         [0.12, 0.03, 0.08],   # RIGHT_ANKLE
-        [-0.12, 0.18, 0.03],  # LEFT_FOOT (toe, forward +y)
-        [0.12, 0.18, 0.03],   # RIGHT_FOOT
     ], dtype=float)

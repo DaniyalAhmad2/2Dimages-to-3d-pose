@@ -32,25 +32,24 @@ COCO17_INDEX: dict[str, int] = {n: i for i, n in enumerate(COCO17_NAMES)}
 class Joint(IntEnum):
     """Canonical joint set used everywhere downstream of detection.
 
-    Feet (indices 15, 16) are appended so existing joint indices are unchanged.
+    COCO-17 based; feet are intentionally excluded (they are unreliable when
+    the subject's feet are near/outside the frame).
     """
-    HEAD = 0          # nose (COCO) or native head (Halpe26)
-    NECK = 1          # derived midpoint(shoulders) (COCO) or native (Halpe26)
+    HEAD = 0          # nose
+    NECK = 1          # derived: midpoint(shoulders)
     LEFT_SHOULDER = 2
     RIGHT_SHOULDER = 3
     LEFT_ELBOW = 4
     RIGHT_ELBOW = 5
     LEFT_WRIST = 6
     RIGHT_WRIST = 7
-    PELVIS = 8        # derived midpoint(hips) (COCO) or native (Halpe26)
+    PELVIS = 8        # derived: midpoint(hips)
     LEFT_HIP = 9
     RIGHT_HIP = 10
     LEFT_KNEE = 11
     RIGHT_KNEE = 12
     LEFT_ANKLE = 13
     RIGHT_ANKLE = 14
-    LEFT_FOOT = 15    # Halpe26 left big toe (NaN if the model has no feet)
-    RIGHT_FOOT = 16   # Halpe26 right big toe
 
 
 NUM_JOINTS = len(Joint)
@@ -73,8 +72,6 @@ BONES: list[tuple[Joint, Joint]] = [
     (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     (Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
     (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
-    (Joint.LEFT_ANKLE, Joint.LEFT_FOOT),
-    (Joint.RIGHT_ANKLE, Joint.RIGHT_FOOT),
 ]
 
 # Direct COCO-17 index for each canonical joint that maps 1:1 (derived = None).
@@ -113,8 +110,6 @@ MIXAMO_BONE: dict[Joint, str] = {
     Joint.RIGHT_KNEE: "mixamorig:RightLeg",
     Joint.LEFT_ANKLE: "mixamorig:LeftFoot",
     Joint.RIGHT_ANKLE: "mixamorig:RightFoot",
-    Joint.LEFT_FOOT: "mixamorig:LeftToeBase",
-    Joint.RIGHT_FOOT: "mixamorig:RightToeBase",
 }
 
 
@@ -176,8 +171,7 @@ HALPE26_TO_CANONICAL: dict[int, Joint] = {
     14: Joint.RIGHT_KNEE,
     15: Joint.LEFT_ANKLE,
     16: Joint.RIGHT_ANKLE,
-    20: Joint.LEFT_FOOT,      # left big toe
-    21: Joint.RIGHT_FOOT,     # right big toe
+    # feet (Halpe indices 20/21) intentionally excluded
 }
 
 

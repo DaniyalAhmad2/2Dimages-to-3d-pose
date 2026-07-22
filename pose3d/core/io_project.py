@@ -35,6 +35,8 @@ def _arr_to_json(a: np.ndarray) -> list:
 def _json_to_arr(data: list, cols: int) -> np.ndarray:
     out = np.full((NUM_JOINTS, cols), np.nan, dtype=float)
     for i, row in enumerate(data):
+        if i >= NUM_JOINTS:      # tolerate files saved with more joints (e.g. feet)
+            break
         for j, v in enumerate(row):
             out[i, j] = np.nan if v is None else float(v)
     return out
@@ -47,6 +49,8 @@ def _vec_to_json(a: np.ndarray) -> list:
 def _json_to_vec(data: list) -> np.ndarray:
     out = np.full((NUM_JOINTS,), np.nan, dtype=float)
     for i, v in enumerate(data):
+        if i >= NUM_JOINTS:
+            break
         out[i] = np.nan if v is None else float(v)
     return out
 
@@ -89,7 +93,7 @@ def load_project(folder: str | Path) -> ProjectData:
         for c in CAMERAS:
             fr.kp2d[c] = _json_to_arr(fd["kp2d"][c], 2)
             fr.scores[c] = _json_to_vec(fd["scores"][c])
-            fr.corrected[c] = np.array(fd["corrected"][c], dtype=bool)
+            fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
         fr.pose3d = _json_to_arr(fd["pose3d"], 3)
         fr.fitted3d = _json_to_arr(fd["fitted3d"], 3)
         frames.append(fr)
