@@ -3,8 +3,9 @@
 Usage:
     python -m pose3d.app [PROJECT_FOLDER]
 
-Loads a project (or a demo if none given), builds the dashboard, runs the Qt
-event loop. Calibration is loaded from <project>/calibration if present.
+Loads a project (or an empty session), builds the dashboard, runs the Qt event
+loop. The Import wizard (top-bar button) creates a new project from uploaded
+images + calibration and opens it in a fresh window.
 """
 from __future__ import annotations
 
@@ -13,7 +14,8 @@ from pathlib import Path
 
 from PySide6.QtWidgets import QApplication
 
-_QSS = Path(__file__).with_name("ui") / "dark.qss"
+# keep window references so they are not garbage-collected
+_WINDOWS: list = []
 
 
 def load_stylesheet(app: QApplication) -> None:
@@ -53,15 +55,21 @@ def _load_rig(calib_dir: Path):
         return None
 
 
+def open_project_window(project_folder: str | None):
+    """Build a model + MainWindow for a project folder and show it."""
+    from pose3d.ui.main_window import MainWindow
+    model = build_model(project_folder)
+    win = MainWindow(model, open_callback=open_project_window)
+    _WINDOWS.append(win)
+    win.show()
+    return win
+
+
 def main():
     folder = sys.argv[1] if len(sys.argv) > 1 else None
     app = QApplication(sys.argv)
     load_stylesheet(app)
-    model = build_model(folder)
-
-    from pose3d.ui.main_window import MainWindow
-    win = MainWindow(model)
-    win.show()
+    open_project_window(folder)
     sys.exit(app.exec())
 
 

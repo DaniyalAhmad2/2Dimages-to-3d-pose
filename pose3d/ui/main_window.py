@@ -25,10 +25,12 @@ from pose3d.ui.view3d import View3D
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, model: ProjectModel, load_image=None, detector=None):
+    def __init__(self, model: ProjectModel, load_image=None, detector=None,
+                 open_callback=None):
         super().__init__()
         self.model = model
         self.detector = detector
+        self.open_callback = open_callback   # open_project_window(folder)
         if load_image is None:
             import cv2
             load_image = lambda p: cv2.imread(p)
@@ -97,6 +99,9 @@ class MainWindow(QMainWindow):
         self.saved_label = QLabel("✓ Project Saved"); self.saved_label.setObjectName("savedLabel")
         lay.addWidget(self.saved_label)
         lay.addStretch(1)
+        self.btn_import = QPushButton("⬆  Import Images")
+        self.btn_export = QPushButton("⬇  Export Results")
+        lay.addWidget(self.btn_import); lay.addWidget(self.btn_export)
         for t in ("⚙ Settings", "? Help"):
             b = QToolButton(); b.setText(t); b.setObjectName("topTool")
             lay.addWidget(b)
@@ -170,6 +175,8 @@ class MainWindow(QMainWindow):
         self.btn_full.clicked.connect(self._toggle_fullscreen)
         self.proj_combo.currentTextChanged.connect(self.view3d.set_projection)
 
+        self.btn_import.clicked.connect(self._on_import)
+        self.btn_export.clicked.connect(self._on_export)
         self.sidebar.runDetection.connect(self._on_run_detection)
         self.sidebar.recalibrate.connect(self._on_recalibrate)
         self.sidebar.showJointsToggled.connect(self.cam_left.view.set_show_joints)
@@ -232,6 +239,46 @@ class MainWindow(QMainWindow):
     def _on_recalibrate(self):
         self.model.recompute_all()
         self._refresh_views(); self._refresh_timeline_status()
+
+    def _on_import(self):
+        from pose3d.ui.import_dialog import ImportDialog
+        dlg = ImportDialog(self)
+        if dlg.exec() and dlg.result_folder:
+            if self.open_callback is not None:
+                self.open_callback(dlg.result_folder)   # opens a fresh window
+                self.close()
+            else:
+                self.statusBar().showMessage(
+                    f"Imported to {dlg.result_folder}", 8000)
+
+    def _on_export(self):
+        from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+        import numpy as np
+        frames = self.model.project.frames
+        if not frames or all(np.isnan(f.fitted3d).all() for f in frames):
+            QMessageBox.warning(self, "Nothing to export",
+                                "No 3D pose to export. Import/calibrate first.")
+            return
+        out = QFileDialog.getExistingDirectory(self, "Export results to folder")
+        if not out:
+            return
+        poses = np.stack([f.fitted3d for f in frames]) / 100.0  # cm/units -> m*
+        from pose3d.export.blender_export import export_animation
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        self.statusBar().showMessage("Exporting BVH/FBX/mp4 via Blender…")
+        QApplication.processEvents()
+        try:
+            res = export_animation(poses, out, name=self.model.project.name,
+                                   fps=self.model.project.fps, render_video=True)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if res.ok:
+            QMessageBox.information(
+                self, "Export complete",
+                f"Wrote:\n{res.bvh}\n{res.fbx}\n{res.mp4}")
+        else:
+            QMessageBox.critical(self, "Export failed",
+                                 (res.stderr or "")[-1500:])
 
     def _toggle_fullscreen(self):
         """Pop the 3D view out into a large maximized window (Esc to return)."""

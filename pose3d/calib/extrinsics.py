@@ -69,6 +69,29 @@ def detect_markers(image: np.ndarray, detector=None):
     return corners, ids_flat
 
 
+def estimate_extrinsics_for_marker(
+    corners, ids, target_id: int, intr: Intrinsics, marker_length: float,
+) -> Extrinsics | None:
+    """Estimate world->camera pose using ONE specific marker as the world frame.
+
+    Both cameras calling this with the SAME target_id end up in a shared
+    coordinate system (that marker's frame). Returns None if target_id is not
+    among the detected ids or solvePnP fails.
+    """
+    ids = list(ids)
+    if target_id not in ids:
+        return None
+    idx = ids.index(target_id)
+    obj = marker_object_points(marker_length)
+    img_pts = corners[idx].reshape(4, 2).astype(np.float32)
+    ok, rvec, tvec = cv2.solvePnP(
+        obj, img_pts, intr.K, intr.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    if not ok:
+        return None
+    R, _ = cv2.Rodrigues(rvec)
+    return Extrinsics(R=R, t=tvec.ravel())
+
+
 def estimate_extrinsics(
     image: np.ndarray,
     intr: Intrinsics,
