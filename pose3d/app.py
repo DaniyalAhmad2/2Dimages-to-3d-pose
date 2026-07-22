@@ -30,10 +30,9 @@ def build_model(project_folder: str | None):
     if project_folder and Path(project_folder).exists():
         project = load_project(project_folder)
         rig = _load_rig(Path(project_folder) / "calibration")
-    else:
-        project = ProjectData(name="No project loaded")
-        rig = None
-    return ProjectModel(project, rig)
+        return ProjectModel(project, rig, project_dir=project_folder)
+    project = ProjectData(name="No project loaded")
+    return ProjectModel(project, None)
 
 
 def _load_rig(calib_dir: Path):

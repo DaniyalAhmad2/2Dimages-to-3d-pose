@@ -85,3 +85,40 @@ def test_main_window_builds(qapp):
     assert win.model is model
     # timeline populated with all frames
     assert win.timeline._model.rowCount() == 3
+
+
+def test_buttons_are_wired(qapp, tmp_path):
+    """Every dashboard button must do something, not silently no-op."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    msgs = []
+    model.statusMessage.connect(lambda m: msgs.append(m))
+    win = MainWindow(model)
+
+    # Recalibrate 3D recomputes (was previously unconnected)
+    win.sidebar.recalibrate.emit()
+    assert any("Recalculated" in m for m in msgs)
+
+    # Save writes the project folder (was previously print-only)
+    win.btn_save.click()
+    assert (tmp_path / "project.json").exists()
+
+    # Auto Recalculate toggles the model flag
+    win.btn_auto.setChecked(False)
+    assert model.auto_recalc is False
+
+    # Show Joints toggles overlay visibility
+    before = win.cam_left._show_joints
+    win.sidebar.cb_joints.setChecked(not before)
+    assert win.cam_left._show_joints != before
+
+    # Undo starts disabled, enables after an edit, and reverts it
+    assert not win.btn_undo.isEnabled()
+    model.set_frame(0)
+    pl = model.frame().kp2d[CAM_LEFT][6]
+    model.set_joint_2d(CAM_LEFT, 6, float(pl[0] + 25), float(pl[1]))
+    assert win.btn_undo.isEnabled()
+    win.btn_undo.click()
+    assert not model.frame().corrected[CAM_LEFT][6]

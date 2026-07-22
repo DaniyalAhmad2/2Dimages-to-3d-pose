@@ -20,12 +20,18 @@ from pose3d.ui.view3d import View3D
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, model: ProjectModel, load_image=None):
+    def __init__(self, model: ProjectModel, load_image=None, detector=None):
         super().__init__()
         self.model = model
-        self.load_image = load_image or (lambda p: p)
+        self.detector = detector
+        # default image loader reads a path -> BGR ndarray for detection
+        if load_image is None:
+            import cv2
+            load_image = lambda p: cv2.imread(p)
+        self.load_image = load_image
         self.setWindowTitle("Pose3D — Animation Dashboard")
         self.resize(1500, 900)
+        self.statusBar().showMessage("Ready")
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -102,14 +108,57 @@ class MainWindow(QMainWindow):
 
         self.btn_undo.clicked.connect(self.model.undo)
         self.btn_redo.clicked.connect(self.model.redo)
-        self.btn_save.clicked.connect(self._save)
-        self.btn_auto.toggled.connect(
-            lambda on: setattr(self.model, "auto_recalc", on))
+        self.btn_save.clicked.connect(self.model.save)
+        self.btn_auto.toggled.connect(self._on_auto_toggled)
+
+        # previously-dead buttons, now wired
+        self.sidebar.runDetection.connect(self._on_run_detection)
+        self.sidebar.recalibrate.connect(self._on_recalibrate)
 
         self.sidebar.showJointsToggled.connect(self.cam_left.set_show_joints)
         self.sidebar.showJointsToggled.connect(self.cam_right.set_show_joints)
         self.sidebar.showBonesToggled.connect(self.cam_left.set_show_bones)
         self.sidebar.showBonesToggled.connect(self.cam_right.set_show_bones)
+
+        # status feedback so every action is visible
+        self.model.statusMessage.connect(
+            lambda msg: self.statusBar().showMessage(msg, 6000))
+
+    def _on_auto_toggled(self, on: bool):
+        self.model.auto_recalc = on
+        self.statusBar().showMessage(
+            f"Auto Recalculate 3D {'ON' if on else 'OFF'}", 4000)
+
+    def _ensure_detector(self):
+        from PySide6.QtWidgets import QApplication
+        if self.detector is None:
+            try:
+                from pose3d.detect.rtmpose import RTMPoseDetector
+                self.statusBar().showMessage("Loading RTMPose model…")
+                QApplication.processEvents()
+                self.detector = RTMPoseDetector(mode="balanced", device="cpu")
+            except Exception as e:      # rtmlib/models missing or offline
+                self.statusBar().showMessage(f"Detector unavailable: {e}", 8000)
+        return self.detector
+
+    def _on_run_detection(self):
+        from PySide6.QtWidgets import QApplication
+        detector = self._ensure_detector()
+        if detector is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        try:
+            self.model.redetect_all(detector, self.load_image)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._refresh_views()
+        self._refresh_timeline_status()
+
+    def _on_recalibrate(self):
+        self.model.recompute_all()
+        self._refresh_views()
+        self._refresh_timeline_status()
 
     def _on_drag(self, cam: str, joint: int, pos):
         self.model.set_joint_2d(cam, joint, pos.x(), pos.y())
@@ -124,12 +173,27 @@ class MainWindow(QMainWindow):
         for cam, view in ((CAM_LEFT, self.cam_left), (CAM_RIGHT, self.cam_right)):
             path = f.images.get(cam)
             if path:
-                view.set_image(self.load_image(path) if False else path)
+                view.set_image(path)      # CameraView loads the QPixmap
             view.set_pose(f.kp2d[cam], f.scores[cam], f.corrected[cam])
 
     def _refresh_history(self):
         self.btn_undo.setEnabled(self.model.stack.can_undo())
         self.btn_redo.setEnabled(self.model.stack.can_redo())
+
+    def _refresh_timeline_status(self):
+        """Colour each filmstrip frame by its worst per-joint reprojection error."""
+        for i in range(len(self.model.project.frames)):
+            errs = self.model._accuracy(i)
+            worst = float(np.nanmax(errs)) if not np.all(np.isnan(errs)) else None
+            if worst is None:
+                status = "red"
+            elif worst < 5:
+                status = "green"
+            elif worst < 12:
+                status = "amber"
+            else:
+                status = "red"
+            self.timeline.set_status(i, status)
 
     def _load_model(self):
         p = self.model.project
@@ -143,10 +207,5 @@ class MainWindow(QMainWindow):
         if p.frames:
             self.model.set_frame(0)
             self.timeline.select(0)
-
-    def _save(self):
-        from pose3d.core.io_project import save_project
-        # persist corrections into project + folder if known
-        self.model.project.corrections = list(self.model.stack.log)
-        # UI-level save target chosen elsewhere; here just emit to log
-        print(f"Saved {len(self.model.project.corrections)} corrections")
+            self._refresh_timeline_status()
+        self._refresh_history()          # start with Undo/Redo disabled

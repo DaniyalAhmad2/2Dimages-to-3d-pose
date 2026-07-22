@@ -27,14 +27,55 @@ class ProjectModel(QObject):
     accuracyChanged = Signal(object)           # (NUM_JOINTS,) reproj error px
     historyChanged = Signal()                  # undo/redo availability
 
-    def __init__(self, project: ProjectData, rig: CalibratedRig | None = None):
+    statusMessage = Signal(str)                # user-facing status text
+
+    def __init__(self, project: ProjectData, rig: CalibratedRig | None = None,
+                 project_dir=None):
         super().__init__()
         self.project = project
         self.rig = rig
+        self.project_dir = project_dir
         self.current = 0
         self.auto_recalc = True
         self.stack = CorrectionStack({f.frame_id: f for f in project.frames})
         self._bone_lengths = None
+
+    # --- whole-project recompute / detection / save ---
+    def recompute_all(self) -> None:
+        """Re-triangulate + re-fit every frame from the current 2D points."""
+        if self.rig is None:
+            self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
+            return
+        from pose3d.pipeline import fit_project, triangulate_project
+        triangulate_project(self.project, self.rig)
+        self._bone_lengths = None
+        fit_project(self.project, smooth=True)
+        self.set_frame(self.current)
+        self.statusMessage.emit(
+            f"Recalculated 3D for {len(self.project.frames)} frames")
+
+    def redetect_all(self, detector, load_image) -> None:
+        """Re-run the detector on every frame, then recompute 3D."""
+        if detector is None:
+            self.statusMessage.emit("No detector available in this build")
+            return
+        from pose3d.pipeline import detect_project
+        self.statusMessage.emit("Running detection…")
+        detect_project(self.project, detector, load_image)
+        self.recompute_all()
+        self.statusMessage.emit(
+            f"Detection complete ({len(self.project.frames)} frames)")
+
+    def save(self) -> None:
+        from pose3d.core.io_project import save_project
+        self.project.corrections = list(self.stack.log)
+        if not self.project_dir:
+            self.statusMessage.emit("No project folder set — use Save As")
+            return
+        save_project(self.project, self.project_dir)
+        self.statusMessage.emit(
+            f"Saved {len(self.project.corrections)} corrections to "
+            f"{self.project_dir}")
 
     # --- navigation ---
     def set_frame(self, idx: int) -> None:
