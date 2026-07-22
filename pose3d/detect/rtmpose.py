@@ -21,8 +21,10 @@ from pose3d.detect.base import Detection, KeypointDetector
 
 class RTMPoseDetector(KeypointDetector):
     def __init__(self, mode: str = "balanced", device: str = "cpu",
-                 backend: str = "onnxruntime", feet: bool = True):
+                 backend: str = "onnxruntime", feet: bool = True,
+                 kpt_thr: float = 0.2):
         self.feet = feet
+        self.kpt_thr = kpt_thr           # below this -> treated as not detected
         if feet:
             from rtmlib import BodyWithFeet
             self._model = BodyWithFeet(mode=mode, backend=backend, device=device)
@@ -42,6 +44,17 @@ class RTMPoseDetector(KeypointDetector):
             return _empty_detection()
         best = int(np.argmax(scores.mean(axis=1)))   # most confident person
         cxy, cscore = self._map(keypoints[best], scores[best])
+
+        # Reject unreliable keypoints so they are not drawn as phantom points
+        # or fed into triangulation: (a) below the confidence threshold, or
+        # (b) extrapolated OUTSIDE the image (e.g. feet below a cropped frame).
+        h, w = image_bgr.shape[:2]
+        bad = (
+            (cscore < self.kpt_thr)
+            | (cxy[:, 0] < 0) | (cxy[:, 0] >= w)
+            | (cxy[:, 1] < 0) | (cxy[:, 1] >= h)
+        )
+        cxy[bad] = np.nan                # missing -> not drawn, not triangulated
         return Detection(xy=cxy, scores=cscore)
 
 

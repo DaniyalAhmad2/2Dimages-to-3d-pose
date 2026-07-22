@@ -145,4 +145,7 @@ class ProjectModel(QObject):
         for cam in CAMERAS:
             errs.append(reprojection_error(
                 f.pose3d, f.kp2d[cam], self.rig.intr[cam], self.rig.ext[cam]))
-        return np.nanmean(np.stack(errs), axis=0)
+        import warnings
+        with warnings.catch_warnings():   # all-NaN joint -> quiet nanmean
+            warnings.simplefilter("ignore", RuntimeWarning)
+            return np.nanmean(np.stack(errs), axis=0)
