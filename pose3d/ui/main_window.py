@@ -9,8 +9,8 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QToolButton,
-    QVBoxLayout, QWidget,
+    QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter,
+    QToolButton, QVBoxLayout, QWidget,
 )
 
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
@@ -59,9 +59,16 @@ class MainWindow(QMainWindow):
         cams.addWidget(self._panel(self.cam_right), 1)
         centre_lay.addLayout(cams, 1)
         centre_lay.addWidget(self._build_action_row())
-        mid_lay.addWidget(centre, 6)
 
-        mid_lay.addWidget(self._build_right_column(), 3)
+        # cameras | right column are drag-resizable (grab the divider to
+        # widen the 3D panel); the right column is itself a vertical splitter.
+        self._hsplit = QSplitter(Qt.Orientation.Horizontal)
+        self._hsplit.addWidget(centre)
+        self._hsplit.addWidget(self._build_right_column())
+        self._hsplit.setStretchFactor(0, 3)
+        self._hsplit.setStretchFactor(1, 2)
+        self._hsplit.setSizes([820, 500])
+        mid_lay.addWidget(self._hsplit, 1)
         root.addWidget(mid, 1)
 
         # timeline area with header + legend
@@ -110,10 +117,10 @@ class MainWindow(QMainWindow):
         return row
 
     def _build_right_column(self):
-        col = QWidget(); col.setFixedWidth(340)
-        lay = QVBoxLayout(col); lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(6)
+        col = QSplitter(Qt.Orientation.Vertical)
+        col.setMinimumWidth(300)
 
-        # 3D preview card with header
+        # 3D preview card with header (drag the splitter handles to resize)
         card = QWidget(); card.setObjectName("cardPanel")
         cl = QVBoxLayout(card); cl.setContentsMargins(8, 8, 8, 8)
         head = QHBoxLayout()
@@ -121,19 +128,24 @@ class MainWindow(QMainWindow):
         head.addStretch(1)
         self.proj_combo = QComboBox(); self.proj_combo.addItems(["Perspective", "Orthographic"])
         head.addWidget(self.proj_combo)
-        self.btn_full = QToolButton(); self.btn_full.setText("⤢"); self.btn_full.setObjectName("camTool")
+        self.btn_full = QToolButton(); self.btn_full.setText("⤢")
+        self.btn_full.setObjectName("camTool"); self.btn_full.setToolTip("Pop out 3D view")
         head.addWidget(self.btn_full)
         cl.addLayout(head)
         self.view3d = View3D()
+        self.view3d.setMinimumHeight(220)
         cl.addWidget(self.view3d, 1)
-        lay.addWidget(card, 4)
+        self._view3d_cardlayout = cl        # for pop-out restore
+        self._fs_win = None
 
         self.pose_acc = PoseAccuracyPanel(); self.pose_acc.setObjectName("cardPanel")
-        lay.addWidget(self.pose_acc, 3)
         self.accuracy = JointAccuracyList(); self.accuracy.setObjectName("cardPanel")
-        lay.addWidget(self.accuracy, 4)
         self.selected = SelectedJointPanel(); self.selected.setObjectName("cardPanel")
-        lay.addWidget(self.selected, 2)
+
+        for w in (card, self.pose_acc, self.accuracy, self.selected):
+            col.addWidget(w)
+        col.setCollapsible(0, False)
+        col.setSizes([460, 190, 240, 130])   # 3D gets the most room by default
         return col
 
     # --- wiring ---
@@ -222,7 +234,28 @@ class MainWindow(QMainWindow):
         self._refresh_views(); self._refresh_timeline_status()
 
     def _toggle_fullscreen(self):
-        self.showNormal() if self.isFullScreen() else self.showFullScreen()
+        """Pop the 3D view out into a large maximized window (Esc to return)."""
+        if self._fs_win is not None:
+            self._restore_3d()
+            return
+        fs = QWidget()
+        fs.setWindowTitle("3D Preview — press Esc to return")
+        v = QVBoxLayout(fs); v.setContentsMargins(0, 0, 0, 0)
+        v.addWidget(self.view3d)                 # reparents the GL view
+        fs.keyPressEvent = lambda e: (
+            self._restore_3d() if e.key() == Qt.Key.Key_Escape else None)
+        fs.closeEvent = lambda e: (self._restore_3d(), e.accept())
+        self._fs_win = fs
+        fs.showMaximized()
+
+    def _restore_3d(self):
+        """Put the popped-out 3D view back into its card (idempotent)."""
+        if self._fs_win is None:
+            return
+        win, self._fs_win = self._fs_win, None
+        self._view3d_cardlayout.addWidget(self.view3d)   # reparents back
+        win.hide()
+        win.deleteLater()
 
     # --- refresh ---
     def _on_frame_changed(self, idx):
