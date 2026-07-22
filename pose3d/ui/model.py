@@ -126,7 +126,8 @@ class ProjectModel(QObject):
         # re-fit this frame to keep bone lengths consistent
         if self._bone_lengths is None:
             self._compute_bone_lengths()
-        f.fitted3d = fit_bone_lengths(f.pose3d, self._bone_lengths)
+        f.fitted3d = fit_bone_lengths(f.pose3d, self._bone_lengths,
+                                      fill_missing=False)
         self.pose3dChanged.emit(f.fitted3d)
         self.accuracyChanged.emit(self._accuracy(self.current))
 

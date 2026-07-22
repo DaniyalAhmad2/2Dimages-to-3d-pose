@@ -35,9 +35,19 @@ def test_fit_fills_occluded_joint():
     target = measure_bone_lengths(gt[None])
     raw = gt.copy()
     raw[6] = np.nan   # LEFT_WRIST occluded in 3D
-    fitted = fit_bone_lengths(raw, target)
+    fitted = fit_bone_lengths(raw, target, fill_missing=True)
     assert not np.isnan(fitted[6]).any()   # placed, not dropped
     assert fitted.shape == (NUM_JOINTS, 3)
+
+
+def test_fit_no_fill_leaves_missing_joint_nan():
+    gt = sample_skeleton_3d()
+    target = measure_bone_lengths(gt[None])
+    raw = gt.copy()
+    raw[6] = np.nan   # dropped observation
+    fitted = fit_bone_lengths(raw, target, fill_missing=False)
+    assert np.isnan(fitted[6]).all()       # not invented
+    assert not np.isnan(fitted[5]).any()   # observed joints still fitted
 
 
 def test_smoothing_reduces_variance():

@@ -61,6 +61,48 @@ def triangulate_one(
     return xyz[0]
 
 
+def fundamental_matrix(intr_left, intr_right, ext_left, ext_right) -> np.ndarray:
+    """Fundamental matrix F such that x_R^T F x_L = 0 for undistorted pixels.
+
+    Built from the two cameras' calibration (world->camera R,t + K).
+    """
+    R_rel = ext_right.R @ ext_left.R.T
+    t_rel = ext_right.t.reshape(3) - R_rel @ ext_left.t.reshape(3)
+    tx = np.array([[0, -t_rel[2], t_rel[1]],
+                   [t_rel[2], 0, -t_rel[0]],
+                   [-t_rel[1], t_rel[0], 0]], dtype=float)
+    E = tx @ R_rel
+    F = np.linalg.inv(intr_right.K).T @ E @ np.linalg.inv(intr_left.K)
+    return F
+
+
+def epipolar_distance(pt_left, pt_right, intr_left, intr_right,
+                      ext_left, ext_right) -> float:
+    """Symmetric epipolar (Sampson) distance in px between matched observations.
+
+    Points are undistorted to pixel coords first, then checked against F.
+    Large distance => the two views cannot be seeing the same 3D point
+    (e.g. one view hallucinated an occluded joint).
+    """
+    pt_left = np.asarray(pt_left, float).reshape(2)
+    pt_right = np.asarray(pt_right, float).reshape(2)
+    if np.isnan(pt_left).any() or np.isnan(pt_right).any():
+        return float("nan")
+    # undistort to pixel coords (P = K)
+    ul = cv2.undistortPoints(pt_left.reshape(1, 1, 2), intr_left.K,
+                             intr_left.dist, P=intr_left.K).reshape(2)
+    ur = cv2.undistortPoints(pt_right.reshape(1, 1, 2), intr_right.K,
+                             intr_right.dist, P=intr_right.K).reshape(2)
+    F = fundamental_matrix(intr_left, intr_right, ext_left, ext_right)
+    xl = np.array([ul[0], ul[1], 1.0])
+    xr = np.array([ur[0], ur[1], 1.0])
+    Fxl = F @ xl
+    Ftxr = F.T @ xr
+    num = float(xr @ Fxl) ** 2
+    den = Fxl[0] ** 2 + Fxl[1] ** 2 + Ftxr[0] ** 2 + Ftxr[1] ** 2
+    return float(np.sqrt(num / den)) if den > 1e-12 else float("nan")
+
+
 def reprojection_error(
     xyz: np.ndarray, pts_pixel: np.ndarray,
     intr: Intrinsics, ext: Extrinsics,

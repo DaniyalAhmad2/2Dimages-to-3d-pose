@@ -17,7 +17,7 @@ from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
     smooth_temporal,
 )
-from pose3d.geometry.triangulate import triangulate_points
+from pose3d.geometry.triangulate import epipolar_distance, triangulate_points
 
 
 class CalibratedRig:
@@ -43,8 +43,56 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             frame.scores[cam] = det.scores
 
 
-def triangulate_project(project: ProjectData, rig: CalibratedRig) -> None:
-    """Fill each frame's raw pose3d from its two 2D views."""
+def validate_cross_view(project: ProjectData, rig: CalibratedRig,
+                        epi_thr: float = 30.0) -> int:
+    """Drop 2D observations that are geometrically inconsistent across views.
+
+    When a joint is occluded/out-of-frame in one camera, the detector often
+    hallucinates it (e.g. an ankle collapsed onto the knee). Such a point can
+    never correspond to the same 3D location the other camera sees, so its
+    epipolar distance is large. For every joint present in BOTH views, if the
+    epipolar distance exceeds `epi_thr` px, the observation in the LOWER-
+    confidence view is dropped (set to NaN) — so it is neither drawn nor
+    triangulated (the 3D point then drops out too, since a joint needs both
+    views). User-corrected joints are trusted and never auto-dropped.
+
+    Returns the number of observations dropped.
+    """
+    dropped = 0
+    for frame in project.frames:
+        for j in range(NUM_JOINTS):
+            pl = frame.kp2d[CAM_LEFT][j]
+            pr = frame.kp2d[CAM_RIGHT][j]
+            if np.isnan(pl).any() or np.isnan(pr).any():
+                continue
+            e = epipolar_distance(pl, pr, rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                                  rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+            if np.isnan(e) or e <= epi_thr:
+                continue
+            sl = frame.scores[CAM_LEFT][j]
+            sr = frame.scores[CAM_RIGHT][j]
+            # drop the worse (lower-confidence) view, unless it was hand-corrected
+            drop_left = np.nan_to_num(sl) <= np.nan_to_num(sr)
+            cam = CAM_LEFT if drop_left else CAM_RIGHT
+            if frame.corrected[cam][j]:
+                cam = CAM_RIGHT if drop_left else CAM_LEFT  # try the other view
+                if frame.corrected[cam][j]:
+                    continue                                 # both corrected: keep
+            frame.kp2d[cam][j] = np.nan
+            frame.scores[cam][j] = 0.0
+            dropped += 1
+    return dropped
+
+
+def triangulate_project(project: ProjectData, rig: CalibratedRig,
+                        validate: bool = True) -> None:
+    """Fill each frame's raw pose3d from its two 2D views.
+
+    By default first drops cross-view-inconsistent observations (occlusion
+    hallucinations) so they don't corrupt the 3D pose.
+    """
+    if validate:
+        validate_cross_view(project, rig)
     for frame in project.frames:
         frame.pose3d = triangulate_points(
             frame.kp2d[CAM_LEFT], frame.kp2d[CAM_RIGHT],
@@ -64,8 +112,8 @@ def fit_project(project: ProjectData, bone_lengths=None,
         bone_lengths = {k: (v if v > 1e-6 else fb[k]) for k, v in measured.items()}
 
     fitted = np.stack([
-        fit_bone_lengths(f.pose3d, bone_lengths) for f in project.frames]) \
-        if project.frames else raw
+        fit_bone_lengths(f.pose3d, bone_lengths, fill_missing=False)
+        for f in project.frames]) if project.frames else raw
     if smooth and len(fitted) > 1:
         fitted = smooth_temporal(fitted, alpha=alpha)
     for f, pose in zip(project.frames, fitted):

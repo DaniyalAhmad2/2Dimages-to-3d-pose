@@ -59,6 +59,7 @@ def fit_bone_lengths(
     bone_lengths: dict[tuple[int, int], float],
     data_weight: float = 1.0,
     bone_weight: float = 5.0,
+    fill_missing: bool = True,
 ) -> np.ndarray:
     """Fit one frame's joints to fixed bone lengths.
 
@@ -68,9 +69,11 @@ def fit_bone_lengths(
     bone_lengths : target length per (parent, child) bone.
     data_weight : pull toward observed positions.
     bone_weight : enforce bone lengths (higher = stiffer skeleton).
+    fill_missing : if True, occluded joints are placed by the bone constraints;
+        if False, joints with no observation stay NaN (not invented) — used so
+        a joint dropped from both/one view is genuinely absent from the 3D.
 
-    Returns fitted (NUM_JOINTS, 3). Never returns NaN (occluded joints are
-    placed by the bone constraints).
+    Returns fitted (NUM_JOINTS, 3).
     """
     raw3d = np.asarray(raw3d, float).reshape(NUM_JOINTS, 3)
     observed = ~np.isnan(raw3d).any(1)
@@ -102,7 +105,10 @@ def fit_bone_lengths(
         return np.asarray(res)
 
     sol = least_squares(residuals, x0.ravel(), method="lm", max_nfev=200)
-    return sol.x.reshape(NUM_JOINTS, 3)
+    fitted = sol.x.reshape(NUM_JOINTS, 3)
+    if not fill_missing:
+        fitted[~observed] = np.nan     # do not invent un-observed joints
+    return fitted
 
 
 def smooth_temporal(poses3d: np.ndarray, alpha: float = 0.6) -> np.ndarray:
