@@ -109,6 +109,18 @@ def test_resolve_approximates_intrinsics_when_missing(tmp_path):
     assert res.status == "aruco"
 
 
+def test_resolve_autodetects_6x6_on_client_images():
+    """Regression: the client's real tags are DICT_6X6, not the old 4x4 default."""
+    from pathlib import Path
+    a, b = Path("assets/1_10.jpg"), Path("assets/2_10.jpg")
+    if not (a.exists() and b.exists()):
+        pytest.skip("client sample images not present")
+    proj = build_project([a], [b], name="RealAruco")
+    res = resolve_calibration(proj, _loader, marker_length=0.05)
+    assert res.ok, res.message           # must find the shared 6x6 marker (id 14)
+    assert res.status == "aruco"
+
+
 def test_import_calibrate_save_reload(tmp_path):
     """Full import path: build -> ArUco calibrate -> save -> reload with rig."""
     from pose3d.calib.resolve import save_rig

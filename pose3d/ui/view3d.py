@@ -114,7 +114,10 @@ class View3D(gl.GLViewWidget):
                      [Joint.LEFT_KNEE, Joint.RIGHT_KNEE],
                      [Joint.PELVIS],
                      [Joint.LEFT_HIP, Joint.RIGHT_HIP]):
-            cand = np.nanmean(pose3d[[int(i) for i in idxs]], axis=0)
+            pts = pose3d[[int(i) for i in idxs]]
+            if np.isnan(pts).all():          # avoid empty-slice nanmean warning
+                continue
+            cand = np.nanmean(pts, axis=0)
             if not np.isnan(cand).any():
                 ref = cand
                 break

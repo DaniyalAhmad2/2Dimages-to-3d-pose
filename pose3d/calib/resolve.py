@@ -24,6 +24,14 @@ from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
 from pose3d.pipeline import CalibratedRig
 
+# ArUco dictionaries to try, most likely first (the client's tags are 6x6).
+_DICT_NAMES = [
+    "DICT_6X6_250", "DICT_4X4_50", "DICT_5X5_250",
+    "DICT_APRILTAG_36h11", "DICT_ARUCO_ORIGINAL",
+]
+DEFAULT_DICTS = [getattr(cv2.aruco, n) for n in _DICT_NAMES
+                 if hasattr(cv2.aruco, n)]
+
 
 def save_rig(rig: CalibratedRig, calib_dir) -> None:
     """Persist a rig to <calib_dir> in the format app._load_rig expects."""
@@ -75,7 +83,7 @@ def resolve_calibration(
     intr_right: Intrinsics | None = None,
     ext_left: Extrinsics | None = None,
     ext_right: Extrinsics | None = None,
-    dictionary_id: int = cv2.aruco.DICT_4X4_50,
+    dictionaries: list[int] | None = None,
 ) -> CalibrationResult:
     if not project.frames:
         return CalibrationResult(False, None, "failed", "No frames to calibrate.")
@@ -103,26 +111,31 @@ def resolve_calibration(
         return CalibrationResult(True, rig, "uploaded", msg, approximate)
 
     # --- extrinsics from ArUco (find a marker seen by BOTH cameras) ---
-    detector = make_detector(dictionary_id)
+    # The marker dictionary is auto-detected: try each candidate and use the
+    # first that yields a marker common to both views (the client's tags are
+    # 6x6, but this also handles 4x4/5x5/AprilTag boards).
+    dictionaries = dictionaries or DEFAULT_DICTS
+    detectors = [(d, make_detector(d)) for d in dictionaries]
     for frame in project.frames:
         img_l = load_image(frame.images[CAM_LEFT])
         img_r = load_image(frame.images[CAM_RIGHT])
         if img_l is None or img_r is None:
             continue
-        cl, idl = detect_markers(img_l, detector)
-        cr, idr = detect_markers(img_r, detector)
-        common = sorted(set(idl) & set(idr))
-        for tid in common:
-            el = estimate_extrinsics_for_marker(cl, idl, tid, intr_left, marker_length)
-            er = estimate_extrinsics_for_marker(cr, idr, tid, intr_right, marker_length)
-            if el is not None and er is not None:
-                rig = CalibratedRig(intr_left, intr_right, el, er)
-                msg = (f"Calibration estimated from ArUco marker {tid} "
-                       f"(frame {frame.frame_id}).")
-                if approximate:
-                    msg += (" Intrinsics are approximate — upload a one-time "
-                            "calibration for metric accuracy.")
-                return CalibrationResult(True, rig, "aruco", msg, approximate)
+        for dict_id, detector in detectors:
+            cl, idl = detect_markers(img_l, detector)
+            cr, idr = detect_markers(img_r, detector)
+            common = sorted(set(idl) & set(idr))
+            for tid in common:
+                el = estimate_extrinsics_for_marker(cl, idl, tid, intr_left, marker_length)
+                er = estimate_extrinsics_for_marker(cr, idr, tid, intr_right, marker_length)
+                if el is not None and er is not None:
+                    rig = CalibratedRig(intr_left, intr_right, el, er)
+                    msg = (f"Calibration estimated from ArUco marker {tid} "
+                           f"(frame {frame.frame_id}).")
+                    if approximate:
+                        msg += (" Intrinsics are approximate — upload a one-time "
+                                "calibration for metric accuracy.")
+                    return CalibrationResult(True, rig, "aruco", msg, approximate)
 
     return CalibrationResult(
         False, None, "failed",

@@ -67,6 +67,11 @@ def open_project_window(project_folder: str | None):
 
 def main():
     folder = sys.argv[1] if len(sys.argv) > 1 else None
+    # Share one GL context across windows so pyqtgraph's cached shader programs
+    # stay valid when the Import flow opens a second window (otherwise
+    # glUseProgram raises GLError 1281 on the new context).
+    from PySide6.QtCore import QCoreApplication, Qt
+    QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
     load_stylesheet(app)
     open_project_window(folder)
