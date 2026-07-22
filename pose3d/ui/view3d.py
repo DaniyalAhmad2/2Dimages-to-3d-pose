@@ -100,11 +100,26 @@ class View3D(gl.GLViewWidget):
 
     # --- orientation / framing ---
     def _detect_vertical(self, pose3d, valid):
+        """Find the world up-axis from head vs the lowest available body joint.
+
+        Ankles can be dropped (occlusion gating), so fall back through
+        knees -> pelvis -> hips to keep the figure upright.
+        """
+        # "up" reference (head) vs a lower-body reference that is present
         head = pose3d[int(Joint.HEAD)]
-        ankles = pose3d[[int(Joint.LEFT_ANKLE), int(Joint.RIGHT_ANKLE)]]
-        ankle = np.nanmean(ankles, axis=0)
-        if not (np.isnan(head).any() or np.isnan(ankle).any()):
-            diff = head - ankle
+        if np.isnan(head).any():
+            head = np.nanmean(pose3d[[int(Joint.NECK), int(Joint.HEAD)]], axis=0)
+        ref = None
+        for idxs in ([Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE],
+                     [Joint.LEFT_KNEE, Joint.RIGHT_KNEE],
+                     [Joint.PELVIS],
+                     [Joint.LEFT_HIP, Joint.RIGHT_HIP]):
+            cand = np.nanmean(pose3d[[int(i) for i in idxs]], axis=0)
+            if not np.isnan(cand).any():
+                ref = cand
+                break
+        if ref is not None and not np.isnan(head).any():
+            diff = head - ref
             axis = int(np.argmax(np.abs(diff)))
             return axis, float(np.sign(diff[axis]) or 1.0)
         vpts = pose3d[valid]
