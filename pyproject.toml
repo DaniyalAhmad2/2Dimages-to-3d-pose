@@ -1,0 +1,29 @@
+[project]
+name = "pose3d"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "numpy>=2.5.1",
+    "opencv-contrib-python>=4.8",
+    "scipy>=1.18.0",
+    "rtmlib>=0.0.13",
+    "onnxruntime>=1.20",
+    "PySide6>=6.7",
+    "pyqtgraph>=0.13",
+    "PyOpenGL>=3.1",
+    "pillow>=10.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=9.1.1",
+    "pyinstaller>=6.5",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.uv]
+# The system resolver returns unreachable IPv6 for the wheel CDN on this host;
+# run uv/network commands with RES_OPTIONS="no-aaaa" to force IPv4.

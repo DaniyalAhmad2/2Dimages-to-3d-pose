@@ -1,0 +1,30 @@
+QWidget {
+    background: #0f1116;
+    color: #e6e8ee;
+    font-family: "Segoe UI", "DejaVu Sans", sans-serif;
+    font-size: 13px;
+}
+#topbar { background: #0b0d12; border-bottom: 1px solid #232633; }
+#projectTitle { font-size: 14px; font-weight: 600; }
+#sidebar { background: #0b0d12; border-right: 1px solid #232633; }
+#sectionHeader { color: #7f8698; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+#projectName { font-size: 15px; font-weight: 600; }
+#infoText { color: #aeb4c2; }
+#panelTitle { color: #aeb4c2; font-size: 12px; font-weight: 600; letter-spacing: 1px; }
+#accuracyList { background: #0b0d12; border: 1px solid #232633; font-family: monospace; }
+
+QPushButton {
+    background: #1a1d27;
+    border: 1px solid #2b2f3d;
+    border-radius: 6px;
+    padding: 6px 12px;
+}
+QPushButton:hover { background: #232838; }
+QPushButton:checked { background: #4a4fd0; border-color: #6a6ff0; }
+QPushButton:disabled { color: #565c6b; background: #14161d; }
+
+QCheckBox { spacing: 8px; }
+QGraphicsView { background: #14161d; border: 1px solid #232633; }
+QListView { background: #0b0d12; border: 1px solid #232633; }
+QScrollBar:horizontal { height: 10px; background: #0b0d12; }
+QScrollBar::handle:horizontal { background: #2b2f3d; border-radius: 5px; }

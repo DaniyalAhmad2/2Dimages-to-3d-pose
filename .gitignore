@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+
+# Virtual env / build / packaging artifacts
+.venv/
+wheelhouse/
+build/
+dist/
+*.spec.bak
+
+# uv
+uv.lock
+
+# Third-party dataset downloads + derived artifacts (re-downloadable; see
+# README_RUN.md). Small evidence files are force-added below.
+data/hdVideos/
+data/frames/
+data/overlays/
+data/hdPose3d/
+data/hdPose3d.tar
+data/calibration_*.json
+data/demo_project/images/
+data/demo_project/export/*.mp4
+
+# OS
+.DS_Store
