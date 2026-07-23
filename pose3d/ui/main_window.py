@@ -261,11 +261,31 @@ class MainWindow(QMainWindow):
     def _on_export(self):
         from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
         import numpy as np
+        from pose3d.core.skeleton import NUM_JOINTS
         frames = self.model.project.frames
-        if not frames or all(np.isnan(f.fitted3d).all() for f in frames):
-            QMessageBox.warning(self, "Nothing to export",
-                                "No 3D pose to export. Import/calibrate first.")
+        # how many 3D joints actually reconstructed, on average?
+        per_frame = [int((~np.isnan(f.fitted3d).any(1)).sum()) for f in frames]
+        total = sum(per_frame)
+        if not frames or total == 0:
+            QMessageBox.warning(
+                self, "Nothing to export",
+                "No 3D pose was reconstructed, so there is nothing to render.\n\n"
+                "This usually means calibration failed or the two camera views "
+                "disagree on every joint. Import a synced pair with valid "
+                "calibration (or upload intrinsics) and try again.")
             return
+        avg = total / len(frames)
+        if avg < 5:   # too few joints to look like a figure
+            go = QMessageBox.question(
+                self, "Sparse reconstruction",
+                f"Only about {avg:.0f} of {NUM_JOINTS} joints were reconstructed "
+                "per frame, so the video will look almost empty.\n\n"
+                "This is a calibration/data issue — commonly approximate "
+                "intrinsics, or the two views being too different so joints get "
+                "dropped as inconsistent. Export anyway?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+            if go != QMessageBox.StandardButton.Yes:
+                return
         out = QFileDialog.getExistingDirectory(self, "Export results to folder")
         if not out:
             return
