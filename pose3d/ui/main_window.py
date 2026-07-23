@@ -163,7 +163,9 @@ class MainWindow(QMainWindow):
         self.model.frameChanged.connect(self._on_frame_changed)
         self.model.pose3dChanged.connect(self.view3d.set_pose)
         self.model.accuracyChanged.connect(self._on_accuracy)
-        self.model.joint2dChanged.connect(lambda *_: self._refresh_views())
+        # a joint edit repositions overlays only — never reloads the image /
+        # re-fits the view (doing so mid-drag re-enters itemChange -> recursion)
+        self.model.joint2dChanged.connect(lambda *_: self._refresh_overlays())
         self.model.historyChanged.connect(self._refresh_history)
         self.model.statusMessage.connect(
             lambda m: self.statusBar().showMessage(m, 6000))
@@ -310,13 +312,25 @@ class MainWindow(QMainWindow):
         self.view3d.set_pose(self.model.frame().fitted3d)
 
     def _refresh_views(self):
-        f = self.model.frame()
+        """Full refresh: (re)load the frame images AND reposition overlays."""
+        self._load_images()
+        self._refresh_overlays()
+
+    def _load_images(self):
+        """Load the frame's images + filenames. Only on frame change — NOT on a
+        joint edit (reloading + fitInView mid-drag re-enters itemChange)."""
         import os
+        f = self.model.frame()
         for cam, panel in ((CAM_LEFT, self.cam_left), (CAM_RIGHT, self.cam_right)):
             path = f.images.get(cam)
             if path:
                 panel.view.set_image(path)
                 panel.set_filename(os.path.basename(path))
+
+    def _refresh_overlays(self):
+        """Reposition/recolour the joint overlays from the current model state."""
+        f = self.model.frame()
+        for cam, panel in ((CAM_LEFT, self.cam_left), (CAM_RIGHT, self.cam_right)):
             panel.view.set_pose(f.kp2d[cam], f.scores[cam], f.corrected[cam])
 
     def _refresh_history(self):

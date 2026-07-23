@@ -25,7 +25,8 @@ RAG_COLORS = {
 
 
 class _JointSignals(QObject):
-    moved = Signal(int, QPointF)     # joint id, new scene pos
+    moved = Signal(int, QPointF)     # joint id, new scene pos (live, during drag)
+    released = Signal(int, QPointF)  # joint id, final pos (commit on mouse-up)
     picked = Signal(int)             # joint id selected
 
 
@@ -48,13 +49,23 @@ class JointItem(QGraphicsEllipseItem):
         self.setBrush(QBrush(RAG_COLORS.get(status, RAG_COLORS["red"])))
 
     def itemChange(self, change, value):
+        # live signal only updates the bone lines in-view; the model is NOT
+        # touched here (doing so mid-drag re-enters itemChange -> recursion).
         if change == QGraphicsEllipseItem.GraphicsItemChange.ItemPositionHasChanged:
             self.signals.moved.emit(self.joint_id, value)
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
+        self._press_pos = self.pos()
         self.signals.picked.emit(self.joint_id)
         super().mousePressEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        super().mouseReleaseEvent(event)
+        # commit to the model only if the joint actually moved (not a click)
+        start = getattr(self, "_press_pos", None)
+        if start is not None and (self.pos() - start).manhattanLength() > 0.5:
+            self.signals.released.emit(self.joint_id, self.pos())
 
 
 class CameraView(QGraphicsView):
@@ -84,7 +95,8 @@ class CameraView(QGraphicsView):
             self._bones.append(line)
         for j in range(NUM_JOINTS):
             item = JointItem(j)
-            item.signals.moved.connect(self._on_moved)
+            item.signals.moved.connect(self._on_moved_live)       # bones only
+            item.signals.released.connect(self._on_released)      # commit
             item.signals.picked.connect(
                 lambda jid: self.jointPicked.emit(self.cam, jid))
             self._scene.addItem(item)
@@ -122,8 +134,12 @@ class CameraView(QGraphicsView):
                 item.set_status("red" if np.isnan(s) else rag_status(float(s)))
         self._refresh_bones()
 
-    def _on_moved(self, joint_id: int, pos: QPointF):
+    def _on_moved_live(self, joint_id: int, pos: QPointF):
+        # cheap live feedback during the drag: just redraw the bone lines
         self._refresh_bones()
+
+    def _on_released(self, joint_id: int, pos: QPointF):
+        # commit the final position to the model once, on mouse-up
         self.jointDragged.emit(self.cam, joint_id, pos)
 
     def _refresh_bones(self):

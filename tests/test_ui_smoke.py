@@ -76,6 +76,36 @@ def test_joint_edit_resolves_3d(qapp):
     assert not model.frame().corrected[CAM_LEFT][6]
 
 
+def test_joint_edit_does_not_reload_image(qapp):
+    """Regression: a joint edit must NOT reload the image / fitInView.
+
+    The freeze was itemChange -> model edit -> joint2dChanged -> _refresh_views
+    -> set_image -> fitInView -> itemChange (infinite recursion). A committed
+    edit must go through the overlay-only path.
+    """
+    from PySide6.QtCore import QPointF
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+    model.set_frame(0)
+
+    calls = {"set_image": 0}
+    orig = win.cam_left.view.set_image
+    win.cam_left.view.set_image = lambda p: (calls.__setitem__(
+        "set_image", calls["set_image"] + 1), orig(p))
+
+    before = model.frame().fitted3d.copy()
+    # simulate a committed drag (mouse-release) on the left wrist
+    pl = model.frame().kp2d[CAM_LEFT][6]
+    win.cam_left.view._on_released(6, QPointF(float(pl[0] + 30), float(pl[1])))
+
+    assert calls["set_image"] == 0, "edit must not reload the image"
+    assert model.frame().corrected[CAM_LEFT][6]
+    assert not np.allclose(before[6], model.frame().fitted3d[6])
+
+
 def test_main_window_builds(qapp):
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel
