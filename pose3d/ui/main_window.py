@@ -296,7 +296,8 @@ class MainWindow(QMainWindow):
         QApplication.processEvents()
         try:
             res = export_animation(poses, out, name=self.model.project.name,
-                                   fps=self.model.project.fps, render_video=True)
+                                   fps=self.model.project.fps, render_video=True,
+                                   display_frame=self.model.current)
         finally:
             QApplication.restoreOverrideCursor()
         if res.ok:

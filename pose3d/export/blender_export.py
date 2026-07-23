@@ -57,11 +57,14 @@ def export_animation(
     render_video: bool = True,
     blender: str | None = None,
     timeout: int = 600,
+    display_frame: int = 0,
 ) -> ExportResult:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+    doc = _poses_to_json(poses3d, fps)
+    doc["display_frame"] = int(display_frame)   # which pose the turntable spins
     json_path = out_dir / f"{name}_poses.json"
-    json_path.write_text(json.dumps(_poses_to_json(poses3d, fps)))
+    json_path.write_text(json.dumps(doc))
 
     blender = blender or blender_binary()
     cmd = [blender, "--background", "--python", str(_JOB), "--",

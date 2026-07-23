@@ -27,7 +27,7 @@ import json
 import sys
 
 import bpy  # noqa: available only inside Blender
-from mathutils import Vector
+from mathutils import Matrix, Vector
 
 
 def parse_args():
@@ -190,85 +190,116 @@ def _bbox(rframes):
     return Vector(lo), Vector(hi)
 
 
-def build_render_scene(frames, bones, joint_names, scene):
-    """Armatures don't render, so build visible mesh geometry (spheres at
-    joints + cylinders for bones), keyframed per frame, with an auto-framed
-    upright camera + light. Works at any unit scale (metres or centimetres)."""
-    axis, sign = _detect_up(frames, joint_names)
-    rframes = [[None if p is None else _remap(p, axis, sign) for p in fr]
-               for fr in frames]
-    lo, hi = _bbox(rframes)
-    center = (lo + hi) / 2.0
-    diag = (hi - lo).length or 1.0
-    jr, br = diag * 0.022, diag * 0.013
-
+def _materials():
     def _mat(name, rgba):
         m = bpy.data.materials.new(name)
-        m.use_nodes = True                       # EEVEE renders node base color
+        m.use_nodes = True                       # EEVEE renders the node base color
         bsdf = m.node_tree.nodes.get("Principled BSDF")
         if bsdf is not None:
             bsdf.inputs["Base Color"].default_value = rgba
-        m.diffuse_color = rgba                    # viewport colour too
+        m.diffuse_color = rgba
         return m
+    return _mat("joint", (0.20, 0.65, 1.0, 1)), _mat("bone", (0.92, 0.92, 0.96, 1))
 
-    jmat = _mat("joint", (0.20, 0.65, 1.0, 1))
-    bmat = _mat("bone", (0.92, 0.92, 0.96, 1))
 
-    n = len(joint_names)
-    joints = []
+def add_mesh_figure(rframes, bones, jr, br, jmat, bmat, animate):
+    """Build the EXACT figure shown in the app as mesh: a sphere per joint and a
+    cylinder per bone, positioned from the 3D points. If animate and there are
+    multiple frames, keyframe every frame; else place statically at rframes[0].
+    Missing joints collapse to zero size. Returns the created objects."""
+    n = len(rframes[0])
+    joints, bone_objs = [], []
     for j in range(n):
-        bpy.ops.mesh.primitive_uv_sphere_add(radius=jr, segments=12, ring_count=8)
-        o = bpy.context.active_object; o.name = f"J{j}"
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=jr, segments=16, ring_count=10)
+        o = bpy.context.active_object; o.name = f"Joint_{j}"
         o.data.materials.append(jmat); joints.append(o)
-    bone_objs = []
     for k in range(len(bones)):
-        bpy.ops.mesh.primitive_cylinder_add(radius=br, depth=1.0, vertices=10)
-        o = bpy.context.active_object; o.name = f"B{k}"
-        o.rotation_mode = "QUATERNION"
-        o.data.materials.append(bmat); bone_objs.append(o)
+        bpy.ops.mesh.primitive_cylinder_add(radius=br, depth=1.0, vertices=12)
+        o = bpy.context.active_object; o.name = f"Bone_{k}"
+        o.rotation_mode = "QUATERNION"; o.data.materials.append(bmat)
+        bone_objs.append(o)
 
     zaxis = Vector((0, 0, 1))
-    for fi, fr in enumerate(rframes):
-        f = fi + 1
+
+    def place(fr):
         for j, o in enumerate(joints):
             p = fr[j]
-            o.hide_render = p is None
-            if p is not None:
-                o.location = p
-            o.keyframe_insert("location", frame=f)
-            o.keyframe_insert("hide_render", frame=f)
+            if p is None:
+                o.scale = (0, 0, 0)
+            else:
+                o.location = Vector(p); o.scale = (1, 1, 1)
         for k, (a, b) in enumerate(bones):
-            o = bone_objs[k]
-            pa, pb = fr[a], fr[b]
-            hidden = pa is None or pb is None
-            if not hidden:
-                d = pb - pa; L = d.length
-                hidden = L < 1e-9
-                if not hidden:
-                    o.location = (pa + pb) / 2.0
-                    o.rotation_quaternion = zaxis.rotation_difference(d.normalized())
-                    o.scale = (1.0, 1.0, L)
-            o.hide_render = hidden
-            o.keyframe_insert("location", frame=f)
-            o.keyframe_insert("rotation_quaternion", frame=f)
-            o.keyframe_insert("scale", frame=f)
-            o.keyframe_insert("hide_render", frame=f)
+            o = bone_objs[k]; pa, pb = fr[a], fr[b]
+            d = None if (pa is None or pb is None) else (Vector(pb) - Vector(pa))
+            if d is None or d.length < 1e-9:
+                o.scale = (0, 0, 0)
+            else:
+                o.location = (Vector(pa) + Vector(pb)) / 2.0
+                o.rotation_quaternion = zaxis.rotation_difference(d.normalized())
+                o.scale = (1, 1, d.length)
 
-    # camera framing the figure from the front, slightly above and to the side
-    target = bpy.data.objects.new("Target", None)
-    scene.collection.objects.link(target); target.location = center
-    cam_data = bpy.data.cameras.new("Cam"); cam_data.clip_end = max(1000.0, diag * 20)
+    if animate and len(rframes) > 1:
+        for fi, fr in enumerate(rframes):
+            f = fi + 1; place(fr)
+            for o in joints:
+                o.keyframe_insert("location", frame=f)
+                o.keyframe_insert("scale", frame=f)
+            for o in bone_objs:
+                o.keyframe_insert("location", frame=f)
+                o.keyframe_insert("rotation_quaternion", frame=f)
+                o.keyframe_insert("scale", frame=f)
+    else:
+        place(rframes[0])
+    return joints + bone_objs
+
+
+def export_fbx_mesh(objs, path):
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    bpy.ops.export_scene.fbx(
+        filepath=path, use_selection=True, object_types={"MESH"},
+        bake_anim=True, bake_anim_use_nla_strips=False,
+        bake_anim_use_all_actions=False, bake_anim_force_startend_keying=True,
+        bake_anim_step=1.0, mesh_smooth_type="FACE",
+        apply_unit_scale=True, global_scale=1.0,
+        axis_forward="-Z", axis_up="Y")
+
+
+def _add_camera_light(center, diag, scene):
+    tgt = bpy.data.objects.new("Tgt", None)
+    scene.collection.objects.link(tgt); tgt.location = center
+    cam_data = bpy.data.cameras.new("Cam")
+    cam_data.clip_end = max(1000.0, diag * 20)
     cam = bpy.data.objects.new("Cam", cam_data)
     scene.collection.objects.link(cam)
-    cam.location = center + Vector((diag * 0.35, -diag * 1.7, diag * 0.15))
+    cam.location = center + Vector((0, -diag * 1.9, diag * 0.12))
     con = cam.constraints.new("TRACK_TO")
-    con.target = target; con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
+    con.target = tgt; con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
     scene.camera = cam
+    for pos in ((diag, -diag, diag * 2), (-diag, -diag, diag), (0, diag, diag)):
+        ld = bpy.data.lights.new("L", type="SUN"); ld.energy = 2.5
+        lo = bpy.data.objects.new("L", ld)
+        scene.collection.objects.link(lo); lo.location = center + Vector(pos)
 
-    light_data = bpy.data.lights.new("Sun", type="SUN"); light_data.energy = 3.0
-    light = bpy.data.objects.new("Sun", light_data)
-    scene.collection.objects.link(light)
-    light.location = center + Vector((diag, -diag, diag * 2))
+
+def turntable_spin(objs, center, scene, seconds, fps):
+    """Parent the figure to an empty and spin it 360° so the loop is seamless."""
+    import math
+    empty = bpy.data.objects.new("Spin", None)
+    scene.collection.objects.link(empty); empty.location = center
+    inv = Matrix.Translation(-center)
+    for o in objs:
+        o.parent = empty
+        o.matrix_parent_inverse = inv
+    total = max(2, int(round(seconds * fps)))
+    # keyframe every frame (dense = constant-speed spin) so we don't depend on
+    # the fcurve interpolation API (which changed in Blender 5.x Actions).
+    for f in range(1, total + 1):
+        empty.rotation_euler = (0, 0, 2 * math.pi * (f - 1) / total)  # f=total < 360°
+        empty.keyframe_insert("rotation_euler", index=2, frame=f)
+    scene.frame_start = 1; scene.frame_end = total
 
 
 def render_mp4(path, scene, fps):
@@ -277,22 +308,27 @@ def render_mp4(path, scene, fps):
     r.media_type = "VIDEO"          # 5.x: MUST come before file_format
     r.file_format = "FFMPEG"
     ff = scene.render.ffmpeg
-    ff.format = "MPEG4"
-    ff.codec = "H264"
-    ff.constant_rate_factor = "MEDIUM"
-    ff.audio_codec = "NONE"
-    scene.render.fps = fps
-    scene.render.fps_base = 1.0
-    # Blender 5.1.1 exposes EEVEE as 'BLENDER_EEVEE' (EEVEE-Next took the name
-    # in 4.2+). Fall back defensively if the enum differs across builds.
+    ff.format = "MPEG4"; ff.codec = "H264"
+    ff.constant_rate_factor = "MEDIUM"; ff.audio_codec = "NONE"
+    scene.render.fps = fps; scene.render.fps_base = 1.0
     engines = scene.render.bl_rna.properties["engine"].enum_items.keys()
     for eng in ("BLENDER_EEVEE", "BLENDER_EEVEE_NEXT", "BLENDER_WORKBENCH"):
         if eng in engines:
             scene.render.engine = eng
             break
-    scene.render.resolution_x = 640
-    scene.render.resolution_y = 480
+    scene.render.resolution_x = 720
+    scene.render.resolution_y = 720
     bpy.ops.render.render(animation=True)
+
+
+def _delete(objs):
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        try:
+            o.select_set(True)
+        except Exception:
+            pass
+    bpy.ops.object.delete()
 
 
 def main():
@@ -304,25 +340,47 @@ def main():
               for fr in data["frames"]]
     bones = [tuple(b) for b in data["bones"]]
     joint_names = data["joint_names"]
+    display = int(data.get("display_frame", 0))
 
     clean_scene()
     scene = bpy.context.scene
     scene.render.fps = args.fps
-
-    rest = rest_positions(frames)
-    arm_obj, bone_by_child = build_armature(rest, bones, joint_names)
-    animate(arm_obj, frames, bones, bone_by_child, rest)
-    scene.frame_start = 1
-    scene.frame_end = len(frames)
-
     enable_addons()
     import os
     os.makedirs(args.outdir, exist_ok=True)
+
+    # upright remap so exports/renders are the right way up at any unit scale
+    axis, sign = _detect_up(frames, joint_names)
+    rframes = [[None if p is None else _remap(p, axis, sign) for p in fr]
+               for fr in frames]
+    lo, hi = _bbox(rframes)
+    center = (lo + hi) / 2.0
+    diag = (hi - lo).length or 1.0
+    jr, br = diag * 0.024, diag * 0.014
+    jmat, bmat = _materials()
+
+    # 1) BVH from the FK armature (skeletal mocap format needs a bone hierarchy)
+    rest = rest_positions(frames)
+    arm_obj, bbc = build_armature(rest, bones, joint_names)
+    animate(arm_obj, frames, bones, bbc, rest)
+    scene.frame_start = 1; scene.frame_end = len(frames)
     export_bvh(arm_obj, os.path.join(args.outdir, args.name + ".bvh"), scene)
-    export_fbx(arm_obj, os.path.join(args.outdir, args.name + ".fbx"))
+    _delete([arm_obj])                     # keep it out of the FBX/render
+
+    # 2) FBX: the EXACT mesh figure shown in the app (animated if multi-frame)
+    figure = add_mesh_figure(rframes, bones, jr, br, jmat, bmat, animate=True)
+    scene.frame_start = 1; scene.frame_end = len(rframes)
+    export_fbx_mesh(figure, os.path.join(args.outdir, args.name + ".fbx"))
+    _delete(figure)
+
+    # 3) MP4: a spinning turntable loop of the displayed pose
     if not args.no_video:
-        build_render_scene(frames, bones, joint_names, scene)
+        disp = rframes[display] if 0 <= display < len(rframes) else rframes[0]
+        static = add_mesh_figure([disp], bones, jr, br, jmat, bmat, animate=False)
+        _add_camera_light(center, diag, scene)
+        turntable_spin(static, center, scene, seconds=6, fps=args.fps)
         render_mp4(os.path.join(args.outdir, args.name + ".mp4"), scene, args.fps)
+
     print("POSE3D_EXPORT_OK")
 
 
