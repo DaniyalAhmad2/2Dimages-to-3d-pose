@@ -42,10 +42,12 @@ class MainWindow(QMainWindow):
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
+        self._root_lay = root
 
         root.addWidget(self._build_topbar())
 
         mid = QWidget(); mid_lay = QHBoxLayout(mid)
+        self._mid = mid
         mid_lay.setContentsMargins(6, 6, 6, 6); mid_lay.setSpacing(6)
 
         self.sidebar = Sidebar()
@@ -81,6 +83,8 @@ class MainWindow(QMainWindow):
         tl_lay.addWidget(self.timeline_header)
         tl_lay.addWidget(self.timeline)
         root.addWidget(tl_area)
+        self._tl_area = tl_area
+        self._fs_active = False
 
         self._wire()
         self._load_model()
@@ -134,14 +138,14 @@ class MainWindow(QMainWindow):
         self.proj_combo = QComboBox(); self.proj_combo.addItems(["Perspective", "Orthographic"])
         head.addWidget(self.proj_combo)
         self.btn_full = QToolButton(); self.btn_full.setText("⤢")
-        self.btn_full.setObjectName("camTool"); self.btn_full.setToolTip("Pop out 3D view")
+        self.btn_full.setObjectName("camTool")
+        self.btn_full.setToolTip("Toggle full-window 3D view (Esc to exit)")
         head.addWidget(self.btn_full)
         cl.addLayout(head)
         self.view3d = View3D()
         self.view3d.setMinimumHeight(220)
         cl.addWidget(self.view3d, 1)
-        self._view3d_cardlayout = cl        # for pop-out restore
-        self._fs_win = None
+        self._view3d_card = card            # whole card (header+view) for fullscreen
 
         self.pose_acc = PoseAccuracyPanel(); self.pose_acc.setObjectName("cardPanel")
         self.accuracy = JointAccuracyList(); self.accuracy.setObjectName("cardPanel")
@@ -151,6 +155,7 @@ class MainWindow(QMainWindow):
             col.addWidget(w)
         col.setCollapsible(0, False)
         col.setSizes([460, 190, 240, 130])   # 3D gets the most room by default
+        self._rightcol = col
         return col
 
     # --- wiring ---
@@ -283,28 +288,28 @@ class MainWindow(QMainWindow):
                                  (res.stderr or "")[-1500:])
 
     def _toggle_fullscreen(self):
-        """Pop the 3D view out into a large maximized window (Esc to return)."""
-        if self._fs_win is not None:
-            self._restore_3d()
-            return
-        fs = QWidget()
-        fs.setWindowTitle("3D Preview — press Esc to return")
-        v = QVBoxLayout(fs); v.setContentsMargins(0, 0, 0, 0)
-        v.addWidget(self.view3d)                 # reparents the GL view
-        fs.keyPressEvent = lambda e: (
-            self._restore_3d() if e.key() == Qt.Key.Key_Escape else None)
-        fs.closeEvent = lambda e: (self._restore_3d(), e.accept())
-        self._fs_win = fs
-        fs.showMaximized()
+        """Toggle the 3D card filling the whole app window (in-app, not a popup)."""
+        if not self._fs_active:
+            # hide everything else; the 3D card expands to fill the window
+            self._mid.hide()
+            self._tl_area.hide()
+            self._root_lay.insertWidget(1, self._view3d_card, 1)  # after topbar
+            self._view3d_card.show()
+            self._fs_active = True
+        else:
+            self._root_lay.removeWidget(self._view3d_card)
+            self._rightcol.insertWidget(0, self._view3d_card)     # back to top
+            self._mid.show()
+            self._tl_area.show()
+            self._fs_active = False
+        # nudge the GL view to re-frame at the new size
+        self.view3d.update()
 
-    def _restore_3d(self):
-        """Put the popped-out 3D view back into its card (idempotent)."""
-        if self._fs_win is None:
-            return
-        win, self._fs_win = self._fs_win, None
-        self._view3d_cardlayout.addWidget(self.view3d)   # reparents back
-        win.hide()
-        win.deleteLater()
+    def keyPressEvent(self, event):
+        if event.key() == Qt.Key.Key_Escape and self._fs_active:
+            self._toggle_fullscreen()
+        else:
+            super().keyPressEvent(event)
 
     # --- refresh ---
     def _on_frame_changed(self, idx):

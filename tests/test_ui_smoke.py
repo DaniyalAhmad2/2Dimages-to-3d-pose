@@ -106,6 +106,22 @@ def test_joint_edit_does_not_reload_image(qapp):
     assert not np.allclose(before[6], model.frame().fitted3d[6])
 
 
+def test_3d_fullscreen_toggle_is_in_app(qapp):
+    """The 3D fullscreen must expand in-app (hide the rest), not open a popup."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    assert not win._fs_active
+    win._toggle_fullscreen()
+    assert win._fs_active
+    assert win._mid.isHidden()
+    assert win._view3d_card.parentWidget() is win.centralWidget()
+    win._toggle_fullscreen()
+    assert not win._fs_active
+    assert not win._mid.isHidden()
+
+
 def test_main_window_builds(qapp):
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel

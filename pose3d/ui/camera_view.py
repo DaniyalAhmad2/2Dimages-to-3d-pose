@@ -43,6 +43,7 @@ class JointItem(QGraphicsEllipseItem):
             QGraphicsEllipseItem.GraphicsItemFlag.ItemSendsGeometryChanges, True)
         self.setZValue(10)
         self.setPen(QPen(QColor(20, 20, 20), 1))
+        self.setCursor(Qt.CursorShape.SizeAllCursor)   # signals "draggable"
         self.set_status("green")
 
     def set_status(self, status: str):
@@ -79,11 +80,15 @@ class CameraView(QGraphicsView):
         self._scene = QGraphicsScene(self)
         self.setScene(self._scene)
         self.setRenderHints(self.renderHints())
+        self.setDragMode(QGraphicsView.DragMode.NoDrag)
+        self.setCursor(Qt.CursorShape.OpenHandCursor)   # hint: draggable to pan
         self._pixmap_item = None
         self._joints: list[JointItem] = []
         self._bones: list[QGraphicsLineItem] = []
         self._show_joints = True
         self._show_bones = True
+        self._panning = False
+        self._pan_start = None
         self._build_items()
 
     def _build_items(self):
@@ -179,12 +184,39 @@ class CameraView(QGraphicsView):
         if self._pixmap_item is not None:
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
-    def set_pan_mode(self, on: bool):
-        self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag if on
-                         else QGraphicsView.DragMode.NoDrag)
-
     def wheelEvent(self, event):
         self.zoom(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
+
+    # --- panning: left-drag on empty area pans; left-drag on a joint moves it ---
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and not isinstance(
+                self.itemAt(event.position().toPoint()), JointItem):
+            self._panning = True
+            self._pan_start = event.position().toPoint()
+            self.setCursor(Qt.CursorShape.ClosedHandCursor)
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._panning:
+            pos = event.position().toPoint()
+            delta = pos - self._pan_start
+            self._pan_start = pos
+            h, v = self.horizontalScrollBar(), self.verticalScrollBar()
+            h.setValue(h.value() - delta.x())
+            v.setValue(v.value() - delta.y())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if self._panning:
+            self._panning = False
+            self.setCursor(Qt.CursorShape.OpenHandCursor)
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
 
 
 class CameraPanel(QWidget):
@@ -205,9 +237,8 @@ class CameraPanel(QWidget):
 
         body = QHBoxLayout(); body.setSpacing(4)
         tools = QVBoxLayout(); tools.setSpacing(4)
-        specs = [("⭱", "Select", lambda: self.view.set_pan_mode(False)),
-                 ("✋", "Pan", lambda: self.view.set_pan_mode(True)),
-                 ("＋", "Zoom in", lambda: self.view.zoom(1.25)),
+        # Left-drag on empty area pans, on a joint moves it — no mode needed.
+        specs = [("＋", "Zoom in", lambda: self.view.zoom(1.25)),
                  ("－", "Zoom out", lambda: self.view.zoom(1 / 1.25)),
                  ("⤢", "Fit", self.view.fit)]
         for glyph, tip, fn in specs:
