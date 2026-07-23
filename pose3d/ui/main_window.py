@@ -269,7 +269,7 @@ class MainWindow(QMainWindow):
         out = QFileDialog.getExistingDirectory(self, "Export results to folder")
         if not out:
             return
-        poses = np.stack([f.fitted3d for f in frames]) / 100.0  # cm/units -> m*
+        poses = np.stack([f.fitted3d for f in frames])   # native units; camera auto-frames
         from pose3d.export.blender_export import export_animation
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         self.statusBar().showMessage("Exporting BVH/FBX/mp4 via Blender…")

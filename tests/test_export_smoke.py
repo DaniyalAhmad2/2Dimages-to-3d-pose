@@ -43,3 +43,12 @@ def test_export_with_video(tmp_path):
                            render_video=True, timeout=600)
     assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
     assert res.mp4 and res.mp4.stat().st_size > 0
+    # the frame must contain the rendered skeleton, not a blank background
+    # (armatures don't render; regression guard for the empty-mp4 bug)
+    import cv2
+    cap = cv2.VideoCapture(str(res.mp4))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, 2)
+    ok, frame = cap.read()
+    cap.release()
+    assert ok and frame is not None, "could not read a rendered frame"
+    assert float(frame.std()) > 2.0, "rendered frame is blank (no geometry)"

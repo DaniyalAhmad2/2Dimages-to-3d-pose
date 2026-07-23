@@ -151,18 +151,124 @@ def export_fbx(arm_obj, path):
         axis_forward="-Z", axis_up="Y")
 
 
-def setup_camera_light(rest):
-    center = sum(rest, Vector((0, 0, 0))) / len(rest)
-    cam_data = bpy.data.cameras.new("Cam")
+def _detect_up(frames, joint_names):
+    """Return (axis, sign) so that sign*coord[axis] is 'up' (head above feet)."""
+    idx = {n: i for i, n in enumerate(joint_names)}
+    for fr in frames:
+        head = fr[idx["HEAD"]] if "HEAD" in idx else None
+        lower = None
+        for names in (["LEFT_ANKLE", "RIGHT_ANKLE"], ["LEFT_KNEE", "RIGHT_KNEE"],
+                      ["PELVIS"], ["LEFT_HIP", "RIGHT_HIP"]):
+            pts = [fr[idx[n]] for n in names if n in idx and fr[idx[n]] is not None]
+            if pts:
+                lower = [sum(c) / len(pts) for c in zip(*pts)]
+                break
+        if head is not None and lower is not None:
+            diff = [head[i] - lower[i] for i in range(3)]
+            axis = max(range(3), key=lambda i: abs(diff[i]))
+            return axis, (1.0 if diff[axis] >= 0 else -1.0)
+    return 2, 1.0
+
+
+def _remap(p, axis, sign):
+    """Remap world coords so the up-axis becomes +Z (upright render)."""
+    others = [i for i in range(3) if i != axis]
+    return Vector((p[others[0]], p[others[1]], sign * p[axis]))
+
+
+def _bbox(rframes):
+    import math
+    lo = [math.inf] * 3; hi = [-math.inf] * 3
+    for fr in rframes:
+        for p in fr:
+            if p is None:
+                continue
+            for i in range(3):
+                lo[i] = min(lo[i], p[i]); hi[i] = max(hi[i], p[i])
+    if lo[0] == math.inf:
+        return Vector((-1, -1, -1)), Vector((1, 1, 1))
+    return Vector(lo), Vector(hi)
+
+
+def build_render_scene(frames, bones, joint_names, scene):
+    """Armatures don't render, so build visible mesh geometry (spheres at
+    joints + cylinders for bones), keyframed per frame, with an auto-framed
+    upright camera + light. Works at any unit scale (metres or centimetres)."""
+    axis, sign = _detect_up(frames, joint_names)
+    rframes = [[None if p is None else _remap(p, axis, sign) for p in fr]
+               for fr in frames]
+    lo, hi = _bbox(rframes)
+    center = (lo + hi) / 2.0
+    diag = (hi - lo).length or 1.0
+    jr, br = diag * 0.022, diag * 0.013
+
+    def _mat(name, rgba):
+        m = bpy.data.materials.new(name)
+        m.use_nodes = True                       # EEVEE renders node base color
+        bsdf = m.node_tree.nodes.get("Principled BSDF")
+        if bsdf is not None:
+            bsdf.inputs["Base Color"].default_value = rgba
+        m.diffuse_color = rgba                    # viewport colour too
+        return m
+
+    jmat = _mat("joint", (0.20, 0.65, 1.0, 1))
+    bmat = _mat("bone", (0.92, 0.92, 0.96, 1))
+
+    n = len(joint_names)
+    joints = []
+    for j in range(n):
+        bpy.ops.mesh.primitive_uv_sphere_add(radius=jr, segments=12, ring_count=8)
+        o = bpy.context.active_object; o.name = f"J{j}"
+        o.data.materials.append(jmat); joints.append(o)
+    bone_objs = []
+    for k in range(len(bones)):
+        bpy.ops.mesh.primitive_cylinder_add(radius=br, depth=1.0, vertices=10)
+        o = bpy.context.active_object; o.name = f"B{k}"
+        o.rotation_mode = "QUATERNION"
+        o.data.materials.append(bmat); bone_objs.append(o)
+
+    zaxis = Vector((0, 0, 1))
+    for fi, fr in enumerate(rframes):
+        f = fi + 1
+        for j, o in enumerate(joints):
+            p = fr[j]
+            o.hide_render = p is None
+            if p is not None:
+                o.location = p
+            o.keyframe_insert("location", frame=f)
+            o.keyframe_insert("hide_render", frame=f)
+        for k, (a, b) in enumerate(bones):
+            o = bone_objs[k]
+            pa, pb = fr[a], fr[b]
+            hidden = pa is None or pb is None
+            if not hidden:
+                d = pb - pa; L = d.length
+                hidden = L < 1e-9
+                if not hidden:
+                    o.location = (pa + pb) / 2.0
+                    o.rotation_quaternion = zaxis.rotation_difference(d.normalized())
+                    o.scale = (1.0, 1.0, L)
+            o.hide_render = hidden
+            o.keyframe_insert("location", frame=f)
+            o.keyframe_insert("rotation_quaternion", frame=f)
+            o.keyframe_insert("scale", frame=f)
+            o.keyframe_insert("hide_render", frame=f)
+
+    # camera framing the figure from the front, slightly above and to the side
+    target = bpy.data.objects.new("Target", None)
+    scene.collection.objects.link(target); target.location = center
+    cam_data = bpy.data.cameras.new("Cam"); cam_data.clip_end = max(1000.0, diag * 20)
     cam = bpy.data.objects.new("Cam", cam_data)
-    bpy.context.scene.collection.objects.link(cam)
-    cam.location = center + Vector((0, -4.0, 0.3))
-    cam.rotation_euler = (1.4, 0, 0)
-    bpy.context.scene.camera = cam
-    light_data = bpy.data.lights.new("Sun", type="SUN")
+    scene.collection.objects.link(cam)
+    cam.location = center + Vector((diag * 0.35, -diag * 1.7, diag * 0.15))
+    con = cam.constraints.new("TRACK_TO")
+    con.target = target; con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
+    scene.camera = cam
+
+    light_data = bpy.data.lights.new("Sun", type="SUN"); light_data.energy = 3.0
     light = bpy.data.objects.new("Sun", light_data)
-    bpy.context.scene.collection.objects.link(light)
-    light.location = center + Vector((2, -2, 4))
+    scene.collection.objects.link(light)
+    light.location = center + Vector((diag, -diag, diag * 2))
 
 
 def render_mp4(path, scene, fps):
@@ -215,7 +321,7 @@ def main():
     export_bvh(arm_obj, os.path.join(args.outdir, args.name + ".bvh"), scene)
     export_fbx(arm_obj, os.path.join(args.outdir, args.name + ".fbx"))
     if not args.no_video:
-        setup_camera_light(rest)
+        build_render_scene(frames, bones, joint_names, scene)
         render_mp4(os.path.join(args.outdir, args.name + ".mp4"), scene, args.fps)
     print("POSE3D_EXPORT_OK")
 
