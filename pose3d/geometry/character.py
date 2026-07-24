@@ -15,13 +15,21 @@ from pose3d.core.skeleton import Joint, NUM_JOINTS
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
-# rig deform bone -> canonical joint it should point at (aim / Damped-Track)
-_TRACK = {
-    "spine": Joint.NECK, "chest": Joint.NECK, "neck": Joint.HEAD,
-    "upper_arm.L": Joint.LEFT_ELBOW, "forearm.L": Joint.LEFT_WRIST,
-    "upper_arm.R": Joint.RIGHT_ELBOW, "forearm.R": Joint.RIGHT_WRIST,
-    "thigh.L": Joint.LEFT_KNEE, "shin.L": Joint.LEFT_ANKLE,
-    "thigh.R": Joint.RIGHT_KNEE, "shin.R": Joint.RIGHT_ANKLE,
+_MID = "MID"   # midpoint(pelvis, neck) — the torso split point
+
+# rig deform bone -> (start joint, end joint) it should span (stretched to fit,
+# so the character's joints land ON the keypoints regardless of rig proportions)
+_DIRECT = {
+    "spine": (Joint.PELVIS, _MID), "chest": (_MID, Joint.NECK),
+    "neck": (Joint.NECK, Joint.HEAD),
+    "upper_arm.L": (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW),
+    "forearm.L": (Joint.LEFT_ELBOW, Joint.LEFT_WRIST),
+    "upper_arm.R": (Joint.RIGHT_SHOULDER, Joint.RIGHT_ELBOW),
+    "forearm.R": (Joint.RIGHT_ELBOW, Joint.RIGHT_WRIST),
+    "thigh.L": (Joint.LEFT_HIP, Joint.LEFT_KNEE),
+    "shin.L": (Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
+    "thigh.R": (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
+    "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
 }
 
 
@@ -50,16 +58,11 @@ class Character:
         self.w_idx = d["w_idx"]; self.w_val = d["w_val"].astype(float)
         self.rest = d["rest_mat"].astype(float)          # (B,4,4) world
         self.head = d["head"].astype(float)
+        self.tail = d["tail"].astype(float)
         self.parent = d["parent"].astype(int)
         names = [str(n) for n in d["bone_names"]]
         self.bidx = {n: i for i, n in enumerate(names)}
-        self.inv_rest = np.linalg.inv(self.rest)
-        # local rest matrices (relative to parent)
-        self.local = np.empty_like(self.rest)
-        for b in range(len(self.rest)):
-            p = self.parent[b]
-            self.local[b] = self.inv_rest[p] @ self.rest[b] if p >= 0 else self.rest[b]
-        # hierarchy order (parents before children)
+        # hierarchy order (parents before children) for skin-matrix inheritance
         self.order = self._topo()
         # rest homogeneous verts (V,4)
         self.vh = np.hstack([self.verts0, np.ones((len(self.verts0), 1))])
@@ -69,7 +72,9 @@ class Character:
         lh = self.head[self.bidx["upper_arm.L"]]; rh = self.head[self.bidx["upper_arm.R"]]
         self.rig_right = np.array([rh[0] - lh[0], rh[1] - lh[1]])
         self.rig_right /= (np.linalg.norm(self.rig_right) + 1e-12)
-        self._track = {self.bidx[b]: int(j) for b, j in _TRACK.items() if b in self.bidx}
+        self.hips_idx = self.bidx["hips"]
+        self._direct = {self.bidx[b]: se for b, se in _DIRECT.items()
+                        if b in self.bidx}
 
     def _topo(self):
         order, seen = [], set()
@@ -116,31 +121,35 @@ class Character:
                 ca, sa = np.cos(dt), np.sin(dt)
                 Rz = np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1.0]])
 
-        # A: up_pose space -> rig space ;  targets in rig space
+        # A: up_pose space -> rig space
         def to_rig(p):
             return self.hips_world + (Rz @ (p - pelvis)) * scale
-        targets = {ji: to_rig(J(ji)) for ji in set(self._track.values())
-                   if J(ji) is not None}
 
-        # posed bone world matrices (aim FK)
-        posed = self.rest.copy()
+        def resolve(spec):
+            if spec == _MID:
+                a, b = J(Joint.NECK), J(Joint.PELVIS)
+                return None if (a is None or b is None) else to_rig((a + b) / 2)
+            p = J(spec)
+            return None if p is None else to_rig(p)
+
+        # per-bone skin matrix: directly place mapped bones between their two
+        # keypoints (stretched to fit); other bones inherit their parent so the
+        # mesh stays connected (hands follow the wrist, feet the ankle, ...).
+        skin = np.tile(np.eye(4), (len(self.rest), 1, 1))
+        skin[self.hips_idx][:3, 3] = to_rig(pelvis) - self.head[self.hips_idx]
         for b in self.order:
+            if b in self._direct:
+                s_spec, e_spec = self._direct[b]
+                start, end = resolve(s_spec), resolve(e_spec)
+                if start is not None and end is not None:
+                    skin[b] = self._bone_delta(b, start, end)
+                    continue
+            if b == self.hips_idx:
+                continue
             p = self.parent[b]
-            base = (posed[p] @ self.local[b]) if p >= 0 else self.rest[b].copy()
-            if p < 0:                                  # root: translate to pelvis
-                base[:3, 3] = to_rig(pelvis)
-            tgt_j = self._track.get(b)
-            if tgt_j is not None and tgt_j in targets:
-                head = base[:3, 3]
-                cur_y = base[:3, :3] @ np.array([0, 1.0, 0])
-                desired = targets[tgt_j] - head
-                if np.linalg.norm(desired) > 1e-9:
-                    Rw = _align(cur_y, desired / np.linalg.norm(desired))
-                    base[:3, :3] = Rw @ base[:3, :3]
-            posed[b] = base
+            if p >= 0:
+                skin[b] = skin[p]
 
-        # linear blend skinning (in rig space)
-        skin = posed @ self.inv_rest                    # (B,4,4)
         out = np.zeros((len(self.verts0), 3))
         for k in range(self.w_idx.shape[1]):
             bi = self.w_idx[:, k]; wv = self.w_val[:, k]
@@ -151,3 +160,23 @@ class Character:
         # map rig space back to up_pose space so it aligns with the skeleton
         out = pelvis + (Rz.T @ (out - self.hips_world).T).T / scale
         return out.astype(np.float32), self.faces
+
+    def _bone_delta(self, b, start, end):
+        """Skin matrix placing bone b from its rest to span start->end (with
+        stretch along the bone so the tail reaches `end`)."""
+        rest_head, rest_tail = self.head[b], self.tail[b]
+        rd = rest_tail - rest_head
+        rlen = float(np.linalg.norm(rd))
+        dv = end - start
+        dlen = float(np.linalg.norm(dv))
+        D = np.eye(4)
+        if rlen < 1e-9 or dlen < 1e-9:
+            D[:3, 3] = start - rest_head
+            return D
+        u = dv / dlen
+        R = _align(rd / rlen, u)
+        Sc = np.eye(3) + (dlen / rlen - 1.0) * np.outer(u, u)   # stretch along u
+        M = Sc @ R
+        D[:3, :3] = M
+        D[:3, 3] = start - M @ rest_head
+        return D
