@@ -12,19 +12,9 @@ from __future__ import annotations
 
 import numpy as np
 import pyqtgraph.opengl as gl
-from pyqtgraph import Transform3D, Vector
-from PySide6.QtGui import QMatrix4x4
+from pyqtgraph import Vector
 
 from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
-
-# thicker body parts (torso / hips / shoulders); everything else is a limb
-_THICK_BONES = {
-    (int(Joint.PELVIS), int(Joint.NECK)),
-    (int(Joint.PELVIS), int(Joint.LEFT_HIP)),
-    (int(Joint.PELVIS), int(Joint.RIGHT_HIP)),
-    (int(Joint.NECK), int(Joint.LEFT_SHOULDER)),
-    (int(Joint.NECK), int(Joint.RIGHT_SHOULDER)),
-}
 
 
 def upright_matrix(axis, sign):
@@ -44,32 +34,6 @@ def upright_matrix(axis, sign):
     return M
 
 
-def _bone_transform(a, b, radius):
-    """4x4 mapping a unit z-cylinder (z in [0,1], r=1) onto the segment a->b."""
-    a = np.asarray(a, float); b = np.asarray(b, float)
-    d = b - a
-    L = float(np.linalg.norm(d))
-    if L < 1e-9:
-        return None
-    z = d / L
-    ref = np.array([0, 0, 1.0]) if abs(z[2]) < 0.9 else np.array([1.0, 0, 0])
-    x = np.cross(ref, z); x /= np.linalg.norm(x)
-    y = np.cross(z, x)
-    c0, c1, c2 = x * radius, y * radius, d          # columns of the 3x3
-    return QMatrix4x4(
-        c0[0], c1[0], c2[0], a[0],
-        c0[1], c1[1], c2[1], a[1],
-        c0[2], c1[2], c2[2], a[2],
-        0, 0, 0, 1)
-
-
-def _sphere_transform(p, r):
-    m = QMatrix4x4()
-    m.translate(float(p[0]), float(p[1]), float(p[2]))
-    m.scale(r, r, r)
-    return m
-
-
 class View3D(gl.GLViewWidget):
     GHOST_COLOR = (0.66, 0.68, 0.74, 0.45)     # translucent grey ghost body
     JOINT_COLOR = (0.30, 0.85, 1.0, 1.0)
@@ -84,23 +48,13 @@ class View3D(gl.GLViewWidget):
         self._grid.setSpacing(0.2, 0.2)
         self.addItem(self._grid)
 
-        # --- ghost body meshes (unit primitives, transformed per frame) ---
-        cyl = gl.MeshData.cylinder(rows=1, cols=12, radius=[1.0, 1.0], length=1.0)
-        sph = gl.MeshData.sphere(rows=8, cols=12, radius=1.0)
-        self._limbs = []
-        for _ in BONES:
-            m = gl.GLMeshItem(meshdata=cyl, smooth=True, color=self.GHOST_COLOR,
-                              shader="shaded", glOptions="translucent")
-            m.setVisible(False)
-            self.addItem(m)
-            self._limbs.append(m)
-        self._blobs = []
-        for _ in range(NUM_JOINTS):
-            m = gl.GLMeshItem(meshdata=sph, smooth=True, color=self.GHOST_COLOR,
-                              shader="shaded", glOptions="translucent")
-            m.setVisible(False)
-            self.addItem(m)
-            self._blobs.append(m)
+        # --- smooth human body surface (metaball skin around the skeleton) ---
+        self._body = gl.GLMeshItem(
+            vertexes=np.zeros((3, 3)), faces=np.array([[0, 1, 2]]),
+            smooth=True, color=self.GHOST_COLOR, shader="shaded",
+            glOptions="translucent", drawEdges=False)
+        self._body.setVisible(False)
+        self.addItem(self._body)
 
         # --- coloured skeleton overlay (drawn on top) ---
         self._scatter = gl.GLScatterPlotItem(
@@ -151,8 +105,7 @@ class View3D(gl.GLViewWidget):
     # --- public API ---
     def set_show_body(self, on: bool):
         self._show_body = on
-        for m in self._limbs + self._blobs:
-            m.setVisible(on and m.opts.get("_active", False))
+        self._body.setVisible(on and self._body.opts.get("_active", False))
 
     def reframe(self):
         self._framed = False
@@ -179,8 +132,6 @@ class View3D(gl.GLViewWidget):
         v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= floor
 
         height = float(vv[:, 2].max() - vv[:, 2].min()) or 1.0
-        limb_r = height * 0.055
-        torso_r = height * 0.095
 
         # coloured skeleton
         self._scatter.setData(pos=v[valid])
@@ -190,25 +141,9 @@ class View3D(gl.GLViewWidget):
                 seg.append(v[int(a)]); seg.append(v[int(b)])
         self._lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
 
-        # ghost limbs (capsules)
-        for (a, b), mesh in zip(BONES, self._limbs):
-            ok = valid[int(a)] and valid[int(b)]
-            key = (int(a), int(b))
-            r = torso_r if key in _THICK_BONES else limb_r
-            tr = _bone_transform(v[int(a)], v[int(b)], r) if ok else None
-            mesh.opts["_active"] = ok and tr is not None
-            if ok and tr is not None:
-                mesh.setTransform(Transform3D(tr))
-            mesh.setVisible(self._show_body and ok and tr is not None)
-
-        # ghost joint blobs
-        for j, mesh in enumerate(self._blobs):
-            ok = bool(valid[j])
-            r = torso_r if j in (int(Joint.PELVIS), int(Joint.NECK)) else limb_r
-            mesh.opts["_active"] = ok
-            if ok:
-                mesh.setTransform(Transform3D(_sphere_transform(v[j], r * 1.1)))
-            mesh.setVisible(self._show_body and ok)
+        # smooth human body surface (metaball skin) around the skeleton
+        vpose = np.where(valid[:, None], v, np.nan)
+        self._update_body(vpose)
 
         if not self._framed:
             span = float(np.linalg.norm(vv.max(0) - vv.min(0))) or 1.0
@@ -218,9 +153,21 @@ class View3D(gl.GLViewWidget):
                                    distance=span * 1.9, elevation=12, azimuth=-70)
             self._framed = True
 
+    def _update_body(self, vpose):
+        """Rebuild the smooth body surface from the (upright, centred) pose."""
+        try:
+            from pose3d.geometry.bodymesh import human_body_mesh
+            verts, faces = human_body_mesh(vpose, resolution=42)
+        except Exception:
+            verts = None
+        active = verts is not None and len(verts) > 0
+        self._body.opts["_active"] = active
+        if active:
+            self._body.setMeshData(vertexes=verts, faces=faces)
+        self._body.setVisible(self._show_body and active)
+
     def _clear(self):
         self._scatter.setData(pos=np.zeros((1, 3)))
         self._lines.setData(pos=np.zeros((2, 3)))
-        for m in self._limbs + self._blobs:
-            m.opts["_active"] = False
-            m.setVisible(False)
+        self._body.opts["_active"] = False
+        self._body.setVisible(False)
