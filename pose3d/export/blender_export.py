@@ -58,8 +58,11 @@ def export_animation(
     blender: str | None = None,
     timeout: int = 600,
     display_frame: int = 0,
-    character: str | None = None,
+    character: str | None = "__bundled__",
 ) -> ExportResult:
+    if character == "__bundled__":
+        from pose3d.config import character_blend
+        character = character_blend()          # always the bundled model
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = _poses_to_json(poses3d, fps)

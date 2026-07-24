@@ -37,11 +37,12 @@ def test_export_bvh_fbx(tmp_path):
     assert res.fbx and res.fbx.stat().st_size > 0
 
 
-_CHARACTER = "/home/athena/Downloads/65-lowpolyboy/final low poly character  rigged.blend"
+from pose3d.config import character_blend
+_CHARACTER = character_blend()
 
 
-@pytest.mark.skipif(not (_HAVE_BLENDER and Path(_CHARACTER).exists()),
-                    reason="character .blend not present")
+@pytest.mark.skipif(not (_HAVE_BLENDER and _CHARACTER),
+                    reason="bundled character not present")
 def test_export_retargets_character(tmp_path):
     res = export_animation(_motion(), tmp_path, name="c", fps=24,
                            render_video=True, timeout=500, character=_CHARACTER)
