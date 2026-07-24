@@ -39,6 +39,7 @@ def parse_args():
     p.add_argument("--fps", type=int, default=30)
     p.add_argument("--no-video", action="store_true")
     p.add_argument("--name", default="pose3d")
+    p.add_argument("--character", default="")   # .blend already opened as base
     return p.parse_args(argv)
 
 
@@ -335,10 +336,179 @@ def _delete(objs):
     bpy.ops.object.delete()
 
 
+# --- character retargeting (drive a rigged .blend humanoid from the pose) ----
+
+# our canonical joint -> rig deform bone that should point at it (Damped Track)
+_RIG_TRACK = [
+    ("spine", "NECK"), ("chest", "NECK"), ("neck", "HEAD"),
+    ("upper_arm.L", "LEFT_ELBOW"), ("forearm.L", "LEFT_WRIST"),
+    ("upper_arm.R", "RIGHT_ELBOW"), ("forearm.R", "RIGHT_WRIST"),
+    ("thigh.L", "LEFT_KNEE"), ("shin.L", "LEFT_ANKLE"),
+    ("thigh.R", "RIGHT_KNEE"), ("shin.R", "RIGHT_ANKLE"),
+]
+
+
+def _find_rig():
+    arms = [o for o in bpy.data.objects if o.type == "ARMATURE"]
+    if not arms:
+        return None, []
+    arm = max(arms, key=lambda o: len(o.data.bones))
+    meshes = [o for o in bpy.data.objects
+              if o.type == "MESH" and o.parent is arm]
+    return arm, meshes
+
+
+def _retarget_character(arm, rframes, joint_names, scene):
+    import math
+    idx = {n: i for i, n in enumerate(joint_names)}
+
+    zs = [(arm.matrix_world @ pt).z for b in arm.data.bones
+          for pt in (b.head_local, b.tail_local)]
+    rig_h = (max(zs) - min(zs)) or 1.0
+    allz = [p[2] for fr in rframes for p in fr if p is not None]
+    our_h = (max(allz) - min(allz)) or 1.0
+    scale = rig_h / our_h
+    hips_world = arm.matrix_world @ arm.data.bones["hips"].head_local
+
+    # rotate about Z so our left/right + facing match the rig's
+    Rz = Matrix.Identity(3)
+    Lh = arm.data.bones["upper_arm.L"].head_local
+    Rh = arm.data.bones["upper_arm.R"].head_local
+    rig_right = Vector((Rh.x - Lh.x, Rh.y - Lh.y, 0.0)).normalized()
+    for fr in rframes:
+        ls, rs = fr[idx["LEFT_SHOULDER"]], fr[idx["RIGHT_SHOULDER"]]
+        if ls and rs:
+            our_right = Vector((rs[0] - ls[0], rs[1] - ls[1], 0.0)).normalized()
+            dt = (math.atan2(rig_right.y, rig_right.x)
+                  - math.atan2(our_right.y, our_right.x))
+            Rz = Matrix.Rotation(dt, 3, "Z")
+            break
+
+    empties = {}
+    for n in joint_names:
+        e = bpy.data.objects.new(f"T_{n}", None)
+        scene.collection.objects.link(e); empties[n] = e
+
+    def pelvis_of(fr):
+        p = fr[idx["PELVIS"]]
+        if p is not None:
+            return Vector(p)
+        hips = [fr[idx[n]] for n in ("LEFT_HIP", "RIGHT_HIP") if fr[idx[n]]]
+        return Vector([sum(c) / len(hips) for c in zip(*hips)]) if hips else Vector()
+
+    last = {}
+    for fi, fr in enumerate(rframes):
+        f = fi + 1
+        pv = pelvis_of(fr)
+        for n in joint_names:
+            p = fr[idx[n]]
+            if p is not None:
+                w = hips_world + (Rz @ (Vector(p) - pv)) * scale
+                last[n] = w
+            else:
+                w = last.get(n, hips_world)     # hold last known if occluded
+            empties[n].location = w
+            empties[n].keyframe_insert("location", frame=f)
+
+    pb = arm.pose.bones
+    if "hips" in pb:
+        pb["hips"].constraints.new("COPY_LOCATION").target = empties["PELVIS"]
+    for bone, tgt in _RIG_TRACK:
+        if bone in pb and tgt in empties:
+            c = pb[bone].constraints.new("DAMPED_TRACK")
+            c.target = empties[tgt]; c.track_axis = "TRACK_Y"
+
+
+def _bake_and_clean(arm, scene):
+    bpy.ops.object.select_all(action="DESELECT")
+    arm.select_set(True)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode="POSE")
+    bpy.ops.pose.select_all(action="SELECT")
+    bpy.ops.nla.bake(
+        frame_start=scene.frame_start, frame_end=scene.frame_end,
+        only_selected=False, visual_keying=True, clear_constraints=True,
+        clear_parents=False, use_current_action=True, bake_types={"POSE"})
+    bpy.ops.object.mode_set(mode="OBJECT")
+    _delete([o for o in bpy.data.objects if o.name.startswith("T_")])
+
+
+def _character_bounds(meshes):
+    dg = bpy.context.evaluated_depsgraph_get()
+    lo = Vector((1e18, 1e18, 1e18)); hi = -lo
+    for m in meshes:
+        me = m.evaluated_get(dg)
+        for corner in me.bound_box:
+            w = m.matrix_world @ Vector(corner)
+            lo = Vector((min(lo.x, w.x), min(lo.y, w.y), min(lo.z, w.z)))
+            hi = Vector((max(hi.x, w.x), max(hi.y, w.y), max(hi.z, w.z)))
+    return (lo + hi) / 2.0, (hi - lo).length or 1.0
+
+
+def _export_character_fbx(objs, path):
+    bpy.ops.object.select_all(action="DESELECT")
+    for o in objs:
+        o.select_set(True)
+    bpy.context.view_layer.objects.active = objs[0]
+    bpy.ops.export_scene.fbx(
+        filepath=path, use_selection=True,
+        object_types={"ARMATURE", "MESH"}, add_leaf_bones=False,
+        bake_anim=True, bake_anim_use_all_bones=True,
+        bake_anim_use_nla_strips=False, bake_anim_use_all_actions=False,
+        bake_anim_force_startend_keying=True, bake_anim_step=1.0,
+        primary_bone_axis="Y", secondary_bone_axis="X",
+        apply_unit_scale=True, global_scale=1.0, axis_forward="-Z", axis_up="Y")
+
+
+def character_main(data, args, scene):
+    frames = [[(None if p is None else tuple(p)) for p in fr]
+              for fr in data["frames"]]
+    joint_names = data["joint_names"]
+    axis, sign = _detect_up(frames, joint_names)
+    rframes = [[None if p is None else _remap(p, axis, sign) for p in fr]
+               for fr in frames]
+
+    arm, meshes = _find_rig()
+    if arm is None or "hips" not in arm.pose.bones:
+        return False           # not a usable rig -> caller falls back
+
+    # drop the ground plane + any pre-existing camera from the template
+    _delete([o for o in bpy.data.objects
+             if (o.type == "MESH" and o.parent is None) or o.type == "CAMERA"])
+
+    scene.render.fps = args.fps
+    _retarget_character(arm, rframes, joint_names, scene)
+    scene.frame_start = 1; scene.frame_end = len(rframes)
+    _bake_and_clean(arm, scene)
+
+    enable_addons()
+    import os
+    os.makedirs(args.outdir, exist_ok=True)
+    export_bvh(arm, os.path.join(args.outdir, args.name + ".bvh"), scene)
+    _export_character_fbx([arm] + meshes, os.path.join(args.outdir, args.name + ".fbx"))
+
+    if not args.no_video:
+        center, diag = _character_bounds(meshes)
+        _add_camera_light(center, diag, scene)
+        turntable_spin([arm], center, scene, seconds=6, fps=args.fps)
+        render_mp4(os.path.join(args.outdir, args.name + ".mp4"), scene, args.fps)
+    return True
+
+
 def main():
     args = parse_args()
     with open(args.infile) as f:
         data = json.load(f)
+
+    scene = bpy.context.scene
+    # character mode: a rigged .blend was opened as the base file
+    if args.character:
+        try:
+            if character_main(data, args, scene):
+                print("POSE3D_EXPORT_OK")
+                return
+        except Exception as e:
+            print(f"character retarget failed ({e}); falling back to skeleton")
 
     frames = [[(None if p is None else tuple(p)) for p in fr]
               for fr in data["frames"]]

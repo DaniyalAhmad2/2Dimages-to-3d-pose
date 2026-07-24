@@ -37,6 +37,23 @@ def test_export_bvh_fbx(tmp_path):
     assert res.fbx and res.fbx.stat().st_size > 0
 
 
+_CHARACTER = "/home/athena/Downloads/65-lowpolyboy/final low poly character  rigged.blend"
+
+
+@pytest.mark.skipif(not (_HAVE_BLENDER and Path(_CHARACTER).exists()),
+                    reason="character .blend not present")
+def test_export_retargets_character(tmp_path):
+    res = export_animation(_motion(), tmp_path, name="c", fps=24,
+                           render_video=True, timeout=500, character=_CHARACTER)
+    assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
+    # a real skinned character FBX is much larger than a stick figure
+    assert res.fbx and res.fbx.stat().st_size > 100_000
+    import cv2
+    cap = cv2.VideoCapture(str(res.mp4)); cap.set(cv2.CAP_PROP_POS_FRAMES, 5)
+    ok, frame = cap.read(); cap.release()
+    assert ok and float(frame.std()) > 3.0   # posed character is visible
+
+
 @pytest.mark.skipif(not _HAVE_BLENDER, reason="Blender binary not found")
 def test_export_with_video(tmp_path):
     res = export_animation(_motion(), tmp_path, name="v", fps=30,

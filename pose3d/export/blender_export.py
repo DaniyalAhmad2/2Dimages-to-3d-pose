@@ -58,6 +58,7 @@ def export_animation(
     blender: str | None = None,
     timeout: int = 600,
     display_frame: int = 0,
+    character: str | None = None,
 ) -> ExportResult:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -67,9 +68,15 @@ def export_animation(
     json_path.write_text(json.dumps(doc))
 
     blender = blender or blender_binary()
-    cmd = [blender, "--background", "--python", str(_JOB), "--",
+    # if a rigged character .blend is given, open it as the base file so the job
+    # can retarget it; otherwise run with an empty scene (skeleton figure).
+    use_char = bool(character) and Path(character).exists()
+    base = [character] if use_char else []
+    cmd = [blender, "--background", *base, "--python", str(_JOB), "--",
            "--in", str(json_path), "--out", str(out_dir),
            "--fps", str(fps), "--name", name]
+    if use_char:
+        cmd += ["--character", str(character)]
     if not render_video:
         cmd.append("--no-video")
 

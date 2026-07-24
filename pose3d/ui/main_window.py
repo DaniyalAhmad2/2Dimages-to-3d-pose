@@ -31,6 +31,8 @@ class MainWindow(QMainWindow):
         self.model = model
         self.detector = detector
         self.open_callback = open_callback   # open_project_window(folder)
+        from pose3d.config import character_blend
+        self.character_path = character_blend()   # rigged .blend for export
         if load_image is None:
             import cv2
             load_image = lambda p: cv2.imread(p)
@@ -106,9 +108,12 @@ class MainWindow(QMainWindow):
         self.btn_import = QPushButton("⬆  Import Images")
         self.btn_export = QPushButton("⬇  Export Results")
         lay.addWidget(self.btn_import); lay.addWidget(self.btn_export)
-        for t in ("⚙ Settings", "? Help"):
-            b = QToolButton(); b.setText(t); b.setObjectName("topTool")
-            lay.addWidget(b)
+        self.btn_settings = QToolButton(); self.btn_settings.setText("⚙ Character")
+        self.btn_settings.setObjectName("topTool")
+        self.btn_settings.setToolTip("Choose a rigged .blend character for export")
+        lay.addWidget(self.btn_settings)
+        b = QToolButton(); b.setText("? Help"); b.setObjectName("topTool")
+        lay.addWidget(b)
         return bar
 
     def _build_action_row(self):
@@ -184,6 +189,7 @@ class MainWindow(QMainWindow):
 
         self.btn_import.clicked.connect(self._on_import)
         self.btn_export.clicked.connect(self._on_export)
+        self.btn_settings.clicked.connect(self._on_choose_character)
         self.sidebar.runDetection.connect(self._on_run_detection)
         self.sidebar.recalibrate.connect(self._on_recalibrate)
         self.sidebar.showJointsToggled.connect(self.cam_left.view.set_show_joints)
@@ -258,6 +264,16 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"Imported to {dlg.result_folder}", 8000)
 
+    def _on_choose_character(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Choose a rigged character (.blend)", "", "Blender (*.blend)")
+        if path:
+            self.character_path = path
+            QMessageBox.information(
+                self, "Character set",
+                f"Exports will pose this character:\n{path}")
+
     def _on_export(self):
         from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
         import numpy as np
@@ -297,7 +313,8 @@ class MainWindow(QMainWindow):
         try:
             res = export_animation(poses, out, name=self.model.project.name,
                                    fps=self.model.project.fps, render_video=True,
-                                   display_frame=self.model.current)
+                                   display_frame=self.model.current,
+                                   character=self.character_path)
         finally:
             QApplication.restoreOverrideCursor()
         if res.ok:
