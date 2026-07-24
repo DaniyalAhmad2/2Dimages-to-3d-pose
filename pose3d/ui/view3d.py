@@ -35,7 +35,7 @@ def upright_matrix(axis, sign):
 
 
 class View3D(gl.GLViewWidget):
-    GHOST_COLOR = (0.66, 0.68, 0.74, 0.45)     # translucent grey ghost body
+    GHOST_COLOR = (0.72, 0.72, 0.77, 0.85)     # low-poly character skin
     JOINT_COLOR = (0.30, 0.85, 1.0, 1.0)
     BONE_COLOR = (0.95, 0.95, 0.98, 1.0)
 
@@ -65,6 +65,7 @@ class View3D(gl.GLViewWidget):
         self.addItem(self._lines)
 
         self._show_body = True
+        self._character = None          # lazily-loaded skinned character
         self._framed = False
         self._vaxis = None
         self._vsign = 1.0
@@ -154,10 +155,13 @@ class View3D(gl.GLViewWidget):
             self._framed = True
 
     def _update_body(self, vpose):
-        """Rebuild the smooth body surface from the (upright, centred) pose."""
+        """Skin the bundled low-poly character to the (upright, centred) pose."""
         try:
-            from pose3d.geometry.bodymesh import human_body_mesh
-            verts, faces = human_body_mesh(vpose, resolution=42)
+            if self._character is None:
+                from pose3d.geometry.character import Character
+                self._character = Character()
+            valid = ~np.isnan(vpose).any(1)
+            verts, faces = self._character.pose(vpose, valid)
         except Exception:
             verts = None
         active = verts is not None and len(verts) > 0

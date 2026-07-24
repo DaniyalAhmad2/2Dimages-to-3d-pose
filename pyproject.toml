@@ -12,7 +12,6 @@ dependencies = [
     "pyqtgraph>=0.13",
     "PyOpenGL>=3.1",
     "pillow>=10.0",
-    "PyMCubes>=0.1",
 ]
 
 [dependency-groups]
