@@ -171,9 +171,13 @@ def _detect_up(frames, joint_names):
 
 
 def _remap(p, axis, sign):
-    """Remap world coords so the up-axis becomes +Z (upright render)."""
+    """Remap world coords so the up-axis becomes +Z (upright), as a proper
+    ROTATION (det=+1) — flipping one horizontal axis when needed so the figure
+    isn't left/right mirrored."""
     others = [i for i in range(3) if i != axis]
-    return Vector((p[others[0]], p[others[1]], sign * p[axis]))
+    perm_parity = -1.0 if axis == 1 else 1.0
+    hx = sign * perm_parity
+    return Vector((hx * p[others[0]], p[others[1]], sign * p[axis]))
 
 
 def _bbox(rframes):

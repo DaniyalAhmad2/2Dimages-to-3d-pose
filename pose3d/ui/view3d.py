@@ -27,6 +27,23 @@ _THICK_BONES = {
 }
 
 
+def upright_matrix(axis, sign):
+    """3x3 matrix mapping world coords to upright view coords (up-axis -> +Z).
+
+    Guaranteed to be a proper ROTATION (det=+1): one horizontal axis is flipped
+    when the naive axis-permutation would be a reflection, so the figure is
+    never left/right mirrored (a raised left hand stays a left hand).
+    """
+    others = [i for i in range(3) if i != axis]
+    perm_parity = -1.0 if axis == 1 else 1.0
+    hx = sign * perm_parity
+    M = np.zeros((3, 3))
+    M[0, others[0]] = hx
+    M[1, others[1]] = 1.0
+    M[2, axis] = sign
+    return M
+
+
 def _bone_transform(a, b, radius):
     """4x4 mapping a unit z-cylinder (z in [0,1], r=1) onto the segment a->b."""
     a = np.asarray(a, float); b = np.asarray(b, float)
@@ -129,13 +146,7 @@ class View3D(gl.GLViewWidget):
         return int(np.argmax(vpts.max(0) - vpts.min(0))), 1.0
 
     def _to_view(self, pose3d):
-        ax, sign = self._vaxis, self._vsign
-        others = [i for i in range(3) if i != ax]
-        out = np.empty_like(pose3d)
-        out[:, 0] = pose3d[:, others[0]]
-        out[:, 1] = pose3d[:, others[1]]
-        out[:, 2] = sign * pose3d[:, ax]
-        return out
+        return pose3d @ upright_matrix(self._vaxis, self._vsign).T
 
     # --- public API ---
     def set_show_body(self, on: bool):
