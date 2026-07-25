@@ -7,11 +7,47 @@ Panels talk only through the ProjectModel signal hub.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QThread, Signal
 from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter,
     QToolButton, QVBoxLayout, QWidget,
 )
+
+
+class _ExportWorker(QThread):
+    """Runs the Blender export off the UI thread, streaming progress."""
+    status = Signal(str)
+    finished_res = Signal(object)          # ExportResult or Exception
+
+    def __init__(self, poses, out, name, fps, display_frame):
+        super().__init__()
+        self._a = (poses, out, name, fps, display_frame)
+
+    def _on_line(self, line: str):
+        if "Fra:" in line:
+            try:
+                fr = line.split("Fra:")[1].split()[0]
+                self.status.emit(f"Rendering the animation… (frame {fr})")
+            except Exception:
+                self.status.emit("Rendering the animation…")
+        elif "FBX export" in line:
+            self.status.emit("Exporting the FBX character…")
+        elif "BVH Exported" in line or "export_anim.bvh" in line:
+            self.status.emit("Exporting BVH…")
+        elif "bake" in line.lower():
+            self.status.emit("Baking the pose animation…")
+
+    def run(self):
+        from pose3d.export.blender_export import export_animation
+        poses, out, name, fps, df = self._a
+        self.status.emit("Posing the character in Blender…")
+        try:
+            res = export_animation(poses, out, name=name, fps=fps,
+                                   render_video=True, display_frame=df,
+                                   on_line=self._on_line)
+        except Exception as e:      # surface any failure to the UI thread
+            res = e
+        self.finished_res.emit(res)
 
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
 from pose3d.core.skeleton import JOINT_NAMES
@@ -290,23 +326,37 @@ class MainWindow(QMainWindow):
         if not out:
             return
         poses = np.stack([f.fitted3d for f in frames])   # native units; camera auto-frames
-        from pose3d.export.blender_export import export_animation
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        self.statusBar().showMessage("Exporting BVH/FBX/mp4 via Blender…")
-        QApplication.processEvents()
-        try:
-            res = export_animation(poses, out, name=self.model.project.name,
-                                   fps=self.model.project.fps, render_video=True,
-                                   display_frame=self.model.current)  # bundled model
-        finally:
-            QApplication.restoreOverrideCursor()
-        if res.ok:
-            QMessageBox.information(
-                self, "Export complete",
-                f"Wrote:\n{res.bvh}\n{res.fbx}\n{res.mp4}")
-        else:
-            QMessageBox.critical(self, "Export failed",
-                                 (res.stderr or "")[-1500:])
+
+        # run the (slow) Blender export on a worker thread with a live progress
+        # dialog, so the UI stays responsive instead of looking frozen/crashed.
+        from PySide6.QtWidgets import QProgressDialog
+        prog = QProgressDialog("Preparing export…", None, 0, 0, self)
+        prog.setWindowTitle("Exporting results")
+        prog.setWindowModality(Qt.WindowModality.WindowModal)
+        prog.setMinimumWidth(420); prog.setMinimumDuration(0)
+        prog.setCancelButton(None)         # a Blender render can't be safely killed
+        prog.show()
+
+        worker = _ExportWorker(poses, out, self.model.project.name,
+                               self.model.project.fps, self.model.current)
+        self._export_worker = worker       # keep a reference
+        worker.status.connect(prog.setLabelText)
+
+        def _finished(res):
+            prog.close()
+            self._export_worker = None
+            if isinstance(res, Exception):
+                QMessageBox.critical(self, "Export failed", str(res))
+            elif res.ok:
+                QMessageBox.information(
+                    self, "Export complete",
+                    f"Wrote:\n{res.bvh}\n{res.fbx}\n{res.mp4}")
+            else:
+                QMessageBox.critical(self, "Export failed",
+                                     (res.stderr or res.stdout or "")[-1500:])
+
+        worker.finished_res.connect(_finished)
+        worker.start()
 
     def _toggle_fullscreen(self):
         """Toggle the 3D card filling the whole app window (in-app, not a popup)."""

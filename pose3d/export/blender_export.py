@@ -59,6 +59,7 @@ def export_animation(
     timeout: int = 600,
     display_frame: int = 0,
     character: str | None = "__bundled__",
+    on_line=None,
 ) -> ExportResult:
     if character == "__bundled__":
         from pose3d.config import character_blend
@@ -83,7 +84,22 @@ def export_animation(
     if not render_video:
         cmd.append("--no-video")
 
-    proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    if on_line is None:
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
+    else:
+        # stream Blender's output so the caller can show live progress
+        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT, text=True, bufsize=1)
+        chunks = []
+        for line in p.stdout:
+            chunks.append(line)
+            try:
+                on_line(line.rstrip())
+            except Exception:
+                pass
+        p.wait(timeout=timeout)
+        stdout, stderr, rc = "".join(chunks), "", p.returncode
 
     def _exists(ext):
         p = out_dir / f"{name}.{ext}"
@@ -92,4 +108,4 @@ def export_animation(
     return ExportResult(
         bvh=_exists("bvh"), fbx=_exists("fbx"),
         mp4=_exists("mp4") if render_video else None,
-        returncode=proc.returncode, stdout=proc.stdout, stderr=proc.stderr)
+        returncode=rc, stdout=stdout, stderr=stderr)
