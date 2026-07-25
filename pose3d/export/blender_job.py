@@ -415,12 +415,11 @@ def _retarget_character(arm, rframes, joint_names, scene):
         pb["hips"].constraints.new("COPY_LOCATION").target = empties["PELVIS"]
     for bone, tgt in _RIG_TRACK:
         if bone in pb and tgt in empties:
-            # Stretch-To aims AND stretches the bone so its tip reaches the
-            # joint -> the character's limbs line up with the keypoints even
-            # though the rig has different proportions.
-            c = pb[bone].constraints.new("STRETCH_TO")
-            c.target = empties[tgt]
-            c.volume = "NO_VOLUME"
+            # aim only (no stretch) so the exported character keeps its natural
+            # proportions — the render shows the character, not the skeleton, so
+            # limb-length mismatch isn't visible and distortion is avoided.
+            c = pb[bone].constraints.new("DAMPED_TRACK")
+            c.target = empties[tgt]; c.track_axis = "TRACK_Y"
 
 
 def _bake_and_clean(arm, scene):

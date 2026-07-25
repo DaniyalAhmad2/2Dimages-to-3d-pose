@@ -17,11 +17,12 @@ _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
 _MID = "MID"   # midpoint(pelvis, neck) — the torso split point
 
-# rig deform bone -> (start joint, end joint) it should span (stretched to fit,
-# so the character's joints land ON the keypoints regardless of rig proportions)
+# rig deform bone -> (start joint, end joint) it should span. Bones rotate to
+# aim at the keypoint and stretch toward it, but stretch is CLAMPED (below) so
+# the model bends to the pose without grotesque elongation. The head/neck are
+# intentionally NOT driven (they inherit the torso) so the head stays natural.
 _DIRECT = {
     "spine": (Joint.PELVIS, _MID), "chest": (_MID, Joint.NECK),
-    "neck": (Joint.NECK, Joint.HEAD),
     "upper_arm.L": (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW),
     "forearm.L": (Joint.LEFT_ELBOW, Joint.LEFT_WRIST),
     "upper_arm.R": (Joint.RIGHT_SHOULDER, Joint.RIGHT_ELBOW),
@@ -31,6 +32,7 @@ _DIRECT = {
     "thigh.R": (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
 }
+_STRETCH_MIN, _STRETCH_MAX = 0.8, 1.25   # clamp bone stretch (keep proportions)
 
 
 def _align(a, b):
@@ -174,8 +176,9 @@ class Character:
             D[:3, 3] = start - rest_head
             return D
         u = dv / dlen
-        R = _align(rd / rlen, u)
-        Sc = np.eye(3) + (dlen / rlen - 1.0) * np.outer(u, u)   # stretch along u
+        R = _align(rd / rlen, u)                       # aim the bone at the joint
+        s = np.clip(dlen / rlen, _STRETCH_MIN, _STRETCH_MAX)   # clamped stretch
+        Sc = np.eye(3) + (s - 1.0) * np.outer(u, u)
         M = Sc @ R
         D[:3, :3] = M
         D[:3, 3] = start - M @ rest_head
