@@ -358,7 +358,21 @@ def _find_rig():
     return arm, meshes
 
 
-def _retarget_character(arm, rframes, joint_names, scene):
+def _stepped_schedule(n, fps, hold_s=0.7, trans_s=0.3):
+    """Frame schedule that holds each captured pose then eases to the next.
+
+    Returns (schedule, total_frames): schedule[i] = frames to keyframe pose i
+    (two identical keyframes bracket the hold; the gap to the next pose's
+    keyframes is the smooth transition)."""
+    hold = max(1, int(round(hold_s * fps)))
+    trans = max(1, int(round(trans_s * fps)))
+    seg = hold + trans
+    schedule = [[1 + i * seg, 1 + i * seg + hold] for i in range(n)]
+    total = 1 + (n - 1) * seg + hold
+    return schedule, total
+
+
+def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
     import math
     idx = {n: i for i, n in enumerate(joint_names)}
 
@@ -396,10 +410,12 @@ def _retarget_character(arm, rframes, joint_names, scene):
         hips = [fr[idx[n]] for n in ("LEFT_HIP", "RIGHT_HIP") if fr[idx[n]]]
         return Vector([sum(c) / len(hips) for c in zip(*hips)]) if hips else Vector()
 
+    if schedule is None:
+        schedule = [[fi + 1] for fi in range(len(rframes))]
     last = {}
     for fi, fr in enumerate(rframes):
-        f = fi + 1
         pv = pelvis_of(fr)
+        pos = {}
         for n in joint_names:
             p = fr[idx[n]]
             if p is not None:
@@ -407,8 +423,11 @@ def _retarget_character(arm, rframes, joint_names, scene):
                 last[n] = w
             else:
                 w = last.get(n, hips_world)     # hold last known if occluded
-            empties[n].location = w
-            empties[n].keyframe_insert("location", frame=f)
+            pos[n] = w
+        for f in schedule[fi]:                  # keyframe this pose at its frames
+            for n in joint_names:
+                empties[n].location = pos[n]
+                empties[n].keyframe_insert("location", frame=f)
 
     pb = arm.pose.bones
     if "hips" in pb:
@@ -480,8 +499,12 @@ def character_main(data, args, scene):
              if (o.type == "MESH" and o.parent is None) or o.type == "CAMERA"])
 
     scene.render.fps = args.fps
-    _retarget_character(arm, rframes, joint_names, scene)
-    scene.frame_start = 1; scene.frame_end = len(rframes)
+    n = len(rframes)
+    # multi-frame: hold each captured pose then ease to the next (stop-motion);
+    # single pose: one frame (spun as a turntable below).
+    schedule, total = _stepped_schedule(n, args.fps) if n > 1 else (None, 1)
+    _retarget_character(arm, rframes, joint_names, scene, schedule=schedule)
+    scene.frame_start = 1; scene.frame_end = total
     _bake_and_clean(arm, scene)
 
     enable_addons()
@@ -493,7 +516,10 @@ def character_main(data, args, scene):
     if not args.no_video:
         center, diag = _character_bounds(meshes)
         _add_camera_light(center, diag, scene)
-        turntable_spin([arm], center, scene, seconds=6, fps=args.fps)
+        # spin exactly once over the whole clip so it never gets "stuck" after
+        # the poses finish; a lone pose gets a 6 s turntable.
+        secs = total / args.fps if n > 1 else 6
+        turntable_spin([arm], center, scene, seconds=secs, fps=args.fps)
         render_mp4(os.path.join(args.outdir, args.name + ".mp4"), scene, args.fps)
     return True
 
