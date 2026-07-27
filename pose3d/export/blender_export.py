@@ -26,6 +26,7 @@ class ExportResult:
     returncode: int
     stdout: str
     stderr: str
+    fbx_mocap: Path | None = None     # clean rotation-only armature (re-poseable)
 
     @property
     def ok(self) -> bool:
@@ -160,7 +161,9 @@ def export_animation(
         p = out_dir / f"{name}.{ext}"
         return p if p.exists() else None
 
+    mocap = out_dir / f"{name}_mocap.fbx"
     return ExportResult(
         bvh=_exists("bvh"), fbx=_exists("fbx"),
         mp4=_exists("mp4") if render_video else None,
-        returncode=rc, stdout=stdout, stderr=stderr)
+        returncode=rc, stdout=stdout, stderr=stderr,
+        fbx_mocap=mocap if mocap.exists() else None)

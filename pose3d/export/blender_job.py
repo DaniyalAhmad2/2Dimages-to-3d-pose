@@ -372,6 +372,100 @@ def _stepped_schedule(n, fps, hold_s=0.7, trans_s=0.3):
     return schedule, total
 
 
+def _pose_hierarchy_order(arm):
+    """Pose-bone names, parents before children (so a bone is posed after the
+    parent whose FK position it reads)."""
+    order, seen = [], set()
+
+    def visit(pb):
+        if pb.name in seen:
+            return
+        if pb.parent is not None:
+            visit(pb.parent)
+        seen.add(pb.name); order.append(pb.name)
+
+    for pb in arm.pose.bones:
+        visit(pb)
+    return order
+
+
+def _prep_rig(arm):
+    """Strip the rig's own constraints (leg IK, foot/palm Copy-Rotation) — they
+    would override the transforms we set — and force plain parent->child
+    inheritance so posing composes predictably."""
+    # make the rig the active object in OBJECT mode: the operators used later
+    # (mode_set, select_all, the exporters) all poll against it
+    bpy.context.view_layer.objects.active = arm
+    arm.select_set(True)
+    if arm.mode != "OBJECT":
+        bpy.ops.object.mode_set(mode="OBJECT")
+    for pb in arm.pose.bones:
+        for c in list(pb.constraints):
+            pb.constraints.remove(c)
+    for b in arm.data.bones:
+        b.use_inherit_rotation = True
+        b.inherit_scale = "FULL"
+        b.use_local_location = True
+
+
+def _clear_pose_anim(arm):
+    """Drop all keyframes and return the rig to its rest pose."""
+    arm.animation_data_clear()
+    for pb in arm.pose.bones:
+        pb.matrix_basis = Matrix.Identity(4)
+    bpy.context.view_layer.update()
+
+
+def _drive_character_bones_fk(arm, data, scene, schedule):
+    """Rotation-only FK pose, keeping the rig's hierarchy and bone lengths.
+
+    Each bone takes the ORIENTATION the app's skinning gave it, with the stretch
+    (non-uniform scale) dropped and its head left where the parent chain puts it
+    — i.e. the character mimics the captured motion at its own proportions. The
+    result is a normal, re-poseable, retargetable armature with rotation keys
+    (plus root translation), which is what BVH/FBX mocap expects. Because there
+    is no scale, nothing shears down the hierarchy.
+    """
+    bone_frames = data["bone_frames"]
+    n = len(bone_frames)
+    if schedule is None:
+        schedule = [[fi + 1] for fi in range(n)]
+    _prep_rig(arm)
+    order = _pose_hierarchy_order(arm)
+    arm_inv = arm.matrix_world.inverted()
+    for pb in arm.pose.bones:
+        pb.rotation_mode = "QUATERNION"
+
+    last = None
+    for fi in range(n):
+        mats = bone_frames[fi] if bone_frames[fi] is not None else last
+        if mats is None:
+            continue
+        last = mats
+        for f in schedule[fi]:
+            scene.frame_set(f)
+            for name in order:
+                pb = arm.pose.bones.get(name)
+                M = mats.get(name)
+                if pb is None or M is None:
+                    continue
+                A = arm_inv @ Matrix(M)                    # armature space
+                rot = A.to_quaternion().to_matrix().to_4x4()   # drops stretch
+                # root carries the figure's translation; children hang off the
+                # chain (the parent above is already posed + updated)
+                loc = (A.to_translation() if pb.parent is None
+                       else pb.matrix.to_translation())
+                pb.matrix = Matrix.Translation(loc) @ rot
+                bpy.context.view_layer.update()
+            for name in order:
+                pb = arm.pose.bones.get(name)
+                if pb is None:
+                    continue
+                pb.keyframe_insert("rotation_quaternion", frame=f)
+                if pb.parent is None:
+                    pb.keyframe_insert("location", frame=f)
+
+
 def _drive_character_bones(arm, data, scene, schedule):
     """Pose the rig by setting each bone's transform to the value computed by the
     app's own skinning (data["bone_frames"]). This makes the exported character
@@ -401,12 +495,7 @@ def _drive_character_bones(arm, data, scene, schedule):
         eb.use_connect = False
         eb.parent = None
     bpy.ops.object.mode_set(mode="OBJECT")
-    # strip rig constraints (IK on the legs, Copy-Rotation on feet/palms) — they
-    # would override the transforms we set and pull the pose off the keypoints
-    # (the live view is pure skinning with no constraints).
-    for pb in arm.pose.bones:
-        for c in list(pb.constraints):
-            pb.constraints.remove(c)
+    _prep_rig(arm)          # no IK/Copy-Rotation pulling the pose off the keypoints
 
     rest = {b.name: b.matrix_local.copy() for b in arm.data.bones}   # armature space
     arm_inv = arm.matrix_world.inverted()
@@ -562,21 +651,34 @@ def character_main(data, args, scene):
     # multi-frame: hold each captured pose then ease to the next (stop-motion);
     # single pose: one frame (spun as a turntable below).
     schedule, total = _stepped_schedule(n, args.fps) if n > 1 else (None, 1)
+
+    enable_addons()
+    import os
+    os.makedirs(args.outdir, exist_ok=True)
+    bvh_path = os.path.join(args.outdir, args.name + ".bvh")
+    fbx_path = os.path.join(args.outdir, args.name + ".fbx")
+    mocap_path = os.path.join(args.outdir, args.name + "_mocap.fbx")
+
     if data.get("bone_frames") is not None:
-        # exact match to the live view: drive bones by the app's own skinning
+        # 1) mocap export: rotation-only FK with the hierarchy intact, so the
+        #    armature is re-poseable/retargetable in Blender and engines.
+        _drive_character_bones_fk(arm, data, scene, schedule)
+        scene.frame_start = 1; scene.frame_end = total
+        export_bvh(arm, bvh_path, scene)
+        _export_character_fbx([arm] + meshes, mocap_path)
+        # 2) visual export: exact match to the app's 3D view. This flattens the
+        #    rig (destructive), so it has to come after the mocap export.
+        _clear_pose_anim(arm)
         _drive_character_bones(arm, data, scene, schedule)
         scene.frame_start = 1; scene.frame_end = total
+        _export_character_fbx([arm] + meshes, fbx_path)
     else:
         # fallback: aim-only Damped-Track retarget from joint positions
         _retarget_character(arm, rframes, joint_names, scene, schedule=schedule)
         scene.frame_start = 1; scene.frame_end = total
         _bake_and_clean(arm, scene)
-
-    enable_addons()
-    import os
-    os.makedirs(args.outdir, exist_ok=True)
-    export_bvh(arm, os.path.join(args.outdir, args.name + ".bvh"), scene)
-    _export_character_fbx([arm] + meshes, os.path.join(args.outdir, args.name + ".fbx"))
+        export_bvh(arm, bvh_path, scene)
+        _export_character_fbx([arm] + meshes, fbx_path)
 
     if not args.no_video:
         center, diag = _character_bounds(meshes)

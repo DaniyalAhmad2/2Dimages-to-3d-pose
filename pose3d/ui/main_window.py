@@ -348,9 +348,14 @@ class MainWindow(QMainWindow):
             if isinstance(res, Exception):
                 QMessageBox.critical(self, "Export failed", str(res))
             elif res.ok:
-                QMessageBox.information(
-                    self, "Export complete",
-                    f"Wrote:\n{res.bvh}\n{res.fbx}\n{res.mp4}")
+                items = [
+                    ("Video", res.mp4),
+                    ("Character — matches the 3D view exactly", res.fbx),
+                    ("Animation rig — re-poseable armature for Blender",
+                     res.fbx_mocap),
+                    ("Motion capture", res.bvh)]
+                body = "\n\n".join(f"{lbl}:\n{p}" for lbl, p in items if p)
+                QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
             else:
                 QMessageBox.critical(self, "Export failed",
                                      (res.stderr or res.stdout or "")[-1500:])

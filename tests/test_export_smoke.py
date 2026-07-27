@@ -55,6 +55,30 @@ def test_export_retargets_character(tmp_path):
     assert ok and float(frame.std()) > 3.0   # posed character is visible
 
 
+@pytest.mark.skipif(not (_HAVE_BLENDER and _CHARACTER),
+                    reason="bundled character not present")
+def test_export_produces_hierarchical_mocap_rig(tmp_path):
+    """The mocap export must be a real armature: a nested bone hierarchy with
+    rotation animation. Regression guard — the exact/visual pose path flattens
+    the rig, and exporting the mocap files from THAT gave a bone list with no
+    hierarchy at all (every joint a sibling End Site)."""
+    res = export_animation(_motion(), tmp_path, name="m", fps=24,
+                           render_video=False, timeout=400, character=_CHARACTER)
+    assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
+    assert res.fbx_mocap and res.fbx_mocap.stat().st_size > 100_000
+    assert res.fbx and res.fbx.stat().st_size > 100_000     # visual one too
+
+    head = res.bvh.read_text().split("MOTION")[0]
+    depth = maxd = 0
+    for line in head.splitlines():
+        depth += line.count("{") - line.count("}")
+        maxd = max(maxd, depth)
+    # a flattened rig nests only ROOT -> JOINT (depth 2); a real skeleton chains
+    # hips -> thigh -> shin -> foot -> ...
+    assert maxd > 4, f"BVH hierarchy is flat (max nesting depth {maxd})"
+    assert "End Site" in head
+
+
 @pytest.mark.skipif(not _HAVE_BLENDER, reason="Blender binary not found")
 def test_export_with_video(tmp_path):
     res = export_animation(_motion(), tmp_path, name="v", fps=30,
