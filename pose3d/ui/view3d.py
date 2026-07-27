@@ -66,6 +66,21 @@ class View3D(gl.GLViewWidget):
         self._vaxis = None
         self._framed = False
 
+    def fit_character(self, poses):
+        """Size the character to the subject once, from the whole take, so it
+        lands on the keypoints without per-frame stretching. `poses` are raw
+        world poses; they get de-tilted here exactly as set_pose() does."""
+        try:
+            if self._character is None:
+                from pose3d.geometry.character import Character
+                self._character = Character()
+            poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
+            if self._R is not None:
+                poses = poses @ self._R.T
+            self._character.fit_proportions(poses)
+        except Exception:
+            pass
+
     def _to_view(self, pose3d):
         if self._R is not None:
             return pose3d @ self._R.T

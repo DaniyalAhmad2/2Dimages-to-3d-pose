@@ -90,6 +90,72 @@ class Character:
                 continue
             base = re.sub(r"\.\d+$", "", name)
             self._orphan[b] = self.bidx.get(base, self.hips_idx)
+        # per-bone length scale, fitted once from a whole take (see
+        # fit_proportions). 1.0 = the rig's own build.
+        self._bone_scale = np.ones(len(self.rest))
+
+    def _spec_pos(self, pose, valid, spec):
+        """Position of a _DIRECT endpoint (a joint, or the torso midpoint)."""
+        if spec == _MID:
+            a, b = int(Joint.NECK), int(Joint.PELVIS)
+            return (pose[a] + pose[b]) / 2 if (valid[a] and valid[b]) else None
+        i = int(spec)
+        return pose[i] if valid[i] else None
+
+    def fit_proportions(self, poses):
+        """Size the character's limbs to the subject, once for a whole take.
+
+        The bundled rig is stylised (its thigh is 1.04 against a 1.54 shin, where
+        a real thigh and shin are about equal), so posing it at its own build
+        leaves the character's knees and shoulders ~10% of body height away from
+        the detected joints, and stretching bones per frame to close that gap
+        distorts the mesh differently every frame. Instead we take each driven
+        bone's median length over the take and bake it in as a CONSTANT scale:
+        the character then lands on the keypoints while its proportions stay
+        fixed, so nothing wobbles or tears from frame to frame.
+
+        `poses` are upright (de-tilted) poses, same space as pose().
+        """
+        poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
+        lens = {b: [] for b in self._direct}
+        for pose in poses:
+            valid = ~np.isnan(pose).any(1)
+            if not valid.any():
+                continue
+            vp = pose[valid]
+            our_h = float(vp[:, 2].max() - vp[:, 2].min())
+            if our_h < 1e-9:
+                continue
+            to_rig_len = self.rig_h / our_h        # pose units -> rig units
+            for b, (s_spec, e_spec) in self._direct.items():
+                a = self._spec_pos(pose, valid, s_spec)
+                c = self._spec_pos(pose, valid, e_spec)
+                if a is not None and c is not None:
+                    lens[b].append(float(np.linalg.norm(c - a)) * to_rig_len)
+        # A driven bone does not always start at its _DIRECT start joint: the
+        # spine is measured PELVIS->MID, but the undriven hips bone sits between
+        # the pelvis and the spine's head. Subtract that lead-in, or the spine
+        # absorbs the hips' length too and the torso comes out far too long.
+        anchor = {}
+        for b, (s_spec, e_spec) in self._direct.items():
+            anchor.setdefault(e_spec, self.tail[b])
+            anchor.setdefault(s_spec, self.head[b])
+        anchor[Joint.PELVIS] = self.hips_world      # pelvis joint == hips head
+
+        scale = np.ones(len(self.rest))
+        for b, vals in lens.items():
+            rest_len = float(np.linalg.norm(self.tail[b] - self.head[b]))
+            if not vals or rest_len <= 1e-9:
+                continue
+            s_spec = self._direct[b][0]
+            lead_in = 0.0
+            if s_spec in anchor:
+                lead_in = float(np.linalg.norm(anchor[s_spec] - self.head[b]))
+            want = max(np.median(vals) - lead_in, 0.1 * rest_len)
+            # clamp so a bad reconstruction can't produce an absurd rig
+            scale[b] = float(np.clip(want / rest_len, 0.5, 2.0))
+        self._bone_scale = scale
+        return scale
 
     def _topo(self):
         order, seen = [], set()
@@ -227,19 +293,25 @@ class Character:
         `base` is the parent's skin matrix. The bone's head is carried by the
         parent (so the two never separate — this is what keeps the waist and
         shoulders from tearing), and the bone is then rotated about that head to
-        aim at `end`. Rotation only: the bone keeps its rest length, so the mesh
-        is never stretched and the character holds its own proportions.
+        aim at `end`, at the constant length fit_proportions gave it.
+
+        The rotation is measured from the bone's REST direction rather than from
+        the parent's posed one, so twist doesn't accumulate down the chain; and
+        the scale is the bone's own fitted constant rather than something derived
+        per frame, so the character's build never changes shape while it moves.
         """
-        R_par, t_par = base[:3, :3], base[:3, 3]
-        head = R_par @ self.head[b] + t_par                  # posed head
-        d_par = R_par @ (self.tail[b] - self.head[b])        # bone, carried by parent
-        n_par = float(np.linalg.norm(d_par))
+        head = base[:3, :3] @ self.head[b] + base[:3, 3]     # posed head (FK)
+        rest_d = self.tail[b] - self.head[b]
+        n_rest = float(np.linalg.norm(rest_d))
         d_want = end - head
         n_want = float(np.linalg.norm(d_want))
-        if n_par < 1e-9 or n_want < 1e-9:
+        if n_rest < 1e-9 or n_want < 1e-9:
             return base
-        R = _align(d_par / n_par, d_want / n_want)           # aim at the joint
+        u = d_want / n_want
+        R = _align(rest_d / n_rest, u)                       # aim at the joint
+        s = float(self._bone_scale[b])
+        A = (np.eye(3) + (s - 1.0) * np.outer(u, u)) @ R     # aim, then fixed length
         M = np.eye(4)
-        M[:3, :3] = R @ R_par
-        M[:3, 3] = head - R @ (R_par @ self.head[b])         # pin the head in place
+        M[:3, :3] = A
+        M[:3, 3] = head - A @ self.head[b]                   # pin the head in place
         return M

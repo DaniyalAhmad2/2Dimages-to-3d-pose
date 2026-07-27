@@ -404,19 +404,23 @@ def _prep_rig(arm):
             pb.constraints.remove(c)
     for b in arm.data.bones:
         b.use_inherit_rotation = True
-        b.inherit_scale = "FULL"
         b.use_local_location = True
+        # Do NOT inherit scale. The app sizes each bone independently (its limbs
+        # are fitted to the subject), so a child must not be rescaled by its
+        # parent — with FULL inheritance the child's local transform would need a
+        # shear to compensate, which loc/rot/scale cannot express, and the
+        # exported pose drifts from the 3D view.
+        b.inherit_scale = "NONE"
 
 
 def _drive_character_bones_fk(arm, data, scene, schedule):
-    """Rotation-only FK pose, keeping the rig's hierarchy and bone lengths.
+    """Pose the rig from the app's own bone matrices, hierarchy intact.
 
-    Each bone takes the ORIENTATION the app's skinning gave it, with the stretch
-    (non-uniform scale) dropped and its head left where the parent chain puts it
-    — i.e. the character mimics the captured motion at its own proportions. The
-    result is a normal, re-poseable, retargetable armature with rotation keys
-    (plus root translation), which is what BVH/FBX mocap expects. Because there
-    is no scale, nothing shears down the hierarchy.
+    Each bone is given the exact world transform the app's skinning computed, so
+    the export matches the 3D view; because scale inheritance is switched off
+    (see _prep_rig) the hierarchy can represent that exactly, and the result is
+    still a normal re-poseable, retargetable armature rather than a flattened
+    bone soup.
     """
     bone_frames = data["bone_frames"]
     n = len(bone_frames)
@@ -441,21 +445,18 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
                 M = mats.get(name)
                 if pb is None or M is None:
                     continue
-                A = arm_inv @ Matrix(M)                    # armature space
-                rot = A.to_quaternion().to_matrix().to_4x4()   # drops stretch
-                # root carries the figure's translation; children hang off the
-                # chain (the parent above is already posed + updated)
-                loc = (A.to_translation() if pb.parent is None
-                       else pb.matrix.to_translation())
-                pb.matrix = Matrix.Translation(loc) @ rot
+                # set the bone's full world transform, exactly as the app
+                # computed it (parents first, so each child reads a settled
+                # parent). Scale inheritance is off, so this is representable.
+                pb.matrix = arm_inv @ Matrix(M)
                 bpy.context.view_layer.update()
             for name in order:
                 pb = arm.pose.bones.get(name)
                 if pb is None:
                     continue
+                pb.keyframe_insert("location", frame=f)
                 pb.keyframe_insert("rotation_quaternion", frame=f)
-                if pb.parent is None:
-                    pb.keyframe_insert("location", frame=f)
+                pb.keyframe_insert("scale", frame=f)
 
 
 def _retarget_character(arm, rframes, joint_names, scene, schedule=None):

@@ -439,6 +439,9 @@ class MainWindow(QMainWindow):
             if up is not None:
                 R = de_tilt_matrix(up)
         self.view3d.set_orientation(R)
+        if poses:
+            # size the character to this subject (same fit the export uses)
+            self.view3d.fit_character(np.stack(poses))
 
     def _load_model(self):
         p = self.model.project
