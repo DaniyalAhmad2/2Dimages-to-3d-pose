@@ -27,6 +27,10 @@ _MID = "MID"   # midpoint(pelvis, neck) — the torso split point
 # The head/neck are intentionally NOT driven (they inherit the torso).
 _DIRECT = {
     "spine": (Joint.PELVIS, _MID), "chest": (_MID, Joint.NECK),
+    # the clavicles carry the arms: drive them, or the shoulders sit wherever
+    # the chest happens to put them and the arm roots miss the keypoints
+    "shoulder.L": (Joint.NECK, Joint.LEFT_SHOULDER),
+    "shoulder.R": (Joint.NECK, Joint.RIGHT_SHOULDER),
     "upper_arm.L": (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW),
     "forearm.L": (Joint.LEFT_ELBOW, Joint.LEFT_WRIST),
     "upper_arm.R": (Joint.RIGHT_SHOULDER, Joint.RIGHT_ELBOW),
@@ -118,6 +122,7 @@ class Character:
         """
         poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
         lens = {b: [] for b in self._direct}
+        torso = []
         for pose in poses:
             valid = ~np.isnan(pose).any(1)
             if not valid.any():
@@ -132,6 +137,9 @@ class Character:
                 c = self._spec_pos(pose, valid, e_spec)
                 if a is not None and c is not None:
                     lens[b].append(float(np.linalg.norm(c - a)) * to_rig_len)
+            n, p = int(Joint.NECK), int(Joint.PELVIS)
+            if valid[n] and valid[p]:
+                torso.append(float(np.linalg.norm(pose[n] - pose[p])) * to_rig_len)
         # A driven bone does not always start at its _DIRECT start joint: the
         # spine is measured PELVIS->MID, but the undriven hips bone sits between
         # the pelvis and the spine's head. Subtract that lead-in, or the spine
@@ -154,6 +162,23 @@ class Character:
             want = max(np.median(vals) - lead_in, 0.1 * rest_len)
             # clamp so a bad reconstruction can't produce an absurd rig
             scale[b] = float(np.clip(want / rest_len, 0.5, 2.0))
+
+        # The torso is a chain of THREE bones (hips + spine + chest) spanning
+        # pelvis->neck, and the hips bone is undriven. Sizing spine and chest
+        # individually starves them — on a real subject the rig's hips bone alone
+        # is longer than half the torso, so the spine collapses to the clamp and
+        # the hip region bunches up. Scale the whole chain together instead,
+        # which keeps the rig's own torso proportions and puts the neck (and the
+        # shoulders hanging off the chest) at the right height.
+        chain = [self.hips_idx] + [self.bidx[n] for n in ("spine", "chest")
+                                   if n in self.bidx]
+        rig_torso = sum(float(np.linalg.norm(self.tail[b] - self.head[b]))
+                        for b in chain)
+        if torso and rig_torso > 1e-9:
+            ts = float(np.clip(np.median(torso) / rig_torso, 0.5, 2.0))
+            for b in chain:
+                scale[b] = ts
+
         self._bone_scale = scale
         return scale
 
@@ -228,18 +253,21 @@ class Character:
         skin = np.tile(np.eye(4), (len(self.rest), 1, 1))
         hips_head = self.head[self.hips_idx]
         hips_pos = to_rig(pelvis)
-        R_hips = np.eye(3)
+        A_hips = np.eye(3)
         mid = resolve(_MID)
         if mid is not None:
             rest_dir = self.tail[self.hips_idx] - hips_head
             want = mid - hips_pos
             if np.linalg.norm(rest_dir) > 1e-9 and np.linalg.norm(want) > 1e-9:
                 # aim the pelvis at the same torso midpoint the spine targets, so
-                # the two stay collinear and the waist doesn't crease. Rotation
-                # only: stretching here would scale the legs, which hang off it.
-                R_hips = _align(rest_dir, want)
-        skin[self.hips_idx][:3, :3] = R_hips
-        skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
+                # the two stay collinear and the waist doesn't crease, at the
+                # length the torso fit gave it (the thighs hang off it, and they
+                # are re-aimed at the knees, so this doesn't distort the legs).
+                u = want / np.linalg.norm(want)
+                s = float(self._bone_scale[self.hips_idx])
+                A_hips = (np.eye(3) + (s - 1.0) * np.outer(u, u)) @ _align(rest_dir, u)
+        skin[self.hips_idx][:3, :3] = A_hips
+        skin[self.hips_idx][:3, 3] = hips_pos - A_hips @ hips_head
         for b in self.order:
             if b == self.hips_idx or b in self._orphan:
                 continue
