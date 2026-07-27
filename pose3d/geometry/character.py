@@ -7,6 +7,7 @@ blend-skins the mesh. Pure numpy, so it runs live in the 3D view.
 """
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import numpy as np
@@ -78,6 +79,16 @@ class Character:
         self.hips_idx = self.bidx["hips"]
         self._direct = {self.bidx[b]: se for b, se in _DIRECT.items()
                         if b in self.bidx}
+        # The rig carries stray helper bones (leg IK targets like "shin.L.001")
+        # that have no parent and no skin weight. Left alone they keep their rest
+        # transform while the body moves, so they float away from it in the
+        # exported armature. Make each follow the bone it is named after.
+        self._orphan = {}
+        for b, name in enumerate(names):
+            if b == self.hips_idx or self.parent[b] >= 0:
+                continue
+            base = re.sub(r"\.\d+$", "", name)
+            self._orphan[b] = self.bidx.get(base, self.hips_idx)
 
     def _topo(self):
         order, seen = [], set()
@@ -150,11 +161,15 @@ class Character:
                 if start is not None and end is not None:
                     skin[b] = self._bone_delta(b, start, end)
                     continue
-            if b == self.hips_idx:
+            if b == self.hips_idx or b in self._orphan:
                 continue
             p = self.parent[b]
             if p >= 0:
-                skin[b] = skin[p]
+                skin[b] = skin[p]      # unmapped bones inherit their parent
+        # parentless helper bones follow the bone they are named after; done last
+        # so their target is already posed, whatever the bone ordering is.
+        for b, target in self._orphan.items():
+            skin[b] = skin[target]
         return skin, pelvis, scale, Rz
 
     def pose_bone_matrices(self, up_pose, valid):
