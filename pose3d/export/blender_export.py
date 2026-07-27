@@ -41,7 +41,8 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
     """
     try:
         from pose3d.geometry.character import Character
-        from pose3d.geometry.orient import detect_vertical, upright_matrix
+        from pose3d.geometry.orient import (sequence_up, de_tilt_matrix,
+                                            detect_vertical, upright_matrix)
     except Exception:
         return None, None
     try:
@@ -50,17 +51,23 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
         return None, None
 
     poses3d = np.asarray(poses3d, float).reshape(-1, NUM_JOINTS, 3)
-    # detect the up-axis once (like the view: cached on first pose) from a frame
-    # that has a head + lower body, preferring the one the turntable displays.
-    order = [display_frame] + [i for i in range(len(poses3d)) if i != display_frame]
-    axis, sign = 2, 1.0
-    for i in order:
-        if 0 <= i < len(poses3d):
-            v = ~np.isnan(poses3d[i]).any(1)
-            if v.any():
-                axis, sign = detect_vertical(poses3d[i], v)
-                break
-    R = upright_matrix(axis, sign).T
+    # de-tilt using the whole sequence (same as the 3D view) so the character
+    # stands upright — removes a consistent world-frame tilt while keeping the
+    # subject's genuine per-frame lean.
+    up = sequence_up(poses3d)
+    if up is not None:
+        R = de_tilt_matrix(up).T
+    else:
+        # fallback: single-frame axis detection
+        axis, sign = 2, 1.0
+        order = [display_frame] + [i for i in range(len(poses3d)) if i != display_frame]
+        for i in order:
+            if 0 <= i < len(poses3d):
+                v = ~np.isnan(poses3d[i]).any(1)
+                if v.any():
+                    axis, sign = detect_vertical(poses3d[i], v)
+                    break
+        R = upright_matrix(axis, sign).T
 
     bone_frames = []
     for pose in poses3d:

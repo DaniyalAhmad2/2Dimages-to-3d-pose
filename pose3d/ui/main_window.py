@@ -421,6 +421,22 @@ class MainWindow(QMainWindow):
                       "green" if worst < 5 else "amber" if worst < 12 else "red")
             self.timeline.set_status(i, status)
 
+    def _apply_view_orientation(self):
+        """De-tilt the 3D view using the whole sequence, so the figure stands
+        upright (removes a consistent world-frame tilt from calibration) while
+        keeping genuine per-frame lean."""
+        import numpy as np
+        from pose3d.geometry.orient import sequence_up, de_tilt_matrix
+        frames = self.model.project.frames
+        poses = [f.fitted3d for f in frames
+                 if f.fitted3d is not None and not np.isnan(f.fitted3d).all()]
+        R = None
+        if poses:
+            up = sequence_up(np.stack(poses))
+            if up is not None:
+                R = de_tilt_matrix(up)
+        self.view3d.set_orientation(R)
+
     def _load_model(self):
         p = self.model.project
         self.title_label.setText(f"Project: {p.name}")
@@ -431,6 +447,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_calibrated(self.model.rig is not None)
         self.timeline.populate(p.frames, self.load_image)
         self.timeline_header.set_count(len(p.frames))
+        self._apply_view_orientation()
         if p.frames:
             self.model.set_frame(0)
             self.timeline.select(0)

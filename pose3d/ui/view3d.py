@@ -53,12 +53,22 @@ class View3D(gl.GLViewWidget):
         self._framed = False
         self._vaxis = None
         self._vsign = 1.0
+        self._R = None                  # world->view rotation (sequence de-tilt)
 
     # --- orientation / framing ---
     def _detect_vertical(self, pose3d, valid):
         return detect_vertical(pose3d, valid)
 
+    def set_orientation(self, R):
+        """Set an explicit world->view rotation (3x3), e.g. a whole-sequence
+        de-tilt so the figure stands upright. None -> per-frame auto-detect."""
+        self._R = None if R is None else np.asarray(R, float).reshape(3, 3)
+        self._vaxis = None
+        self._framed = False
+
     def _to_view(self, pose3d):
+        if self._R is not None:
+            return pose3d @ self._R.T
         return pose3d @ upright_matrix(self._vaxis, self._vsign).T
 
     # --- public API ---
@@ -82,15 +92,26 @@ class View3D(gl.GLViewWidget):
             self._clear()
             return
 
-        if self._vaxis is None:
+        if self._R is None and self._vaxis is None:
             self._vaxis, self._vsign = self._detect_vertical(pose3d, valid)
 
         v = self._to_view(pose3d)
         vv = v[valid]
-        cx, cy, floor = vv[:, 0].mean(), vv[:, 1].mean(), vv[:, 2].min()
-        v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= floor
+        # centre horizontally; ground tentatively on the lowest joint (the ankle,
+        # since feet aren't detected)
+        cx, cy = vv[:, 0].mean(), vv[:, 1].mean()
+        v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= vv[:, 2].min()
 
-        height = float(vv[:, 2].max() - vv[:, 2].min()) or 1.0
+        # skin the character, then ground on ITS lowest vertex (the sole) so the
+        # feet rest ON the plane instead of the ankle (feet would pierce it).
+        vpose = np.where(valid[:, None], v, np.nan)
+        verts, faces = self._skin(vpose)
+        if verts is not None and len(verts):
+            dz = float(verts[:, 2].min())
+            v[:, 2] -= dz
+            verts = verts.copy(); verts[:, 2] -= dz
+
+        height = float(v[valid][:, 2].max() - v[valid][:, 2].min()) or 1.0
 
         # coloured skeleton
         self._scatter.setData(pos=v[valid])
@@ -99,12 +120,10 @@ class View3D(gl.GLViewWidget):
             if valid[int(a)] and valid[int(b)]:
                 seg.append(v[int(a)]); seg.append(v[int(b)])
         self._lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
-
-        # smooth human body surface (metaball skin) around the skeleton
-        vpose = np.where(valid[:, None], v, np.nan)
-        self._update_body(vpose)
+        self._set_body(verts, faces)
 
         if not self._framed:
+            vv = v[valid]
             span = float(np.linalg.norm(vv.max(0) - vv.min(0))) or 1.0
             self._grid.setSize(span * 1.6, span * 1.6)
             self._grid.setSpacing(span / 8.0, span / 8.0)
@@ -112,16 +131,18 @@ class View3D(gl.GLViewWidget):
                                    distance=span * 1.9, elevation=12, azimuth=-70)
             self._framed = True
 
-    def _update_body(self, vpose):
-        """Skin the bundled low-poly character to the (upright, centred) pose."""
+    def _skin(self, vpose):
+        """Skin the bundled character to the (upright, centred) pose -> verts."""
         try:
             if self._character is None:
                 from pose3d.geometry.character import Character
                 self._character = Character()
             valid = ~np.isnan(vpose).any(1)
-            verts, faces = self._character.pose(vpose, valid)
+            return self._character.pose(vpose, valid)
         except Exception:
-            verts = None
+            return None, None
+
+    def _set_body(self, verts, faces):
         active = verts is not None and len(verts) > 0
         self._body.opts["_active"] = active
         if active:
