@@ -51,6 +51,39 @@ def test_character_handles_sparse_pose():
 
 
 @pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+def test_bones_stay_connected_when_posed():
+    """Bones joined in the rest rig must stay joined once posed.
+
+    Regression guard: bones used to be placed ABSOLUTELY between their two
+    keypoints, ignoring the parent, so e.g. the spine drifted ~0.9 units off the
+    hips and the mesh weighted across that joint was torn open at the waist.
+    """
+    from pose3d.geometry.character import Character
+    ch = Character()
+    base = sample_skeleton_3d()
+    piv = base[int(Joint.PELVIS)].copy()
+
+    def rotX(deg):
+        a = np.radians(deg)
+        return np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+
+    for lean in (0, 15, 35):                      # upright through a strong lean
+        pose = (base - piv) @ rotX(lean).T + piv
+        valid = ~np.isnan(pose).any(1)
+        skin, *_ = ch._skin_matrices(pose, valid)
+        for b in range(len(ch.parent)):
+            p = ch.parent[b]
+            if p < 0 or np.linalg.norm(ch.head[b] - ch.tail[p]) > 1e-6:
+                continue                          # not joined in the rest rig
+            child_head = skin[b][:3, :3] @ ch.head[b] + skin[b][:3, 3]
+            parent_tail = skin[p][:3, :3] @ ch.tail[p] + skin[p][:3, 3]
+            gap = float(np.linalg.norm(child_head - parent_tail))
+            assert gap < 1e-6, (
+                f"{ch.bone_names[b]} detached from {ch.bone_names[p]} "
+                f"by {gap:.3f} at lean={lean}deg")
+
+
+@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
 def test_pose_bone_matrices_reproduce_lbs():
     """The bone matrices sent to Blender must reproduce the live-view skinning
     exactly (setting pose_bone.matrix = M drives the identical deform), so the

@@ -149,23 +149,37 @@ class Character:
             p = J(spec)
             return None if p is None else to_rig(p)
 
-        # per-bone skin matrix: directly place mapped bones between their two
-        # keypoints (stretched to fit); other bones inherit their parent so the
-        # mesh stays connected (hands follow the wrist, feet the ankle, ...).
+        # Per-bone skin matrix, built as an FK chain: every bone's head follows
+        # its parent, so neighbouring bones always stay joined and the mesh can't
+        # tear; a mapped bone then rotates to aim at its keypoint and stretches
+        # (clamped) toward it. Unmapped bones just follow the parent rigidly, so
+        # hands trail the wrist and feet the ankle.
+        # The pelvis is the root of the chain, so it has no parent to aim it.
+        # Orient it from the hip line + the torso direction; left at rest it
+        # stays upright while everything above it rotates, which creases the
+        # mesh at the waist.
         skin = np.tile(np.eye(4), (len(self.rest), 1, 1))
-        skin[self.hips_idx][:3, 3] = to_rig(pelvis) - self.head[self.hips_idx]
+        hips_head = self.head[self.hips_idx]
+        hips_pos = to_rig(pelvis)
+        R_hips = np.eye(3)
+        mid = resolve(_MID)
+        if mid is not None:
+            rest_dir = self.tail[self.hips_idx] - hips_head
+            want = mid - hips_pos
+            if np.linalg.norm(rest_dir) > 1e-9 and np.linalg.norm(want) > 1e-9:
+                # aim the pelvis at the same torso midpoint the spine targets, so
+                # the two stay collinear and the waist doesn't crease. Rotation
+                # only: stretching here would scale the legs, which hang off it.
+                R_hips = _align(rest_dir, want)
+        skin[self.hips_idx][:3, :3] = R_hips
+        skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
         for b in self.order:
-            if b in self._direct:
-                s_spec, e_spec = self._direct[b]
-                start, end = resolve(s_spec), resolve(e_spec)
-                if start is not None and end is not None:
-                    skin[b] = self._bone_delta(b, start, end)
-                    continue
             if b == self.hips_idx or b in self._orphan:
                 continue
             p = self.parent[b]
-            if p >= 0:
-                skin[b] = skin[p]      # unmapped bones inherit their parent
+            base = skin[p] if p >= 0 else np.eye(4)
+            end = resolve(self._direct[b][1]) if b in self._direct else None
+            skin[b] = base if end is None else self._bone_fk(b, base, end)
         # parentless helper bones follow the bone they are named after; done last
         # so their target is already posed, whatever the bone ordering is.
         for b, target in self._orphan.items():
@@ -206,23 +220,28 @@ class Character:
         out = pelvis + (Rz.T @ (out - self.hips_world).T).T / scale
         return out.astype(np.float32), self.faces
 
-    def _bone_delta(self, b, start, end):
-        """Skin matrix placing bone b from its rest to span start->end (with
-        stretch along the bone so the tail reaches `end`)."""
-        rest_head, rest_tail = self.head[b], self.tail[b]
-        rd = rest_tail - rest_head
-        rlen = float(np.linalg.norm(rd))
-        dv = end - start
-        dlen = float(np.linalg.norm(dv))
-        D = np.eye(4)
-        if rlen < 1e-9 or dlen < 1e-9:
-            D[:3, 3] = start - rest_head
-            return D
-        u = dv / dlen
-        R = _align(rd / rlen, u)                       # aim the bone at the joint
-        s = np.clip(dlen / rlen, _STRETCH_MIN, _STRETCH_MAX)   # clamped stretch
-        Sc = np.eye(3) + (s - 1.0) * np.outer(u, u)
-        M = Sc @ R
-        D[:3, :3] = M
-        D[:3, 3] = start - M @ rest_head
-        return D
+    def _bone_fk(self, b, base, end):
+        """Skin matrix for bone b, hanging off its already-posed parent.
+
+        `base` is the parent's skin matrix. The bone's head is carried by the
+        parent (so the two never separate — this is what keeps the waist and
+        shoulders from tearing), and the bone is then rotated about that head to
+        aim at `end`, with a clamped stretch along its own axis so it reaches
+        toward the keypoint without distorting the model.
+        """
+        R_par, t_par = base[:3, :3], base[:3, 3]
+        head = R_par @ self.head[b] + t_par                  # posed head
+        d_par = R_par @ (self.tail[b] - self.head[b])        # bone, carried by parent
+        n_par = float(np.linalg.norm(d_par))
+        d_want = end - head
+        n_want = float(np.linalg.norm(d_want))
+        if n_par < 1e-9 or n_want < 1e-9:
+            return base
+        u = d_want / n_want
+        R = _align(d_par / n_par, u)                         # aim at the joint
+        s = np.clip(n_want / n_par, _STRETCH_MIN, _STRETCH_MAX)
+        A = (np.eye(3) + (s - 1.0) * np.outer(u, u)) @ R     # rotate, then stretch
+        M = np.eye(4)
+        M[:3, :3] = A @ R_par
+        M[:3, 3] = head - A @ (R_par @ self.head[b])         # pin the head in place
+        return M
