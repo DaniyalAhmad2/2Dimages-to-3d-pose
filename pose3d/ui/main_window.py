@@ -350,9 +350,7 @@ class MainWindow(QMainWindow):
             elif res.ok:
                 items = [
                     ("Video", res.mp4),
-                    ("Character — matches the 3D view exactly", res.fbx),
-                    ("Animation rig — re-poseable armature for Blender",
-                     res.fbx_mocap),
+                    ("Character — rigged armature, matches the 3D view", res.fbx),
                     ("Motion capture", res.bvh)]
                 body = "\n\n".join(f"{lbl}:\n{p}" for lbl, p in items if p)
                 QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)

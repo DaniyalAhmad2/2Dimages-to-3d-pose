@@ -18,10 +18,13 @@ _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
 _MID = "MID"   # midpoint(pelvis, neck) — the torso split point
 
-# rig deform bone -> (start joint, end joint) it should span. Bones rotate to
-# aim at the keypoint and stretch toward it, but stretch is CLAMPED (below) so
-# the model bends to the pose without grotesque elongation. The head/neck are
-# intentionally NOT driven (they inherit the torso) so the head stays natural.
+# rig deform bone -> (start joint, end joint) it should span. Only the end joint
+# is used: the head is carried by the parent (FK), and the bone rotates to aim at
+# the end joint. Bones are NOT stretched to reach it — the rig is stylised (its
+# thigh is 1.04 against a 1.54 shin, where a real thigh and shin are about equal)
+# so stretching to match a real subject elongated the legs badly and crushed the
+# torso. The character keeps its own proportions and just mimics the motion.
+# The head/neck are intentionally NOT driven (they inherit the torso).
 _DIRECT = {
     "spine": (Joint.PELVIS, _MID), "chest": (_MID, Joint.NECK),
     "upper_arm.L": (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW),
@@ -33,8 +36,6 @@ _DIRECT = {
     "thigh.R": (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
 }
-_STRETCH_MIN, _STRETCH_MAX = 0.8, 1.25   # clamp bone stretch (keep proportions)
-
 
 def _align(a, b):
     """3x3 rotation taking unit vector a to unit vector b."""
@@ -226,8 +227,8 @@ class Character:
         `base` is the parent's skin matrix. The bone's head is carried by the
         parent (so the two never separate — this is what keeps the waist and
         shoulders from tearing), and the bone is then rotated about that head to
-        aim at `end`, with a clamped stretch along its own axis so it reaches
-        toward the keypoint without distorting the model.
+        aim at `end`. Rotation only: the bone keeps its rest length, so the mesh
+        is never stretched and the character holds its own proportions.
         """
         R_par, t_par = base[:3, :3], base[:3, 3]
         head = R_par @ self.head[b] + t_par                  # posed head
@@ -237,11 +238,8 @@ class Character:
         n_want = float(np.linalg.norm(d_want))
         if n_par < 1e-9 or n_want < 1e-9:
             return base
-        u = d_want / n_want
-        R = _align(d_par / n_par, u)                         # aim at the joint
-        s = np.clip(n_want / n_par, _STRETCH_MIN, _STRETCH_MAX)
-        A = (np.eye(3) + (s - 1.0) * np.outer(u, u)) @ R     # rotate, then stretch
+        R = _align(d_par / n_par, d_want / n_want)           # aim at the joint
         M = np.eye(4)
-        M[:3, :3] = A @ R_par
-        M[:3, 3] = head - A @ (R_par @ self.head[b])         # pin the head in place
+        M[:3, :3] = R @ R_par
+        M[:3, 3] = head - R @ (R_par @ self.head[b])         # pin the head in place
         return M

@@ -408,14 +408,6 @@ def _prep_rig(arm):
         b.use_local_location = True
 
 
-def _clear_pose_anim(arm):
-    """Drop all keyframes and return the rig to its rest pose."""
-    arm.animation_data_clear()
-    for pb in arm.pose.bones:
-        pb.matrix_basis = Matrix.Identity(4)
-    bpy.context.view_layer.update()
-
-
 def _drive_character_bones_fk(arm, data, scene, schedule):
     """Rotation-only FK pose, keeping the rig's hierarchy and bone lengths.
 
@@ -464,60 +456,6 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
                 pb.keyframe_insert("rotation_quaternion", frame=f)
                 if pb.parent is None:
                     pb.keyframe_insert("location", frame=f)
-
-
-def _drive_character_bones(arm, data, scene, schedule):
-    """Pose the rig by setting each bone's transform to the value computed by the
-    app's own skinning (data["bone_frames"]). This makes the exported character
-    match the live 3D preview pose-for-pose (same free bone placement + clamped
-    stretch), instead of the aim-only Damped-Track approximation.
-
-    bone_frames[i] is {bone_name: 4x4 world matrix} (rig space) or None (hold the
-    previous pose). We solve each bone's LOCAL basis directly from the rest
-    hierarchy (exact, no dependency on Blender's pose evaluation order) and
-    keyframe it; Blender eases between poses for the smooth stop-motion
-    transitions. Bones are disconnected first so each may translate freely (the
-    app places every bone independently, which connected chains forbid).
-    """
-    bone_frames = data["bone_frames"]
-    n = len(bone_frames)
-    if schedule is None:
-        schedule = [[fi + 1] for fi in range(n)]
-
-    # Flatten the rig: disconnect + unparent every bone. The armature deform of a
-    # vertex depends only on its bone's world pose and rest matrix (pose @ rest^-1),
-    # NOT on the bone hierarchy — so with no parents there is no rotation/scale
-    # inheritance shear, and setting each bone's world pose reproduces the app's
-    # skinning exactly. (Keeps bone rest positions; only parenting changes.)
-    bpy.context.view_layer.objects.active = arm
-    bpy.ops.object.mode_set(mode="EDIT")
-    for eb in arm.data.edit_bones:
-        eb.use_connect = False
-        eb.parent = None
-    bpy.ops.object.mode_set(mode="OBJECT")
-    _prep_rig(arm)          # no IK/Copy-Rotation pulling the pose off the keypoints
-
-    rest = {b.name: b.matrix_local.copy() for b in arm.data.bones}   # armature space
-    arm_inv = arm.matrix_world.inverted()
-    for pb in arm.pose.bones:
-        pb.rotation_mode = "QUATERNION"
-
-    last = None
-    for fi in range(n):
-        mats = bone_frames[fi] if bone_frames[fi] is not None else last
-        if mats is None:
-            continue
-        last = mats
-        for f in schedule[fi]:
-            for name, M in mats.items():
-                pb = arm.pose.bones.get(name)
-                if pb is None:
-                    continue
-                # no parent: pose = rest @ basis  =>  basis = rest^-1 @ target
-                pb.matrix_basis = rest[name].inverted() @ (arm_inv @ Matrix(M))
-                pb.keyframe_insert("location", frame=f)
-                pb.keyframe_insert("rotation_quaternion", frame=f)
-                pb.keyframe_insert("scale", frame=f)
 
 
 def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
@@ -657,20 +595,14 @@ def character_main(data, args, scene):
     os.makedirs(args.outdir, exist_ok=True)
     bvh_path = os.path.join(args.outdir, args.name + ".bvh")
     fbx_path = os.path.join(args.outdir, args.name + ".fbx")
-    mocap_path = os.path.join(args.outdir, args.name + "_mocap.fbx")
 
     if data.get("bone_frames") is not None:
-        # 1) mocap export: rotation-only FK with the hierarchy intact, so the
-        #    armature is re-poseable/retargetable in Blender and engines.
+        # Rotation-only FK with the hierarchy intact. The app skins the character
+        # the same way (no stretch), so this single armature is BOTH an exact
+        # match to the 3D view and a normal re-poseable/retargetable rig.
         _drive_character_bones_fk(arm, data, scene, schedule)
         scene.frame_start = 1; scene.frame_end = total
         export_bvh(arm, bvh_path, scene)
-        _export_character_fbx([arm] + meshes, mocap_path)
-        # 2) visual export: exact match to the app's 3D view. This flattens the
-        #    rig (destructive), so it has to come after the mocap export.
-        _clear_pose_anim(arm)
-        _drive_character_bones(arm, data, scene, schedule)
-        scene.frame_start = 1; scene.frame_end = total
         _export_character_fbx([arm] + meshes, fbx_path)
     else:
         # fallback: aim-only Damped-Track retarget from joint positions

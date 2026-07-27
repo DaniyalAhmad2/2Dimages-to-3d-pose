@@ -58,15 +58,14 @@ def test_export_retargets_character(tmp_path):
 @pytest.mark.skipif(not (_HAVE_BLENDER and _CHARACTER),
                     reason="bundled character not present")
 def test_export_produces_hierarchical_mocap_rig(tmp_path):
-    """The mocap export must be a real armature: a nested bone hierarchy with
-    rotation animation. Regression guard — the exact/visual pose path flattens
-    the rig, and exporting the mocap files from THAT gave a bone list with no
-    hierarchy at all (every joint a sibling End Site)."""
+    """The character export must be a real armature: a nested bone hierarchy
+    with rotation animation. Regression guard — driving the rig by flattening it
+    (every bone unparented, keyed in world space) gave a bone list with no
+    hierarchy at all, so the FBX/BVH were unusable as mocap."""
     res = export_animation(_motion(), tmp_path, name="m", fps=24,
                            render_video=False, timeout=400, character=_CHARACTER)
     assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
-    assert res.fbx_mocap and res.fbx_mocap.stat().st_size > 100_000
-    assert res.fbx and res.fbx.stat().st_size > 100_000     # visual one too
+    assert res.fbx and res.fbx.stat().st_size > 100_000
 
     head = res.bvh.read_text().split("MOTION")[0]
     depth = maxd = 0
