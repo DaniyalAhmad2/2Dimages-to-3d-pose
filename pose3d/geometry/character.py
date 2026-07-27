@@ -63,6 +63,7 @@ class Character:
         self.tail = d["tail"].astype(float)
         self.parent = d["parent"].astype(int)
         names = [str(n) for n in d["bone_names"]]
+        self.bone_names = names
         self.bidx = {n: i for i, n in enumerate(names)}
         # hierarchy order (parents before children) for skin-matrix inheritance
         self.order = self._topo()
@@ -90,10 +91,13 @@ class Character:
             visit(b)
         return order
 
-    def pose(self, up_pose, valid):
-        """Return skinned vertices (V,3) placed in the SAME space as up_pose.
+    def _skin_matrices(self, up_pose, valid):
+        """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
-        up_pose: (NUM_JOINTS,3) upright pose (as shown in the view). valid mask.
+        Returns (skin (B,4,4), pelvis (3,), scale, Rz (3,3)) or (None,...) if the
+        pose has no usable pelvis. skin[b] maps a rest vertex to its posed
+        position; this is the single source of truth shared by pose() (LBS for
+        the live view) and pose_bone_matrices() (drives the Blender export).
         """
         up_pose = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)
         j = Joint
@@ -104,7 +108,7 @@ class Character:
             hips = [J(j.LEFT_HIP), J(j.RIGHT_HIP)]
             hips = [h for h in hips if h is not None]
             if not hips:
-                return None, None
+                return None, None, None, None
             pelvis = np.mean(hips, axis=0)
         # our height + shoulder line for alignment
         vpts = up_pose[valid]
@@ -151,6 +155,30 @@ class Character:
             p = self.parent[b]
             if p >= 0:
                 skin[b] = skin[p]
+        return skin, pelvis, scale, Rz
+
+    def pose_bone_matrices(self, up_pose, valid):
+        """Posed bone world matrices in rig space: {bone_name: (4,4) list}.
+
+        M_posed[b] = skin[b] @ rest[b]. Blender's deform is
+        pose_bone.matrix @ rest[b]^-1, so setting pose_bone.matrix = M_posed[b]
+        reproduces this class's skinning EXACTLY — the export then matches the
+        live 3D preview pose-for-pose. Returns None for an unusable pose.
+        """
+        skin, *_ = self._skin_matrices(up_pose, valid)
+        if skin is None:
+            return None
+        return {name: (skin[b] @ self.rest[b]).tolist()
+                for b, name in enumerate(self.bone_names)}
+
+    def pose(self, up_pose, valid):
+        """Return skinned vertices (V,3) placed in the SAME space as up_pose.
+
+        up_pose: (NUM_JOINTS,3) upright pose (as shown in the view). valid mask.
+        """
+        skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid)
+        if skin is None:
+            return None, None
 
         out = np.zeros((len(self.verts0), 3))
         for k in range(self.w_idx.shape[1]):

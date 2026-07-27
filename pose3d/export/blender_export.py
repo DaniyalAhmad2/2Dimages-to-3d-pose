@@ -32,6 +32,48 @@ class ExportResult:
         return self.returncode == 0 and "POSE3D_EXPORT_OK" in self.stdout
 
 
+def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
+    """Per-frame posed bone matrices, computed with the SAME skinning the live
+    3D view uses, so the exported character matches the preview pose-for-pose.
+
+    Returns (bone_frames, bone_names) or (None, None) if the character asset is
+    unavailable — the Blender job then falls back to its aim-only retarget.
+    """
+    try:
+        from pose3d.geometry.character import Character
+        from pose3d.geometry.orient import detect_vertical, upright_matrix
+    except Exception:
+        return None, None
+    try:
+        ch = Character()
+    except Exception:
+        return None, None
+
+    poses3d = np.asarray(poses3d, float).reshape(-1, NUM_JOINTS, 3)
+    # detect the up-axis once (like the view: cached on first pose) from a frame
+    # that has a head + lower body, preferring the one the turntable displays.
+    order = [display_frame] + [i for i in range(len(poses3d)) if i != display_frame]
+    axis, sign = 2, 1.0
+    for i in order:
+        if 0 <= i < len(poses3d):
+            v = ~np.isnan(poses3d[i]).any(1)
+            if v.any():
+                axis, sign = detect_vertical(poses3d[i], v)
+                break
+    R = upright_matrix(axis, sign).T
+
+    bone_frames = []
+    for pose in poses3d:
+        valid = ~np.isnan(pose).any(1)
+        if not valid.any():
+            bone_frames.append(None); continue
+        up = pose @ R                       # upright; centring is irrelevant here
+        bone_frames.append(ch.pose_bone_matrices(up, valid))
+    if all(b is None for b in bone_frames):
+        return None, None
+    return bone_frames, ch.bone_names
+
+
 def _poses_to_json(poses3d: np.ndarray, fps: int) -> dict:
     """poses3d: (T, NUM_JOINTS, 3); NaN -> null."""
     poses3d = np.asarray(poses3d, float).reshape(-1, NUM_JOINTS, 3)
@@ -68,6 +110,12 @@ def export_animation(
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = _poses_to_json(poses3d, fps)
     doc["display_frame"] = int(display_frame)   # which pose the turntable spins
+    if character and Path(character).exists():
+        # drive the rig with the exact skinning the live view uses
+        bone_frames, bone_names = _character_bone_frames(poses3d, display_frame)
+        if bone_frames is not None:
+            doc["bone_frames"] = bone_frames
+            doc["bone_names"] = bone_names
     json_path = out_dir / f"{name}_poses.json"
     json_path.write_text(json.dumps(doc))
 

@@ -15,23 +15,7 @@ import pyqtgraph.opengl as gl
 from pyqtgraph import Vector
 
 from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
-
-
-def upright_matrix(axis, sign):
-    """3x3 matrix mapping world coords to upright view coords (up-axis -> +Z).
-
-    Guaranteed to be a proper ROTATION (det=+1): one horizontal axis is flipped
-    when the naive axis-permutation would be a reflection, so the figure is
-    never left/right mirrored (a raised left hand stays a left hand).
-    """
-    others = [i for i in range(3) if i != axis]
-    perm_parity = -1.0 if axis == 1 else 1.0
-    hx = sign * perm_parity
-    M = np.zeros((3, 3))
-    M[0, others[0]] = hx
-    M[1, others[1]] = 1.0
-    M[2, axis] = sign
-    return M
+from pose3d.geometry.orient import detect_vertical, upright_matrix
 
 
 class View3D(gl.GLViewWidget):
@@ -72,33 +56,7 @@ class View3D(gl.GLViewWidget):
 
     # --- orientation / framing ---
     def _detect_vertical(self, pose3d, valid):
-        """Find the world up-axis from head vs the lowest available body joint.
-
-        Ankles can be dropped (occlusion gating), so fall back through
-        knees -> pelvis -> hips to keep the figure upright.
-        """
-        # "up" reference (head) vs a lower-body reference that is present
-        head = pose3d[int(Joint.HEAD)]
-        if np.isnan(head).any():
-            head = np.nanmean(pose3d[[int(Joint.NECK), int(Joint.HEAD)]], axis=0)
-        ref = None
-        for idxs in ([Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE],
-                     [Joint.LEFT_KNEE, Joint.RIGHT_KNEE],
-                     [Joint.PELVIS],
-                     [Joint.LEFT_HIP, Joint.RIGHT_HIP]):
-            pts = pose3d[[int(i) for i in idxs]]
-            if np.isnan(pts).all():          # avoid empty-slice nanmean warning
-                continue
-            cand = np.nanmean(pts, axis=0)
-            if not np.isnan(cand).any():
-                ref = cand
-                break
-        if ref is not None and not np.isnan(head).any():
-            diff = head - ref
-            axis = int(np.argmax(np.abs(diff)))
-            return axis, float(np.sign(diff[axis]) or 1.0)
-        vpts = pose3d[valid]
-        return int(np.argmax(vpts.max(0) - vpts.min(0))), 1.0
+        return detect_vertical(pose3d, valid)
 
     def _to_view(self, pose3d):
         return pose3d @ upright_matrix(self._vaxis, self._vsign).T

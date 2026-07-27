@@ -372,6 +372,65 @@ def _stepped_schedule(n, fps, hold_s=0.7, trans_s=0.3):
     return schedule, total
 
 
+def _drive_character_bones(arm, data, scene, schedule):
+    """Pose the rig by setting each bone's transform to the value computed by the
+    app's own skinning (data["bone_frames"]). This makes the exported character
+    match the live 3D preview pose-for-pose (same free bone placement + clamped
+    stretch), instead of the aim-only Damped-Track approximation.
+
+    bone_frames[i] is {bone_name: 4x4 world matrix} (rig space) or None (hold the
+    previous pose). We solve each bone's LOCAL basis directly from the rest
+    hierarchy (exact, no dependency on Blender's pose evaluation order) and
+    keyframe it; Blender eases between poses for the smooth stop-motion
+    transitions. Bones are disconnected first so each may translate freely (the
+    app places every bone independently, which connected chains forbid).
+    """
+    bone_frames = data["bone_frames"]
+    n = len(bone_frames)
+    if schedule is None:
+        schedule = [[fi + 1] for fi in range(n)]
+
+    # Flatten the rig: disconnect + unparent every bone. The armature deform of a
+    # vertex depends only on its bone's world pose and rest matrix (pose @ rest^-1),
+    # NOT on the bone hierarchy — so with no parents there is no rotation/scale
+    # inheritance shear, and setting each bone's world pose reproduces the app's
+    # skinning exactly. (Keeps bone rest positions; only parenting changes.)
+    bpy.context.view_layer.objects.active = arm
+    bpy.ops.object.mode_set(mode="EDIT")
+    for eb in arm.data.edit_bones:
+        eb.use_connect = False
+        eb.parent = None
+    bpy.ops.object.mode_set(mode="OBJECT")
+    # strip rig constraints (IK on the legs, Copy-Rotation on feet/palms) — they
+    # would override the transforms we set and pull the pose off the keypoints
+    # (the live view is pure skinning with no constraints).
+    for pb in arm.pose.bones:
+        for c in list(pb.constraints):
+            pb.constraints.remove(c)
+
+    rest = {b.name: b.matrix_local.copy() for b in arm.data.bones}   # armature space
+    arm_inv = arm.matrix_world.inverted()
+    for pb in arm.pose.bones:
+        pb.rotation_mode = "QUATERNION"
+
+    last = None
+    for fi in range(n):
+        mats = bone_frames[fi] if bone_frames[fi] is not None else last
+        if mats is None:
+            continue
+        last = mats
+        for f in schedule[fi]:
+            for name, M in mats.items():
+                pb = arm.pose.bones.get(name)
+                if pb is None:
+                    continue
+                # no parent: pose = rest @ basis  =>  basis = rest^-1 @ target
+                pb.matrix_basis = rest[name].inverted() @ (arm_inv @ Matrix(M))
+                pb.keyframe_insert("location", frame=f)
+                pb.keyframe_insert("rotation_quaternion", frame=f)
+                pb.keyframe_insert("scale", frame=f)
+
+
 def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
     import math
     idx = {n: i for i, n in enumerate(joint_names)}
@@ -503,9 +562,15 @@ def character_main(data, args, scene):
     # multi-frame: hold each captured pose then ease to the next (stop-motion);
     # single pose: one frame (spun as a turntable below).
     schedule, total = _stepped_schedule(n, args.fps) if n > 1 else (None, 1)
-    _retarget_character(arm, rframes, joint_names, scene, schedule=schedule)
-    scene.frame_start = 1; scene.frame_end = total
-    _bake_and_clean(arm, scene)
+    if data.get("bone_frames") is not None:
+        # exact match to the live view: drive bones by the app's own skinning
+        _drive_character_bones(arm, data, scene, schedule)
+        scene.frame_start = 1; scene.frame_end = total
+    else:
+        # fallback: aim-only Damped-Track retarget from joint positions
+        _retarget_character(arm, rframes, joint_names, scene, schedule=schedule)
+        scene.frame_start = 1; scene.frame_end = total
+        _bake_and_clean(arm, scene)
 
     enable_addons()
     import os

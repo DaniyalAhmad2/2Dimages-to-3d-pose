@@ -48,3 +48,28 @@ def test_character_handles_sparse_pose():
     pose[[Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE, Joint.LEFT_WRIST]] = np.nan
     verts, faces = Character().pose(pose, ~np.isnan(pose).any(1))
     assert verts is not None and not np.isnan(verts).any()
+
+
+@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+def test_pose_bone_matrices_reproduce_lbs():
+    """The bone matrices sent to Blender must reproduce the live-view skinning
+    exactly (setting pose_bone.matrix = M drives the identical deform), so the
+    export matches the 3D preview pose-for-pose."""
+    from pose3d.geometry.character import Character
+    ch = Character()
+    pose = sample_skeleton_3d(); valid = ~np.isnan(pose).any(1)
+    verts, _ = ch.pose(pose, valid)              # live-view mesh (up_pose space)
+
+    # rebuild the mesh from the exported bone matrices via Blender's deform
+    # relation: skin[b] = M_posed[b] @ rest[b]^-1
+    bm = ch.pose_bone_matrices(pose, valid)
+    skin = np.stack([np.asarray(bm[n]) @ np.linalg.inv(ch.rest[i])
+                     for i, n in enumerate(ch.bone_names)])
+    out = np.zeros((len(ch.verts0), 3))
+    for k in range(ch.w_idx.shape[1]):
+        M = skin[ch.w_idx[:, k]]
+        out += ch.w_val[:, k][:, None] * np.einsum("vij,vj->vi", M, ch.vh)[:, :3]
+    # pose() maps rig space back to up_pose space; do the same to compare
+    _, pelvis, scale, Rz = ch._skin_matrices(pose, valid)
+    out = pelvis + (Rz.T @ (out - ch.hips_world).T).T / scale
+    assert np.abs(out - verts).max() < 1e-4
