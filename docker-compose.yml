@@ -3,22 +3,22 @@
 #   docker compose up
 #
 # Then open http://localhost:8080 in a browser. Identical on Windows, macOS
-# and Linux. Put your camera images in the ./workspace folder that appears
-# next to this file; exports are written back there too.
+# and Linux. The image is downloaded automatically the first time (~1.5 GB).
+#
+# Put your camera images in the ./workspace folder that appears next to this
+# file; exports are written back there too.
 services:
   pose3d:
-    image: pose3d:latest
-    build:
-      context: .
-      dockerfile: docker/Dockerfile
+    image: ${POSE3D_IMAGE:-ghcr.io/daniyalahmad2/pose3d:latest}
     container_name: pose3d
     ports:
-      # Change the port by setting POSE3D_PORT, e.g.  POSE3D_PORT=8090 docker compose up
+      # Already using port 8080? Run:  POSE3D_PORT=8090 docker compose up
       - "${POSE3D_PORT:-8080}:8080"
     volumes:
       - ./workspace:/workspace
-    # Qt/X11 use shared memory for window surfaces; the 64 MB default is tight
+    # Qt/X11 keep window surfaces in shared memory; the 64 MB default is tight
     # at this window size.
     shm_size: "1gb"
     stdin_open: true
     tty: true
+    restart: "no"

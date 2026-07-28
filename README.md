@@ -83,8 +83,13 @@ driven by your capture, automatically scaled to the subject's proportions.
 the display server starts first. Check the terminal says
 `serving UI on http://localhost:8080`.
 
-**Port 8080 is in use.** Edit `docker-compose.yml` and change `"8080:8080"` to
-e.g. `"8090:8080"`, then open <http://localhost:8090>.
+**Port 8080 is in use.** Start it on another port:
+
+```bash
+POSE3D_PORT=8090 docker compose up      # then open http://localhost:8090
+```
+
+On Windows PowerShell: `$env:POSE3D_PORT=8090; docker compose up`
 
 **The 3D view is slow.** The container renders in software, with no GPU. It is
 fine for review; large captures are smoother in the exported video.
