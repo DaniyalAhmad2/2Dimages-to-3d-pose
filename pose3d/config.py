@@ -5,8 +5,17 @@ import os
 import shutil
 from pathlib import Path
 
-# Local Blender 5.1.1 install (client machine ships its own; override via env).
-DEFAULT_BLENDER = "/home/athena/Downloads/blender-5.1.1-linux-x64/blender"
+# Where a bundled Blender is expected to live when the app ships as a container
+# or a self-contained archive. Kept machine-independent on purpose — set
+# POSE3D_BLENDER to point at any other install.
+BUNDLED_BLENDER_DIRS = (
+    "/opt/blender",                                   # container image
+    str(Path(__file__).resolve().parent.parent / "blender"),   # archive layout
+)
+
+# Export needs Blender 5.x: the video writer sets image_settings.media_type,
+# which does not exist in 4.x, and the BVH exporter signature changed too.
+MIN_BLENDER_VERSION = (5, 0)
 
 
 def character_blend() -> str | None:
@@ -16,13 +25,24 @@ def character_blend() -> str | None:
 
 
 def blender_binary() -> str:
-    """Resolve the Blender executable: env override -> default -> PATH."""
+    """Resolve the Blender executable.
+
+    Order: POSE3D_BLENDER -> a Blender bundled with the app -> PATH. Falls back
+    to the bare name so the caller surfaces a clear "not found" error rather
+    than a path from whatever machine built this.
+    """
     env = os.environ.get("POSE3D_BLENDER")
     if env and Path(env).exists():
         return env
-    if Path(DEFAULT_BLENDER).exists():
-        return DEFAULT_BLENDER
+    for d in BUNDLED_BLENDER_DIRS:
+        cand = Path(d) / "blender"
+        if cand.exists():
+            return str(cand)
     found = shutil.which("blender")
     if found:
         return found
-    return DEFAULT_BLENDER  # let the caller surface a clear error if missing
+    return "blender"
+
+
+def blender_available() -> bool:
+    return Path(blender_binary()).exists() or shutil.which(blender_binary()) is not None

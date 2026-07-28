@@ -143,22 +143,32 @@ def export_animation(
     if not render_video:
         cmd.append("--no-video")
 
-    if on_line is None:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
-        stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
-    else:
-        # stream Blender's output so the caller can show live progress
-        p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                             stderr=subprocess.STDOUT, text=True, bufsize=1)
-        chunks = []
-        for line in p.stdout:
-            chunks.append(line)
-            try:
-                on_line(line.rstrip())
-            except Exception:
-                pass
-        p.wait(timeout=timeout)
-        stdout, stderr, rc = "".join(chunks), "", p.returncode
+    try:
+        if on_line is None:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
+        else:
+            # stream Blender's output so the caller can show live progress
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
+            chunks = []
+            for line in p.stdout:
+                chunks.append(line)
+                try:
+                    on_line(line.rstrip())
+                except Exception:
+                    pass
+            p.wait(timeout=timeout)
+            stdout, stderr, rc = "".join(chunks), "", p.returncode
+    except FileNotFoundError:
+        # say which binary is missing and how to point at one, instead of
+        # surfacing a bare OSError from subprocess
+        return ExportResult(
+            bvh=None, fbx=None, mp4=None, returncode=127, stdout="",
+            stderr=(f"Blender was not found (tried: {blender}).\n\n"
+                    "Export needs Blender 5.x. Install it and either put it on "
+                    "PATH or set the POSE3D_BLENDER environment variable to the "
+                    "blender executable."))
 
     def _exists(ext):
         p = out_dir / f"{name}.{ext}"

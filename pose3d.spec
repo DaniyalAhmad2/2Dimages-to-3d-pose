@@ -16,6 +16,10 @@ from PyInstaller.utils.hooks import collect_data_files
 datas = [
     ("pose3d/ui/dark.qss", "pose3d/ui"),
     ("pose3d/export/blender_job.py", "pose3d/export"),
+    # the rigged character drives BOTH the 3D view and the FBX/mp4 export; if
+    # these are missing the app silently falls back to a stick figure
+    ("pose3d/assets/character.blend", "pose3d/assets"),
+    ("pose3d/assets/character.npz", "pose3d/assets"),
 ]
 # include any bundled ONNX models if present
 datas += collect_data_files("pose3d.detect", includes=["models/*.onnx"])

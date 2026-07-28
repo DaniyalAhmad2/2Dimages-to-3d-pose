@@ -1,0 +1,42 @@
+# Build context hygiene. The working tree is ~900 MB; the app itself is ~5 MB.
+
+# --- dev tooling (never ships to the client) ---
+.claude/
+CLAUDE.md
+.mcp.json
+.cursor/
+.aider*
+PLAN.md
+OVERNIGHT_REPORT.md
+PROJECT_CONTEXT.md
+frontend-sample-desgin/
+
+# --- vcs / python / editors ---
+.git/
+.gitignore
+.github/
+**/__pycache__/
+**/*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.DS_Store
+.vscode/
+.idea/
+
+# --- local envs and build output ---
+.venv/
+venv/
+wheelhouse/
+build/
+dist/
+uv.lock
+
+# --- capture data / datasets / scratch (huge, and client-specific) ---
+assets/
+data/
+tests/validate_panoptic_*.py
+
+# Keep docker/vendor/ — it holds the Blender tarball and ONNX weights the image
+# bakes in. Everything else under docker/ is small.

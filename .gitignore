@@ -28,3 +28,13 @@ data/demo_project/export/*.mp4
 
 # OS
 .DS_Store
+
+# Bundled binaries for the container image (large, not source)
+docker/vendor/
+
+# Client workspace created by docker compose (their data, not source)
+workspace/
+
+# Capture data / exports produced while testing (client data, large)
+assets/*
+!assets/checkerboard.md

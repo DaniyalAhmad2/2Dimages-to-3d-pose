@@ -55,6 +55,36 @@ def _json_to_vec(data: list) -> np.ndarray:
     return out
 
 
+def _store_image(path: str, folder: Path) -> str:
+    """Path to write into project.json.
+
+    Images living inside the project folder are stored RELATIVE to it, so the
+    project can be moved, zipped, or mounted at a different path (e.g. inside a
+    container) and still find them. Anything outside stays absolute.
+    """
+    if not path:
+        return path
+    try:
+        return Path(path).resolve().relative_to(folder.resolve()).as_posix()
+    except (ValueError, OSError):
+        return str(path)
+
+
+def _resolve_image(path: str, folder: Path) -> str:
+    """Path to hand back to the app when loading."""
+    if not path:
+        return path
+    p = Path(path)
+    if not p.is_absolute():
+        return str(folder / p)
+    if p.exists():
+        return str(p)
+    # An absolute path written on another machine (older projects): recover it
+    # if the same filename is present in this project's images/ folder.
+    cand = folder / "images" / p.name
+    return str(cand) if cand.exists() else str(p)
+
+
 def save_project(project: ProjectData, folder: str | Path) -> Path:
     """Write the project to <folder>, creating it if needed."""
     folder = Path(folder)
@@ -70,7 +100,7 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
     for f in project.frames:
         doc["frames"].append({
             "frame_id": f.frame_id,
-            "images": f.images,
+            "images": {c: _store_image(p, folder) for c, p in f.images.items()},
             "kp2d": {c: _arr_to_json(f.kp2d[c]) for c in CAMERAS},
             "scores": {c: _vec_to_json(f.scores[c]) for c in CAMERAS},
             "pose3d": _arr_to_json(f.pose3d),
@@ -89,7 +119,9 @@ def load_project(folder: str | Path) -> ProjectData:
 
     frames: list[Frame] = []
     for fd in doc["frames"]:
-        fr = Frame(frame_id=fd["frame_id"], images=fd.get("images", {}))
+        fr = Frame(frame_id=fd["frame_id"],
+                   images={c: _resolve_image(p, folder)
+                           for c, p in fd.get("images", {}).items()})
         for c in CAMERAS:
             fr.kp2d[c] = _json_to_arr(fd["kp2d"][c], 2)
             fr.scores[c] = _json_to_vec(fd["scores"][c])

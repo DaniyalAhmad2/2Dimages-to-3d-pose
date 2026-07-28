@@ -36,7 +36,14 @@ def test_roundtrip(tmp_path):
     assert q.frame_ids() == p.frame_ids()
 
     fp, fq = p.frames[0], q.frames[0]
-    assert fq.images == fp.images
+    # images are stored relative to the project folder (so it can be moved or
+    # mounted elsewhere) and resolved against it on load
+    import json
+    from pathlib import Path
+    stored = json.loads((tmp_path / "project.json").read_text())["frames"][0]["images"]
+    assert stored == fp.images                      # still relative on disk
+    for cam, rel in fp.images.items():
+        assert Path(fq.images[cam]) == tmp_path / rel   # absolute after load
     # exact values preserved
     assert np.allclose(fq.kp2d[CAM_LEFT][Joint.HEAD], [100.5, 200.5])
     assert fq.scores[CAM_RIGHT][Joint.HEAD] == 0.8
