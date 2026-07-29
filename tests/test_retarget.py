@@ -4,6 +4,8 @@ These guard the inversion: the rig's bone lengths are inviolable and motion
 transfers as rotation only, with two-bone IK putting the end effectors as close
 to the captured joints as fixed-length limbs allow.
 """
+from pathlib import Path
+
 import numpy as np
 import pytest
 
@@ -256,6 +258,47 @@ def test_posed_joints_sit_inside_the_mesh():
 
 
 # --- the rig itself --------------------------------------------------------
+
+def test_bake_reproduces_the_shipped_asset(tmp_path):
+    """tools/bake_character.py must rebuild the asset the app actually ships.
+
+    The rig cannot be swapped safely unless the bake is known-good on a known
+    input — otherwise a bake bug and a rig problem look identical. Vertex
+    positions, bones and joints must come back exactly; the mesh is allowed a
+    hair of slack because quad triangulation can legitimately split either way.
+    """
+    import subprocess
+    from pose3d.config import blender_binary, character_blend
+    from pose3d.geometry.character import Character
+
+    blend = character_blend()
+    exe = blender_binary()
+    if not (blend and Path(exe).exists()):
+        pytest.skip("Blender binary or character.blend not available")
+
+    out = tmp_path / "baked.npz"
+    script = Path(__file__).resolve().parent.parent / "tools" / "bake_character.py"
+    r = subprocess.run([exe, "--background", blend, "--python", str(script),
+                        "--", "--out", str(out)],
+                       capture_output=True, text=True, timeout=600)
+    assert out.exists(), f"bake produced nothing\n{r.stdout[-2000:]}"
+
+    shipped = np.load(Path(blend).with_suffix(".npz"), allow_pickle=True)
+    baked = np.load(out, allow_pickle=True)
+    assert np.abs(shipped["verts"] - baked["verts"]).max() == 0
+    assert np.abs(shipped["head"] - baked["head"]).max() == 0
+    assert np.abs(shipped["tail"] - baked["tail"]).max() == 0
+    assert (shipped["parent"] == baked["parent"]).all()
+    assert [str(x) for x in shipped["bone_names"]] == [str(x) for x in baked["bone_names"]]
+
+    pose = sample_skeleton_3d()
+    valid = ~np.isnan(pose).any(1)
+    va, _, ja = Character(Path(blend).with_suffix(".npz")).pose_and_joints(pose, valid)
+    vb, _, jb = Character(out).pose_and_joints(pose, valid)
+    h = float(va[:, 2].max() - va[:, 2].min())
+    assert np.abs(va - vb).max() / h < 1e-3
+    assert np.abs(ja - jb).max() / h < 1e-6
+
 
 @pytest.mark.xfail(reason="the bundled rig is stylised (thigh:shank 0.675); "
                           "this passes once a human-proportioned rig is baked in",
