@@ -71,7 +71,7 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
 
     # size the character to this subject once, from the whole take — the same
     # fit the 3D view applies, so the export stays identical to the preview
-    ch.fit_proportions(poses3d @ R)
+    ch.fit_to_subject(poses3d @ R)
 
     bone_frames = []
     for pose in poses3d:

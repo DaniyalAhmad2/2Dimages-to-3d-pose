@@ -227,6 +227,7 @@ class MainWindow(QMainWindow):
         self.sidebar.showBonesToggled.connect(self.cam_left.view.set_show_bones)
         self.sidebar.showBonesToggled.connect(self.cam_right.view.set_show_bones)
         self.sidebar.showBodyToggled.connect(self.view3d.set_show_body)
+        self.sidebar.showCaptureToggled.connect(self.view3d.set_show_capture)
 
     # --- handlers ---
     def _on_drag(self, cam, joint, pos):
@@ -277,10 +278,12 @@ class MainWindow(QMainWindow):
             self.model.redetect_all(det, self.load_image)
         finally:
             QApplication.restoreOverrideCursor()
+        self._apply_view_orientation()   # poses changed: re-fit the character
         self._refresh_views(); self._refresh_timeline_status()
 
     def _on_recalibrate(self):
         self.model.recompute_all()
+        self._apply_view_orientation()   # poses changed: re-fit the character
         self._refresh_views(); self._refresh_timeline_status()
 
     def _on_import(self):
@@ -441,7 +444,7 @@ class MainWindow(QMainWindow):
         self.view3d.set_orientation(R)
         if poses:
             # size the character to this subject (same fit the export uses)
-            self.view3d.fit_character(np.stack(poses))
+            self.view3d.fit_subject(np.stack(poses))
 
     def _load_model(self):
         p = self.model.project

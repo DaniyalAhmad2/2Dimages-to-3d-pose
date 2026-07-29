@@ -22,6 +22,7 @@ class View3D(gl.GLViewWidget):
     GHOST_COLOR = (0.72, 0.72, 0.77, 0.85)     # low-poly character skin
     JOINT_COLOR = (0.30, 0.85, 1.0, 1.0)
     BONE_COLOR = (0.95, 0.95, 0.98, 1.0)
+    CAPTURE_COLOR = (1.0, 0.72, 0.25, 0.85)    # the measured skeleton
 
     def __init__(self):
         super().__init__()
@@ -40,7 +41,9 @@ class View3D(gl.GLViewWidget):
         self._body.setVisible(False)
         self.addItem(self._body)
 
-        # --- coloured skeleton overlay (drawn on top) ---
+        # --- the CHARACTER's own skeleton (drawn on top of the mesh) ---
+        # Read off the posed rig rather than from the triangulated points, so
+        # the overlay always sits inside the body it belongs to.
         self._scatter = gl.GLScatterPlotItem(
             pos=np.zeros((1, 3)), size=11.0, color=self.JOINT_COLOR, pxMode=True)
         self.addItem(self._scatter)
@@ -48,7 +51,20 @@ class View3D(gl.GLViewWidget):
             pos=np.zeros((2, 3)), width=2.5, color=self.BONE_COLOR, mode="lines")
         self.addItem(self._lines)
 
+        # --- the CAPTURED skeleton (what the cameras measured), off by default.
+        # Kept available so the fit can be judged, in a dimmer colour so it
+        # reads as reference rather than as the result.
+        self._cap_scatter = gl.GLScatterPlotItem(
+            pos=np.zeros((1, 3)), size=8.0, color=self.CAPTURE_COLOR, pxMode=True)
+        self._cap_scatter.setVisible(False)
+        self.addItem(self._cap_scatter)
+        self._cap_lines = gl.GLLinePlotItem(
+            pos=np.zeros((2, 3)), width=1.5, color=self.CAPTURE_COLOR, mode="lines")
+        self._cap_lines.setVisible(False)
+        self.addItem(self._cap_lines)
+
         self._show_body = True
+        self._show_capture = False
         self._character = None          # lazily-loaded skinned character
         self._framed = False
         self._vaxis = None
@@ -66,10 +82,12 @@ class View3D(gl.GLViewWidget):
         self._vaxis = None
         self._framed = False
 
-    def fit_character(self, poses):
-        """Size the character to the subject once, from the whole take, so it
-        lands on the keypoints without per-frame stretching. `poses` are raw
-        world poses; they get de-tilted here exactly as set_pose() does."""
+    def fit_subject(self, poses):
+        """Size the character to the subject once, from the whole take.
+
+        One uniform scale, so the character changes size but never shape.
+        `poses` are raw world poses; they get de-tilted here exactly as
+        set_pose() does."""
         try:
             if self._character is None:
                 from pose3d.geometry.character import Character
@@ -77,7 +95,7 @@ class View3D(gl.GLViewWidget):
             poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
             if self._R is not None:
                 poses = poses @ self._R.T
-            self._character.fit_proportions(poses)
+            self._character.fit_to_subject(poses)
         except Exception:
             pass
 
@@ -90,6 +108,12 @@ class View3D(gl.GLViewWidget):
     def set_show_body(self, on: bool):
         self._show_body = on
         self._body.setVisible(on and self._body.opts.get("_active", False))
+
+    def set_show_capture(self, on: bool):
+        """Show the skeleton the cameras measured, alongside the character's."""
+        self._show_capture = on
+        self._cap_scatter.setVisible(on)
+        self._cap_lines.setVisible(on)
 
     def reframe(self):
         self._framed = False
@@ -117,45 +141,61 @@ class View3D(gl.GLViewWidget):
         cx, cy = vv[:, 0].mean(), vv[:, 1].mean()
         v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= vv[:, 2].min()
 
-        # skin the character, then ground on ITS lowest vertex (the sole) so the
+        # pose the character, then ground on ITS lowest vertex (the sole) so the
         # feet rest ON the plane instead of the ankle (feet would pierce it).
         vpose = np.where(valid[:, None], v, np.nan)
-        verts, faces = self._skin(vpose)
+        verts, faces, cj = self._skin(vpose)
         if verts is not None and len(verts):
             dz = float(verts[:, 2].min())
-            v[:, 2] -= dz
             verts = verts.copy(); verts[:, 2] -= dz
+            v[:, 2] -= dz
+            if cj is not None:
+                cj = cj.copy(); cj[:, 2] -= dz          # keep the overlay with the body
 
-        height = float(v[valid][:, 2].max() - v[valid][:, 2].min()) or 1.0
+        # The character is the subject of the view, so frame on it; fall back to
+        # the captured points when it could not be posed.
+        ref = verts if (verts is not None and len(verts)) else v[valid]
+        height = float(ref[:, 2].max() - ref[:, 2].min()) or 1.0
 
-        # coloured skeleton
-        self._scatter.setData(pos=v[valid])
-        seg = []
-        for a, b in BONES:
-            if valid[int(a)] and valid[int(b)]:
-                seg.append(v[int(a)]); seg.append(v[int(b)])
-        self._lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
+        # primary overlay: the character's OWN joints, which by construction lie
+        # inside the mesh. Falls back to the captured points if there's no rig.
+        if cj is not None:
+            self._draw_skeleton(self._scatter, self._lines, cj,
+                                ~np.isnan(cj).any(1))
+        else:
+            self._draw_skeleton(self._scatter, self._lines, v, valid)
+
+        # reference overlay: what the cameras actually measured
+        self._draw_skeleton(self._cap_scatter, self._cap_lines, v, valid)
         self._set_body(verts, faces)
 
         if not self._framed:
-            vv = v[valid]
-            span = float(np.linalg.norm(vv.max(0) - vv.min(0))) or 1.0
+            span = float(np.linalg.norm(ref.max(0) - ref.min(0))) or 1.0
             self._grid.setSize(span * 1.6, span * 1.6)
             self._grid.setSpacing(span / 8.0, span / 8.0)
             self.setCameraPosition(pos=Vector(0, 0, height * 0.5),
                                    distance=span * 1.9, elevation=12, azimuth=-70)
             self._framed = True
 
+    @staticmethod
+    def _draw_skeleton(scatter, lines, pts, valid):
+        scatter.setData(pos=pts[valid] if valid.any() else np.zeros((1, 3)))
+        seg = []
+        for a, b in BONES:
+            if valid[int(a)] and valid[int(b)]:
+                seg.append(pts[int(a)]); seg.append(pts[int(b)])
+        lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
+
     def _skin(self, vpose):
-        """Skin the bundled character to the (upright, centred) pose -> verts."""
+        """Pose the character -> (verts, faces, canonical joints)."""
         try:
             if self._character is None:
                 from pose3d.geometry.character import Character
                 self._character = Character()
             valid = ~np.isnan(vpose).any(1)
-            return self._character.pose(vpose, valid)
+            return self._character.pose_and_joints(vpose, valid)
         except Exception:
-            return None, None
+            return None, None, None
 
     def _set_body(self, verts, faces):
         active = verts is not None and len(verts) > 0
@@ -165,7 +205,9 @@ class View3D(gl.GLViewWidget):
         self._body.setVisible(self._show_body and active)
 
     def _clear(self):
-        self._scatter.setData(pos=np.zeros((1, 3)))
-        self._lines.setData(pos=np.zeros((2, 3)))
+        for s, l in ((self._scatter, self._lines),
+                     (self._cap_scatter, self._cap_lines)):
+            s.setData(pos=np.zeros((1, 3)))
+            l.setData(pos=np.zeros((2, 3)))
         self._body.opts["_active"] = False
         self._body.setVisible(False)

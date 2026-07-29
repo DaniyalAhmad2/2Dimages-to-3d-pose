@@ -182,6 +182,7 @@ class Sidebar(QWidget):
     showJointsToggled = Signal(bool)
     showBonesToggled = Signal(bool)
     showBodyToggled = Signal(bool)
+    showCaptureToggled = Signal(bool)
 
     def __init__(self):
         super().__init__()
@@ -220,12 +221,22 @@ class Sidebar(QWidget):
         self.cb_joints = QCheckBox("Show Joints"); self.cb_joints.setChecked(True)
         self.cb_bones = QCheckBox("Show Bones"); self.cb_bones.setChecked(True)
         self.cb_body = QCheckBox("Show Body (3D)"); self.cb_body.setChecked(True)
+        # the raw triangulated skeleton, for judging how closely the character
+        # tracks the capture; off by default so the view shows one figure
+        self.cb_capture = QCheckBox("Show Captured Skeleton")
+        self.cb_capture.setChecked(False)
+        self.cb_capture.setToolTip(
+            "Overlay the skeleton measured from the cameras.\n"
+            "The character has its own proportions, so the two differ where\n"
+            "the subject's build differs from the model's.")
         self.cb_joints.toggled.connect(self.showJointsToggled)
         self.cb_bones.toggled.connect(self.showBonesToggled)
         self.cb_body.toggled.connect(self.showBodyToggled)
+        self.cb_capture.toggled.connect(self.showCaptureToggled)
         lay.addWidget(self.cb_joints)
         lay.addWidget(self.cb_bones)
         lay.addWidget(self.cb_body)
+        lay.addWidget(self.cb_capture)
 
         lay.addStretch(1)
         hint = QLabel("Drag joints in the 2D views to adjust. 3D updates "

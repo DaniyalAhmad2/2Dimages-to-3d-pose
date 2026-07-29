@@ -1,36 +1,69 @@
-"""Pose the bundled low-poly character to match a reconstructed skeleton.
+"""Pose the bundled character to mimic a reconstructed skeleton.
 
-Loads the baked character asset (mesh + skin weights + rest bones) and, for a
-given upright pose, computes posed bone matrices by aiming each rig bone at the
-corresponding joint (the same retarget the Blender export does), then linear-
-blend-skins the mesh. Pure numpy, so it runs live in the 3D view.
+The character's bone lengths are INVIOLABLE. Motion transfers as rotations only,
+so the mesh can never be stretched or sheared: the rig is fitted to the capture,
+not the other way round. Two-bone IK on the arms and legs puts the wrists and
+ankles as close to the captured joints as fixed-length bones allow, using the
+captured elbow/knee to choose which way the limb bends.
+
+One uniform scale, fitted once per take, sizes the whole character to the
+subject. Being uniform it changes size, never shape.
+
+Rig bone names are reached through ROLES (see `_ROLE_ALIASES`), so swapping in a
+differently-named rig is a data change rather than a code change.
+
+Pure numpy, so it runs live in the 3D view; the Blender export drives the same
+matrices via `pose_bone_matrices`.
 """
 from __future__ import annotations
 
-import re
+import json
 from pathlib import Path
 
 import numpy as np
 
-from pose3d.core.skeleton import Joint, NUM_JOINTS
+from pose3d.core.skeleton import BONES, Joint, NUM_JOINTS
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
 _MID = "MID"   # midpoint(pelvis, neck) — the torso split point
 
-# rig deform bone -> (start joint, end joint) it should span. Only the end joint
-# is used: the head is carried by the parent (FK), and the bone rotates to aim at
-# the end joint. Bones are NOT stretched to reach it — the rig is stylised (its
-# thigh is 1.04 against a 1.54 shin, where a real thigh and shin are about equal)
-# so stretching to match a real subject elongated the legs badly and crushed the
-# torso. The character keeps its own proportions and just mimics the motion.
-# The head/neck are intentionally NOT driven (they inherit the torso).
+# Pipeline role -> candidate bone names, tried in order. Covers the legacy
+# Blender meta-rig (what we ship), Rigify, and Mixamo/UE naming so a replacement
+# rig usually needs no configuration at all. A rig can also carry an explicit
+# {role: bone} map in the npz under "roles", which wins outright.
+_ROLE_ALIASES = {
+    "hips":        ("hips", "pelvis", "mixamorig:Hips", "Hips"),
+    "spine":       ("spine", "spine.001", "mixamorig:Spine", "Spine"),
+    "chest":       ("chest", "spine.002", "spine.003", "mixamorig:Spine2", "Spine2"),
+    "neck":        ("neck", "spine.004", "mixamorig:Neck", "Neck"),
+    "head":        ("head", "spine.006", "mixamorig:Head", "Head"),
+    "clavicle.L":  ("shoulder.L", "clavicle.L", "mixamorig:LeftShoulder", "LeftShoulder"),
+    "clavicle.R":  ("shoulder.R", "clavicle.R", "mixamorig:RightShoulder", "RightShoulder"),
+    "upper_arm.L": ("upper_arm.L", "mixamorig:LeftArm", "LeftArm"),
+    "upper_arm.R": ("upper_arm.R", "mixamorig:RightArm", "RightArm"),
+    "forearm.L":   ("forearm.L", "mixamorig:LeftForeArm", "LeftForeArm"),
+    "forearm.R":   ("forearm.R", "mixamorig:RightForeArm", "RightForeArm"),
+    "hand.L":      ("hand.L", "mixamorig:LeftHand", "LeftHand"),
+    "hand.R":      ("hand.R", "mixamorig:RightHand", "RightHand"),
+    "thigh.L":     ("thigh.L", "mixamorig:LeftUpLeg", "LeftUpLeg"),
+    "thigh.R":     ("thigh.R", "mixamorig:RightUpLeg", "RightUpLeg"),
+    "shin.L":      ("shin.L", "shin.L", "mixamorig:LeftLeg", "LeftLeg"),
+    "shin.R":      ("shin.R", "mixamorig:RightLeg", "RightLeg"),
+    "foot.L":      ("foot.L", "mixamorig:LeftFoot", "LeftFoot"),
+    "foot.R":      ("foot.R", "mixamorig:RightFoot", "RightFoot"),
+}
+
+# Role -> (start, end) canonical joints. Only `end` drives the pose: the head is
+# carried by the parent (FK) and the bone rotates to aim at `end`. `start` is
+# used when measuring the subject for the uniform scale fit.
 _DIRECT = {
-    "spine": (Joint.PELVIS, _MID), "chest": (_MID, Joint.NECK),
-    # the clavicles carry the arms: drive them, or the shoulders sit wherever
-    # the chest happens to put them and the arm roots miss the keypoints
-    "shoulder.L": (Joint.NECK, Joint.LEFT_SHOULDER),
-    "shoulder.R": (Joint.NECK, Joint.RIGHT_SHOULDER),
+    "spine": (Joint.PELVIS, _MID),
+    "chest": (_MID, Joint.NECK),
+    # the clavicles carry the arms; drive them or the arm roots miss the
+    # shoulders and a noisy shoulder swings the whole arm
+    "clavicle.L": (Joint.NECK, Joint.LEFT_SHOULDER),
+    "clavicle.R": (Joint.NECK, Joint.RIGHT_SHOULDER),
     "upper_arm.L": (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW),
     "forearm.L": (Joint.LEFT_ELBOW, Joint.LEFT_WRIST),
     "upper_arm.R": (Joint.RIGHT_SHOULDER, Joint.RIGHT_ELBOW),
@@ -41,6 +74,50 @@ _DIRECT = {
     "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
 }
 
+# Limbs solved with two-bone IK: (upper role, lower role, mid joint, end joint).
+# The upper bone's aim comes out of the IK solve rather than _DIRECT.
+_IK_CHAINS = (
+    ("upper_arm.L", "forearm.L", Joint.LEFT_ELBOW, Joint.LEFT_WRIST),
+    ("upper_arm.R", "forearm.R", Joint.RIGHT_ELBOW, Joint.RIGHT_WRIST),
+    ("thigh.L", "shin.L", Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
+    ("thigh.R", "shin.R", Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
+)
+
+# Where each canonical joint is read off the posed rig. Heads are preferred:
+# a bone's head is the exact FK position carried by its parent, so the reported
+# skeleton is guaranteed consistent with the mesh. Fallbacks are used when the
+# rig lacks the bone (e.g. no hand bone -> the forearm's tail is the wrist).
+_JOINT_FROM_RIG = {
+    Joint.PELVIS: (("hips", "head"),),
+    Joint.NECK: (("neck", "head"), ("chest", "tail")),
+    # the head bone's tail sits on the mesh surface; its midpoint sits inside
+    # the skull, which is what an overlay needs
+    Joint.HEAD: (("head", "mid"),),
+    Joint.LEFT_SHOULDER: (("upper_arm.L", "head"),),
+    Joint.RIGHT_SHOULDER: (("upper_arm.R", "head"),),
+    Joint.LEFT_ELBOW: (("forearm.L", "head"), ("upper_arm.L", "tail")),
+    Joint.RIGHT_ELBOW: (("forearm.R", "head"), ("upper_arm.R", "tail")),
+    Joint.LEFT_WRIST: (("hand.L", "head"), ("forearm.L", "tail")),
+    Joint.RIGHT_WRIST: (("hand.R", "head"), ("forearm.R", "tail")),
+    Joint.LEFT_HIP: (("thigh.L", "head"),),
+    Joint.RIGHT_HIP: (("thigh.R", "head"),),
+    Joint.LEFT_KNEE: (("shin.L", "head"), ("thigh.L", "tail")),
+    Joint.RIGHT_KNEE: (("shin.R", "head"), ("thigh.R", "tail")),
+    Joint.LEFT_ANKLE: (("foot.L", "head"), ("shin.L", "tail")),
+    Joint.RIGHT_ANKLE: (("foot.R", "head"), ("shin.R", "tail")),
+}
+
+# Legs weigh double when fitting the uniform scale: feet not reaching the floor
+# is the mismatch the eye picks up first.
+_SCALE_WEIGHTS = {Joint.LEFT_KNEE: 2.0, Joint.RIGHT_KNEE: 2.0,
+                  Joint.LEFT_ANKLE: 2.0, Joint.RIGHT_ANKLE: 2.0}
+
+# Below this fraction of the upper bone's length, the captured mid-joint is too
+# close to the root->target axis to say which way the limb bends, so the rig's
+# own rest bend takes over (blended, not switched, or the knee snaps sides).
+_POLE_EPS = 0.05
+
+
 def _align(a, b):
     """3x3 rotation taking unit vector a to unit vector b."""
     a = a / (np.linalg.norm(a) + 1e-12)
@@ -49,13 +126,19 @@ def _align(a, b):
     if c < -0.999999:
         perp = np.array([1.0, 0, 0]) if abs(a[0]) < 0.9 else np.array([0, 1.0, 0])
         axis = np.cross(a, perp); axis /= np.linalg.norm(axis)
-        x, y, z = axis
         return 2 * np.outer(axis, axis) - np.eye(3)  # 180° about axis
     s = np.linalg.norm(v)
     if s < 1e-12:
         return np.eye(3)
     vx = np.array([[0, -v[2], v[1]], [v[2], 0, -v[0]], [-v[1], v[0], 0]])
     return np.eye(3) + vx + vx @ vx * ((1 - c) / (s * s))
+
+
+def _perp(u):
+    """Any unit vector perpendicular to u."""
+    a = np.array([1.0, 0, 0]) if abs(u[0]) < 0.9 else np.array([0, 1.0, 0])
+    v = np.cross(u, a)
+    return v / (np.linalg.norm(v) + 1e-12)
 
 
 class Character:
@@ -71,152 +154,266 @@ class Character:
         names = [str(n) for n in d["bone_names"]]
         self.bone_names = names
         self.bidx = {n: i for i, n in enumerate(names)}
-        # hierarchy order (parents before children) for skin-matrix inheritance
-        self.order = self._topo()
-        # rest homogeneous verts (V,4)
-        self.vh = np.hstack([self.verts0, np.ones((len(self.verts0), 1))])
-        # rig reference for alignment
-        self.rig_h = float(self.head[:, 2].max() - self.head[:, 2].min()) or 1.0
-        self.hips_world = self.head[self.bidx["hips"]]
-        lh = self.head[self.bidx["upper_arm.L"]]; rh = self.head[self.bidx["upper_arm.R"]]
-        self.rig_right = np.array([rh[0] - lh[0], rh[1] - lh[1]])
-        self.rig_right /= (np.linalg.norm(self.rig_right) + 1e-12)
-        self.hips_idx = self.bidx["hips"]
-        self._direct = {self.bidx[b]: se for b, se in _DIRECT.items()
-                        if b in self.bidx}
-        # The rig carries stray helper bones (leg IK targets like "shin.L.001")
-        # that have no parent and no skin weight. Left alone they keep their rest
-        # transform while the body moves, so they float away from it in the
-        # exported armature. Make each follow the bone it is named after.
-        self._orphan = {}
+        self.source = str(d["source"]) if "source" in d else ""
+
+        self.role = self._resolve_roles(d)
+        for r in ("hips", "upper_arm.L", "upper_arm.R"):
+            if r not in self.role:
+                raise ValueError(f"rig is missing the '{r}' role; got {names[:8]}…")
+        self.hips_idx = self.role["hips"]
+
+        # Helper bones with no parent (leg IK targets like "shin.L.001") would
+        # otherwise keep their rest transform while the body moves and float
+        # away from it. Adopt them onto the bone they are named after, and pose
+        # every bone through this EFFECTIVE parent so their children follow too
+        # (a child of an orphan used to stay frozen at the origin).
+        self._eparent = self.parent.copy()
         for b, name in enumerate(names):
             if b == self.hips_idx or self.parent[b] >= 0:
                 continue
-            base = re.sub(r"\.\d+$", "", name)
-            self._orphan[b] = self.bidx.get(base, self.hips_idx)
-        # per-bone length scale, fitted once from a whole take (see
-        # fit_proportions). 1.0 = the rig's own build.
-        self._bone_scale = np.ones(len(self.rest))
+            base = name.rsplit(".", 1)[0] if name.rsplit(".", 1)[-1].isdigit() else None
+            self._eparent[b] = self.bidx.get(base, self.hips_idx) if base else self.hips_idx
+        self.order = self._topo()
 
-    def _spec_pos(self, pose, valid, spec):
-        """Position of a _DIRECT endpoint (a joint, or the torso midpoint)."""
-        if spec == _MID:
-            a, b = int(Joint.NECK), int(Joint.PELVIS)
-            return (pose[a] + pose[b]) / 2 if (valid[a] and valid[b]) else None
-        i = int(spec)
-        return pose[i] if valid[i] else None
+        self.vh = np.hstack([self.verts0, np.ones((len(self.verts0), 1))])
+        self.rig_h = float(self.head[:, 2].max() - self.head[:, 2].min()) or 1.0
+        self.hips_world = self.head[self.hips_idx]
+        lh = self.head[self.role["upper_arm.L"]]
+        rh = self.head[self.role["upper_arm.R"]]
+        self.rig_right = np.array([rh[0] - lh[0], rh[1] - lh[1]])
+        self.rig_right /= (np.linalg.norm(self.rig_right) + 1e-12)
 
-    def fit_proportions(self, poses):
-        """Size the character's limbs to the subject, once for a whole take.
+        self._direct = {self.role[r]: se for r, se in _DIRECT.items()
+                        if r in self.role}
+        # {upper bone: (lower bone, mid joint, end joint)}
+        self._ik = {}
+        for up, lo, mid_j, end_j in _IK_CHAINS:
+            if up in self.role and lo in self.role:
+                self._ik[self.role[up]] = (self.role[lo], mid_j, end_j)
+        self._rest_pole = self._compute_rest_poles()
+        self._joint_src = self._resolve_joint_sources()
+        self._scale = None          # uniform scale, set by fit_to_subject
 
-        The bundled rig is stylised (its thigh is 1.04 against a 1.54 shin, where
-        a real thigh and shin are about equal), so posing it at its own build
-        leaves the character's knees and shoulders ~10% of body height away from
-        the detected joints, and stretching bones per frame to close that gap
-        distorts the mesh differently every frame. Instead we take each driven
-        bone's median length over the take and bake it in as a CONSTANT scale:
-        the character then lands on the keypoints while its proportions stay
-        fixed, so nothing wobbles or tears from frame to frame.
-
-        `poses` are upright (de-tilted) poses, same space as pose().
-        """
-        poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
-        lens = {b: [] for b in self._direct}
-        torso = []
-        for pose in poses:
-            valid = ~np.isnan(pose).any(1)
-            if not valid.any():
+    # --- rig introspection -------------------------------------------------
+    def _resolve_roles(self, d) -> dict[str, int]:
+        """Map pipeline roles to bone indices, preferring an explicit map baked
+        into the asset and falling back to the alias table."""
+        explicit = {}
+        if "roles" in d:
+            try:
+                explicit = json.loads(str(d["roles"]))
+            except (ValueError, TypeError):
+                explicit = {}
+        out = {}
+        for role, aliases in _ROLE_ALIASES.items():
+            name = explicit.get(role)
+            if name in self.bidx:
+                out[role] = self.bidx[name]
                 continue
-            vp = pose[valid]
-            our_h = float(vp[:, 2].max() - vp[:, 2].min())
-            if our_h < 1e-9:
-                continue
-            to_rig_len = self.rig_h / our_h        # pose units -> rig units
-            for b, (s_spec, e_spec) in self._direct.items():
-                a = self._spec_pos(pose, valid, s_spec)
-                c = self._spec_pos(pose, valid, e_spec)
-                if a is not None and c is not None:
-                    lens[b].append(float(np.linalg.norm(c - a)) * to_rig_len)
-            n, p = int(Joint.NECK), int(Joint.PELVIS)
-            if valid[n] and valid[p]:
-                torso.append(float(np.linalg.norm(pose[n] - pose[p])) * to_rig_len)
-        # A driven bone does not always start at its _DIRECT start joint: the
-        # spine is measured PELVIS->MID, but the undriven hips bone sits between
-        # the pelvis and the spine's head. Subtract that lead-in, or the spine
-        # absorbs the hips' length too and the torso comes out far too long.
-        anchor = {}
-        for b, (s_spec, e_spec) in self._direct.items():
-            anchor.setdefault(e_spec, self.tail[b])
-            anchor.setdefault(s_spec, self.head[b])
-        anchor[Joint.PELVIS] = self.hips_world      # pelvis joint == hips head
-
-        scale = np.ones(len(self.rest))
-        for b, vals in lens.items():
-            rest_len = float(np.linalg.norm(self.tail[b] - self.head[b]))
-            if not vals or rest_len <= 1e-9:
-                continue
-            s_spec = self._direct[b][0]
-            lead_in = 0.0
-            if s_spec in anchor:
-                lead_in = float(np.linalg.norm(anchor[s_spec] - self.head[b]))
-            want = max(np.median(vals) - lead_in, 0.1 * rest_len)
-            # clamp so a bad reconstruction can't produce an absurd rig
-            scale[b] = float(np.clip(want / rest_len, 0.5, 2.0))
-
-        # The torso is a chain of THREE bones (hips + spine + chest) spanning
-        # pelvis->neck, and the hips bone is undriven. Sizing spine and chest
-        # individually starves them — on a real subject the rig's hips bone alone
-        # is longer than half the torso, so the spine collapses to the clamp and
-        # the hip region bunches up. Scale the whole chain together instead,
-        # which keeps the rig's own torso proportions and puts the neck (and the
-        # shoulders hanging off the chest) at the right height.
-        chain = [self.hips_idx] + [self.bidx[n] for n in ("spine", "chest")
-                                   if n in self.bidx]
-        rig_torso = sum(float(np.linalg.norm(self.tail[b] - self.head[b]))
-                        for b in chain)
-        if torso and rig_torso > 1e-9:
-            ts = float(np.clip(np.median(torso) / rig_torso, 0.5, 2.0))
-            for b in chain:
-                scale[b] = ts
-
-        self._bone_scale = scale
-        return scale
+            for cand in aliases:
+                if cand in self.bidx:
+                    out[role] = self.bidx[cand]
+                    break
+        return out
 
     def _topo(self):
+        """Bone order with effective parents strictly before their children."""
         order, seen = [], set()
+
         def visit(b):
             if b in seen or b < 0:
                 return
-            if self.parent[b] >= 0:
-                visit(self.parent[b])
+            if self._eparent[b] >= 0:
+                visit(int(self._eparent[b]))
             seen.add(b); order.append(b)
+
         for b in range(len(self.parent)):
             visit(b)
         return order
 
+    def _compute_rest_poles(self):
+        """Unit bend direction of each IK limb in the REST pose.
+
+        Used when the captured mid-joint can't say which way the limb bends;
+        the rig's own rest bend is anatomically correct by construction.
+        """
+        poles = {}
+        for ub, (lb, _, _) in self._ik.items():
+            root, knee, tip = self.head[ub], self.head[lb], self.tail[lb]
+            axis = tip - root
+            n = np.linalg.norm(axis)
+            if n < 1e-9:
+                poles[ub] = _perp(np.array([0, 0, 1.0])); continue
+            u = axis / n
+            v = (knee - root) - np.dot(knee - root, u) * u
+            nv = np.linalg.norm(v)
+            poles[ub] = v / nv if nv > 1e-9 else _perp(u)
+        return poles
+
+    def _resolve_joint_sources(self):
+        """{canonical joint: (bone index, 'head'|'tail'|'mid')} for this rig."""
+        out = {}
+        for j, cands in _JOINT_FROM_RIG.items():
+            for role, which in cands:
+                if role in self.role:
+                    out[int(j)] = (self.role[role], which)
+                    break
+        return out
+
+    def _bone_point(self, b, which):
+        if which == "head":
+            return self.head[b]
+        if which == "tail":
+            return self.tail[b]
+        return (self.head[b] + self.tail[b]) / 2.0
+
+    def _joints_from_skin(self, skin):
+        """Canonical joint positions read off a posed rig, in RIG space."""
+        out = np.full((NUM_JOINTS, 3), np.nan)
+        for j, (b, which) in self._joint_src.items():
+            p = self._bone_point(b, which)
+            out[j] = skin[b][:3, :3] @ p + skin[b][:3, 3]
+        return out
+
+    def rest_joints(self):
+        """Canonical joint positions of the UNPOSED rig, in rig space."""
+        return self._joints_from_skin(np.tile(np.eye(4), (len(self.rest), 1, 1)))
+
+    def rig_bone_lengths(self) -> dict[tuple[int, int], float]:
+        """Length of each canonical skeleton bone as built into the rig."""
+        rj = self.rest_joints()
+        out = {}
+        for a, b in BONES:
+            pa, pb = rj[int(a)], rj[int(b)]
+            if not (np.isnan(pa).any() or np.isnan(pb).any()):
+                out[(int(a), int(b))] = float(np.linalg.norm(pb - pa))
+        return out
+
+    # --- fitting -----------------------------------------------------------
+    def fit_to_subject(self, poses) -> float | None:
+        """Size the character to the subject once, for a whole take.
+
+        A single UNIFORM scale, so the character changes size but never shape.
+        It is the least-squares best match between the subject's median bone
+        lengths and the rig's own, weighted toward the legs. Fitting once per
+        take also stops the character pulsing: the scale used to be recomputed
+        per frame from whichever joints were visible, so it jumped whenever the
+        ankles dropped out.
+
+        `poses` are upright (de-tilted) poses in the same space as `pose()`.
+        """
+        from pose3d.geometry.bonefit import measure_bone_lengths
+
+        poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
+        sub = measure_bone_lengths(poses)
+        rig = self.rig_bone_lengths()
+        num = den = 0.0
+        for key, rig_len in rig.items():
+            sub_len = sub.get(key)
+            if not sub_len or not np.isfinite(sub_len) or sub_len < 1e-9:
+                continue
+            w = max(_SCALE_WEIGHTS.get(key[0], 1.0), _SCALE_WEIGHTS.get(key[1], 1.0))
+            num += w * sub_len * rig_len
+            den += w * sub_len * sub_len
+        self._scale = float(num / den) if den > 1e-12 else None
+        return self._scale
+
+    def reset_fit(self):
+        self._scale = None
+
+    # --- posing ------------------------------------------------------------
+    def _bone_fk(self, b, base, end):
+        """Skin matrix for bone b, hanging off its already-posed parent.
+
+        The head is carried by the parent, so joined bones can never separate,
+        and the bone then rotates about that head to aim at `end`. Rotation
+        only — the bone keeps its rest length, so the mesh cannot deform.
+        """
+        head = base[:3, :3] @ self.head[b] + base[:3, 3]
+        rest_d = self.tail[b] - self.head[b]
+        n_rest = float(np.linalg.norm(rest_d))
+        d_want = end - head
+        n_want = float(np.linalg.norm(d_want))
+        if n_rest < 1e-9 or n_want < 1e-9:
+            return base
+        R = _align(rest_d / n_rest, d_want / n_want)
+        M = np.eye(4)
+        M[:3, :3] = R
+        M[:3, 3] = head - R @ self.head[b]      # pin the head in place
+        return M
+
+    def _pole(self, ub, base, root, u, mid, L1):
+        """Unit vector, perpendicular to u, giving the limb's bend direction."""
+        rest = base[:3, :3] @ self._rest_pole[ub]
+        rest = rest - np.dot(rest, u) * u
+        n_rest = np.linalg.norm(rest)
+        rest = rest / n_rest if n_rest > 1e-9 else _perp(u)
+        if mid is None:
+            return rest
+        v = (mid - root) - np.dot(mid - root, u) * u
+        n = float(np.linalg.norm(v))
+        tau = _POLE_EPS * L1
+        if n < 1e-12 or tau < 1e-12:
+            return rest
+        # blend rather than switch: a hard cutoff makes the knee snap sides
+        # frame to frame whenever the limb passes near-straight
+        t = float(np.clip((n - tau) / tau, 0.0, 1.0))
+        w = (1.0 - t) * rest + t * (v / n)
+        w = w - np.dot(w, u) * u
+        nw = np.linalg.norm(w)
+        return w / nw if nw > 1e-9 else rest
+
+    def _solve_ik(self, ub, lb, base, mid, end):
+        """Two-bone IK with FIXED bone lengths.
+
+        Returns (mid_target, end_target) to feed straight through `_bone_fk`:
+        both are exactly one bone length from their respective roots, so the
+        FK pass reproduces this solution and keeps the chain connected. When
+        the target is out of reach the limb extends fully toward it, which is
+        the closest a fixed-length limb can get.
+        """
+        root = base[:3, :3] @ self.head[ub] + base[:3, 3]
+        L1 = float(np.linalg.norm(self.tail[ub] - self.head[ub]))
+        L2 = float(np.linalg.norm(self.tail[lb] - self.head[lb]))
+        d_vec = end - root
+        d = float(np.linalg.norm(d_vec))
+        if d < 1e-9 or L1 < 1e-9 or L2 < 1e-9:
+            return None
+        u = d_vec / d
+        dc = float(np.clip(d, abs(L1 - L2) + 1e-6, L1 + L2 - 1e-6))
+        w = self._pole(ub, base, root, u, mid, L1)
+        cos_a = float(np.clip((dc * dc + L1 * L1 - L2 * L2) / (2.0 * dc * L1), -1.0, 1.0))
+        sin_a = float(np.sqrt(max(0.0, 1.0 - cos_a * cos_a)))
+        knee = root + L1 * (cos_a * u + sin_a * w)
+        return knee, root + u * dc
+
     def _skin_matrices(self, up_pose, valid):
         """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
-        Returns (skin (B,4,4), pelvis (3,), scale, Rz (3,3)) or (None,...) if the
-        pose has no usable pelvis. skin[b] maps a rest vertex to its posed
-        position; this is the single source of truth shared by pose() (LBS for
-        the live view) and pose_bone_matrices() (drives the Blender export).
+        Returns (skin (B,4,4), pelvis (3,), scale, Rz (3,3)) or (None,)*4 if the
+        pose has no usable pelvis. Every skin matrix is a pure rotation plus a
+        translation — no bone is ever scaled.
         """
         up_pose = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)
         j = Joint
+
         def J(i):
             return up_pose[int(i)] if valid[int(i)] else None
+
         pelvis = J(j.PELVIS)
         if pelvis is None:
-            hips = [J(j.LEFT_HIP), J(j.RIGHT_HIP)]
-            hips = [h for h in hips if h is not None]
+            hips = [h for h in (J(j.LEFT_HIP), J(j.RIGHT_HIP)) if h is not None]
             if not hips:
                 return None, None, None, None
             pelvis = np.mean(hips, axis=0)
-        # our height + shoulder line for alignment
-        vpts = up_pose[valid]
-        our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
-        scale = self.rig_h / our_h
+
+        if self._scale is not None:
+            scale = self._scale
+        else:
+            vpts = up_pose[valid]
+            our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
+            scale = self.rig_h / our_h
+
         ls, rs = J(j.LEFT_SHOULDER), J(j.RIGHT_SHOULDER)
         Rz = np.eye(3)
         if ls is not None and rs is not None:
@@ -224,122 +421,110 @@ class Character:
             n = np.linalg.norm(our_right)
             if n > 1e-9:
                 our_right /= n
-                a0 = np.arctan2(our_right[1], our_right[0])
-                a1 = np.arctan2(self.rig_right[1], self.rig_right[0])
-                dt = a1 - a0
+                dt = (np.arctan2(self.rig_right[1], self.rig_right[0])
+                      - np.arctan2(our_right[1], our_right[0]))
                 ca, sa = np.cos(dt), np.sin(dt)
                 Rz = np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1.0]])
 
-        # A: up_pose space -> rig space
         def to_rig(p):
             return self.hips_world + (Rz @ (p - pelvis)) * scale
 
         def resolve(spec):
             if spec == _MID:
-                a, b = J(Joint.NECK), J(Joint.PELVIS)
-                return None if (a is None or b is None) else to_rig((a + b) / 2)
+                # use the resolved pelvis, which may have come from the hips:
+                # re-reading Joint.PELVIS here used to freeze the whole torso
+                # whenever the pelvis itself was missing
+                a = J(Joint.NECK)
+                return None if a is None else to_rig((a + pelvis) / 2.0)
             p = J(spec)
             return None if p is None else to_rig(p)
 
-        # Per-bone skin matrix, built as an FK chain: every bone's head follows
-        # its parent, so neighbouring bones always stay joined and the mesh can't
-        # tear; a mapped bone then rotates to aim at its keypoint and stretches
-        # (clamped) toward it. Unmapped bones just follow the parent rigidly, so
-        # hands trail the wrist and feet the ankle.
-        # The pelvis is the root of the chain, so it has no parent to aim it.
-        # Orient it from the hip line + the torso direction; left at rest it
-        # stays upright while everything above it rotates, which creases the
-        # mesh at the waist.
         skin = np.tile(np.eye(4), (len(self.rest), 1, 1))
+
+        # The pelvis is the root, so nothing above it can aim it: point it at
+        # the same torso midpoint the spine targets, keeping the two collinear
+        # so the waist doesn't crease.
         hips_head = self.head[self.hips_idx]
         hips_pos = to_rig(pelvis)
-        A_hips = np.eye(3)
+        R_hips = np.eye(3)
         mid = resolve(_MID)
         if mid is not None:
             rest_dir = self.tail[self.hips_idx] - hips_head
             want = mid - hips_pos
             if np.linalg.norm(rest_dir) > 1e-9 and np.linalg.norm(want) > 1e-9:
-                # aim the pelvis at the same torso midpoint the spine targets, so
-                # the two stay collinear and the waist doesn't crease, at the
-                # length the torso fit gave it (the thighs hang off it, and they
-                # are re-aimed at the knees, so this doesn't distort the legs).
-                u = want / np.linalg.norm(want)
-                s = float(self._bone_scale[self.hips_idx])
-                A_hips = (np.eye(3) + (s - 1.0) * np.outer(u, u)) @ _align(rest_dir, u)
-        skin[self.hips_idx][:3, :3] = A_hips
-        skin[self.hips_idx][:3, 3] = hips_pos - A_hips @ hips_head
+                R_hips = _align(rest_dir, want)
+        skin[self.hips_idx][:3, :3] = R_hips
+        skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
+
+        solved: dict[int, np.ndarray] = {}     # bone -> target from an IK solve
         for b in self.order:
-            if b == self.hips_idx or b in self._orphan:
+            if b == self.hips_idx:
                 continue
-            p = self.parent[b]
+            p = int(self._eparent[b])
             base = skin[p] if p >= 0 else np.eye(4)
-            end = resolve(self._direct[b][1]) if b in self._direct else None
+
+            end = solved.pop(b, None)
+            if end is None and b in self._ik:
+                lb, mid_j, end_j = self._ik[b]
+                target = resolve(end_j)
+                if target is not None:
+                    sol = self._solve_ik(b, lb, base, resolve(mid_j), target)
+                    if sol is not None:
+                        end, solved[lb] = sol
+            if end is None and b in self._direct:
+                # no IK (occluded end joint): fall back to aiming at this
+                # bone's own joint, which still tracks the capture
+                end = resolve(self._direct[b][1])
+
             skin[b] = base if end is None else self._bone_fk(b, base, end)
-        # parentless helper bones follow the bone they are named after; done last
-        # so their target is already posed, whatever the bone ordering is.
-        for b, target in self._orphan.items():
-            skin[b] = skin[target]
         return skin, pelvis, scale, Rz
 
+    # --- outputs -----------------------------------------------------------
+    def _from_rig(self, pts, pelvis, scale, Rz):
+        """Rig space -> the pose space the caller supplied."""
+        pts = np.atleast_2d(np.asarray(pts, float))
+        return pelvis + (Rz.T @ (pts - self.hips_world).T).T / scale
+
+    def pose_and_joints(self, up_pose, valid):
+        """(verts, faces, joints) — mesh and canonical joints of the posed rig.
+
+        Both are returned in the SAME space as `up_pose`, so the joints can be
+        drawn straight over the mesh. `joints` is (NUM_JOINTS,3); entries the
+        rig cannot supply are NaN.
+        """
+        skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid)
+        if skin is None:
+            return None, None, None
+
+        out = np.zeros((len(self.verts0), 3))
+        for k in range(self.w_idx.shape[1]):
+            bi = self.w_idx[:, k]; wv = self.w_val[:, k]
+            v = np.einsum("vij,vj->vi", skin[bi], self.vh)[:, :3]
+            out += wv[:, None] * v
+
+        verts = self._from_rig(out, pelvis, scale, Rz).astype(np.float32)
+        joints = self._from_rig(self._joints_from_skin(skin), pelvis, scale, Rz)
+        return verts, self.faces, joints
+
+    def pose(self, up_pose, valid):
+        """Skinned vertices (V,3) in the same space as up_pose."""
+        verts, faces, _ = self.pose_and_joints(up_pose, valid)
+        return verts, faces
+
+    def posed_joints(self, up_pose, valid):
+        """Canonical joints of the posed rig, in the same space as up_pose."""
+        return self.pose_and_joints(up_pose, valid)[2]
+
     def pose_bone_matrices(self, up_pose, valid):
-        """Posed bone world matrices in rig space: {bone_name: (4,4) list}.
+        """Posed bone world matrices in RIG space: {bone_name: (4,4) list}.
 
         M_posed[b] = skin[b] @ rest[b]. Blender's deform is
         pose_bone.matrix @ rest[b]^-1, so setting pose_bone.matrix = M_posed[b]
-        reproduces this class's skinning EXACTLY — the export then matches the
-        live 3D preview pose-for-pose. Returns None for an unusable pose.
+        reproduces this class's skinning exactly — that is what keeps the
+        export identical to the 3D view. Returns None for an unusable pose.
         """
         skin, *_ = self._skin_matrices(up_pose, valid)
         if skin is None:
             return None
         return {name: (skin[b] @ self.rest[b]).tolist()
                 for b, name in enumerate(self.bone_names)}
-
-    def pose(self, up_pose, valid):
-        """Return skinned vertices (V,3) placed in the SAME space as up_pose.
-
-        up_pose: (NUM_JOINTS,3) upright pose (as shown in the view). valid mask.
-        """
-        skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid)
-        if skin is None:
-            return None, None
-
-        out = np.zeros((len(self.verts0), 3))
-        for k in range(self.w_idx.shape[1]):
-            bi = self.w_idx[:, k]; wv = self.w_val[:, k]
-            M = skin[bi]                                 # (V,4,4)
-            v = np.einsum("vij,vj->vi", M, self.vh)[:, :3]
-            out += wv[:, None] * v
-
-        # map rig space back to up_pose space so it aligns with the skeleton
-        out = pelvis + (Rz.T @ (out - self.hips_world).T).T / scale
-        return out.astype(np.float32), self.faces
-
-    def _bone_fk(self, b, base, end):
-        """Skin matrix for bone b, hanging off its already-posed parent.
-
-        `base` is the parent's skin matrix. The bone's head is carried by the
-        parent (so the two never separate — this is what keeps the waist and
-        shoulders from tearing), and the bone is then rotated about that head to
-        aim at `end`, at the constant length fit_proportions gave it.
-
-        The rotation is measured from the bone's REST direction rather than from
-        the parent's posed one, so twist doesn't accumulate down the chain; and
-        the scale is the bone's own fitted constant rather than something derived
-        per frame, so the character's build never changes shape while it moves.
-        """
-        head = base[:3, :3] @ self.head[b] + base[:3, 3]     # posed head (FK)
-        rest_d = self.tail[b] - self.head[b]
-        n_rest = float(np.linalg.norm(rest_d))
-        d_want = end - head
-        n_want = float(np.linalg.norm(d_want))
-        if n_rest < 1e-9 or n_want < 1e-9:
-            return base
-        u = d_want / n_want
-        R = _align(rest_d / n_rest, u)                       # aim at the joint
-        s = float(self._bone_scale[b])
-        A = (np.eye(3) + (s - 1.0) * np.outer(u, u)) @ R     # aim, then fixed length
-        M = np.eye(4)
-        M[:3, :3] = A
-        M[:3, 3] = head - A @ self.head[b]                   # pin the head in place
-        return M

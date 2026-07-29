@@ -402,15 +402,21 @@ def _prep_rig(arm):
     for pb in arm.pose.bones:
         for c in list(pb.constraints):
             pb.constraints.remove(c)
+    # Plain, conventional inheritance. The app never scales a bone — the
+    # character is posed by rotation alone — so nothing needs the non-standard
+    # scale-inheritance workaround this used to carry, and the exported rig is
+    # a normal one that retargets cleanly in Blender.
     for b in arm.data.bones:
         b.use_inherit_rotation = True
         b.use_local_location = True
-        # Do NOT inherit scale. The app sizes each bone independently (its limbs
-        # are fitted to the subject), so a child must not be rescaled by its
-        # parent — with FULL inheritance the child's local transform would need a
-        # shear to compensate, which loc/rot/scale cannot express, and the
-        # exported pose drifts from the 3D view.
-        b.inherit_scale = "NONE"
+        b.inherit_scale = "FULL"
+    # clear any pose left over from the template file; with no scale keyframes
+    # a stale non-identity scale would otherwise persist into the export
+    for pb in arm.pose.bones:
+        pb.location = (0.0, 0.0, 0.0)
+        pb.rotation_mode = "QUATERNION"
+        pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+        pb.scale = (1.0, 1.0, 1.0)
 
 
 def _drive_character_bones_fk(arm, data, scene, schedule):
@@ -424,6 +430,17 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
     """
     bone_frames = data["bone_frames"]
     n = len(bone_frames)
+    # the npz (which produced these matrices) and this .blend are read by two
+    # separate code paths; if they have drifted apart, say so instead of
+    # silently exporting a half-posed character
+    known = {b.name for b in arm.data.bones}
+    sample = next((m for m in bone_frames if m), {})
+    missing = [k for k in sample if k not in known]
+    if missing:
+        print(f"WARNING: {len(missing)} bones in the pose data are not in this "
+              f"rig (e.g. {missing[:4]}); character.npz and character.blend "
+              f"look out of sync")
+
     if schedule is None:
         schedule = [[fi + 1] for fi in range(n)]
     _prep_rig(arm)
@@ -456,7 +473,6 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
                     continue
                 pb.keyframe_insert("location", frame=f)
                 pb.keyframe_insert("rotation_quaternion", frame=f)
-                pb.keyframe_insert("scale", frame=f)
 
 
 def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
