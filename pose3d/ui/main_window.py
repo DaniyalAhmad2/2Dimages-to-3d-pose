@@ -339,8 +339,15 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if go != QMessageBox.StandardButton.Yes:
                 return
-        out = filedialog.existing_directory(self, "Export results to folder")
+        out = filedialog.existing_directory(
+            self, "Export results to folder", filedialog.writable_dir())
         if not out:
+            return
+        # Fail here, with an explanation, rather than minutes later inside
+        # Blender with a bare errno from a read-only mount.
+        if not filedialog.is_writable(out):
+            QMessageBox.warning(self, "Cannot save there",
+                                filedialog.not_writable_message(out))
             return
         poses = np.stack([f.fitted3d for f in frames])   # native units; camera auto-frames
 

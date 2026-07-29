@@ -214,3 +214,41 @@ def test_file_pickers_offer_the_shared_folders():
     assert folders, "no readable folder offered to the file picker"
     assert all(p.is_dir() for p in folders)
     assert filedialog.default_dir() == str(folders[0])
+
+
+def test_export_refuses_a_read_only_folder(qapp, tmp_path, monkeypatch):
+    """Picking a read-only folder must be refused up front.
+
+    /host is shared read-only so source images can be browsed, and choosing it
+    used to fail minutes later inside Blender with a bare
+    "[Errno 30] Read-only file system".
+    """
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    ro = tmp_path / "readonly"
+    ro.mkdir()
+    ro.chmod(0o500)
+    try:
+        assert not filedialog.is_writable(ro)
+        assert filedialog.is_writable(tmp_path)
+
+        data, rig, gt = _project_with_rig()
+        win = MainWindow(ProjectModel(data, rig))
+        monkeypatch.setattr(filedialog, "existing_directory",
+                            lambda *a, **k: str(ro))
+        warned = {}
+        import PySide6.QtWidgets as W
+        monkeypatch.setattr(W.QMessageBox, "warning",
+                            lambda *a, **k: warned.setdefault("msg", a[2]))
+        started = {"n": 0}
+        monkeypatch.setattr(MainWindow, "_start_export_worker",
+                            lambda *a, **k: started.__setitem__("n", 1),
+                            raising=False)
+
+        win._on_export()
+        assert "read-only" in warned.get("msg", "").lower(), warned
+        assert started["n"] == 0, "export ran despite an unwritable destination"
+    finally:
+        ro.chmod(0o700)

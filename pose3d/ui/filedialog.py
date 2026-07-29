@@ -37,6 +37,33 @@ def default_dir() -> str:
     return str(folders[0])
 
 
+def is_writable(path) -> bool:
+    return os.access(str(path), os.W_OK)
+
+
+def writable_dir() -> str:
+    """Where output can actually be written.
+
+    /host is mounted read-only on purpose — it exists so source images can be
+    browsed, not written over — so saving must start somewhere writable.
+    """
+    for p in shared_folders():
+        if is_writable(p):
+            return str(p)
+    return str(Path.home())
+
+
+def not_writable_message(path) -> str:
+    """Why this folder cannot be written to, and where to put things instead."""
+    if HOST.is_dir() and str(path).startswith(str(HOST)):
+        return (f"'{path}' is read-only.\n\nThat folder is shared with the app "
+                f"for reading your images only. Save to {WORKSPACE} instead — "
+                f"it is the 'workspace' folder next to docker-compose.yml, so "
+                f"anything written there appears on your machine straight away.")
+    return (f"'{path}' is read-only, so nothing can be saved there.\n\n"
+            f"Try {writable_dir()}.")
+
+
 def _prep(dlg: QFileDialog) -> None:
     # the container has no portal; the Qt dialog is the one that actually works
     dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)

@@ -140,6 +140,11 @@ POSE3D_PORT=8090 docker compose up      # then open http://localhost:8090
 
 On Windows PowerShell: `$env:POSE3D_PORT=8090; docker compose up`
 
+**"Read-only file system" when exporting.** You picked a folder under `/host`,
+which is shared for reading your images only. Export to `/workspace` — that is
+the `workspace` folder next to `docker-compose.yml`, so the files appear on your
+machine straight away. The export dialog now opens there by default.
+
 **The 3D view is slow.** The container renders in software, with no GPU. It is
 fine for review; large captures are smoother in the exported video.
 
