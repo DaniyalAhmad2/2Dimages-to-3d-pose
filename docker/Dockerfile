@@ -6,7 +6,12 @@
 #
 # Blender 5.x and the RTMPose weights are baked in, so the client needs no
 # network and no separate installs.
-FROM python:3.12-slim-bookworm
+# AWS's mirror of the Docker Official Image. Same content as
+# docker.io/library/python, but reachable from networks that cannot resolve
+# registry-1.docker.io. Override with:
+#   docker build --build-arg PYTHON_IMAGE=python:3.12-slim-bookworm ...
+ARG PYTHON_IMAGE=public.ecr.aws/docker/library/python:3.12-slim-bookworm
+FROM ${PYTHON_IMAGE}
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \

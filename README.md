@@ -8,17 +8,42 @@ correct any joint by hand, and exports the result as a rigged character
 
 ## Running it
 
-You need [Docker](https://www.docker.com/products/docker-desktop/) installed.
-Nothing else — Blender and the pose model are already inside the image.
+You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).
+Nothing else — Python, Blender and the pose model are all inside the image.
 
 ```bash
 docker compose up
 ```
 
 Then open **<http://localhost:8080>** in your browser. The application appears
-there; it behaves exactly like a desktop window.
+there and behaves exactly like a desktop window — mouse, dragging, everything.
 
 To stop it, press `Ctrl+C` in the terminal (or `docker compose down`).
+
+### Windows
+
+Works the same way. Install **Docker Desktop for Windows**, which will enable
+WSL 2 for you if it isn't already on (Windows 10 21H2 or later, or Windows 11).
+
+Then put `docker-compose.yml` in a folder, open **PowerShell** there and run:
+
+```powershell
+docker compose up
+```
+
+The first run downloads about 1.5 GB; after that it starts in seconds and needs
+no internet at all. Open <http://localhost:8080>.
+
+To use a different port on Windows:
+
+```powershell
+$env:POSE3D_PORT=8090; docker compose up
+```
+
+### macOS and Linux
+
+Identical: `docker compose up`, then <http://localhost:8080>. To change the port,
+`POSE3D_PORT=8090 docker compose up`.
 
 ### Where your files go
 
