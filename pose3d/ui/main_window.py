@@ -121,6 +121,7 @@ class MainWindow(QMainWindow):
         root.addWidget(tl_area)
         self._tl_area = tl_area
         self._fs_active = False
+        self._fs_split = self._fs_side = None
 
         self._wire()
         self._load_model()
@@ -365,17 +366,44 @@ class MainWindow(QMainWindow):
         worker.start()
 
     def _toggle_fullscreen(self):
-        """Toggle the 3D card filling the whole app window (in-app, not a popup)."""
+        """Toggle the 3D view filling the app window (in-app, not a popup).
+
+        The cameras step aside, but the accuracy readouts move to the right of
+        the 3D view and the timeline stays at the bottom — so frames can be
+        stepped through and judged without leaving the large view.
+        """
         if not self._fs_active:
-            # hide everything else; the 3D card expands to fill the window
             self._mid.hide()
-            self._tl_area.hide()
-            self._root_lay.insertWidget(1, self._view3d_card, 1)  # after topbar
-            self._view3d_card.show()
+            side = QWidget()
+            sl = QVBoxLayout(side)
+            sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(6)
+            for w in (self.pose_acc, self.accuracy, self.selected):
+                sl.addWidget(w)
+            sl.addStretch(1)
+
+            split = QSplitter(Qt.Orientation.Horizontal)
+            split.addWidget(self._view3d_card)
+            split.addWidget(side)
+            split.setStretchFactor(0, 4)
+            split.setStretchFactor(1, 1)
+            split.setSizes([1120, 340])
+            split.setCollapsible(0, False)
+
+            self._fs_split, self._fs_side = split, side
+            self._root_lay.insertWidget(1, split, 1)      # after the topbar
+            split.show()
+            self._tl_area.show()                          # keep frames scrubbable
             self._fs_active = True
         else:
-            self._root_lay.removeWidget(self._view3d_card)
-            self._rightcol.insertWidget(0, self._view3d_card)     # back to top
+            self._root_lay.removeWidget(self._fs_split)
+            # put the panels back in the right column, in their original order
+            self._rightcol.insertWidget(0, self._view3d_card)
+            for i, w in enumerate((self.pose_acc, self.accuracy, self.selected), 1):
+                self._rightcol.insertWidget(i, w)
+            self._rightcol.setSizes([460, 190, 240, 130])
+            self._fs_side.deleteLater()
+            self._fs_split.deleteLater()
+            self._fs_split = self._fs_side = None
             self._mid.show()
             self._tl_area.show()
             self._fs_active = False
