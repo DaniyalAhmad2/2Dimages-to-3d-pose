@@ -300,9 +300,6 @@ def test_bake_reproduces_the_shipped_asset(tmp_path):
     assert np.abs(ja - jb).max() / h < 1e-6
 
 
-@pytest.mark.xfail(reason="the bundled rig is stylised (thigh:shank 0.675); "
-                          "this passes once a human-proportioned rig is baked in",
-                   strict=False)
 def test_rig_proportions_are_human():
     """The rig must be shaped like a person, or fixed-length retargeting can
     never put the knees and elbows where the subject's are."""
