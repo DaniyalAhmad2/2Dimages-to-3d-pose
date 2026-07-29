@@ -206,6 +206,12 @@ class Sidebar(QWidget):
         lay.addWidget(_section("CALIBRATION"))
         self.calib_status = QLabel("Not calibrated")
         lay.addWidget(self.calib_status)
+        # problems that will skew the 3D silently unless they are surfaced
+        self.calib_warn = QLabel("")
+        self.calib_warn.setWordWrap(True)
+        self.calib_warn.setStyleSheet("color:#e0a33a; font-size:11px;")
+        self.calib_warn.hide()
+        lay.addWidget(self.calib_warn)
         btn_recal = QPushButton("↻  Recalibrate 3D")
         btn_recal.clicked.connect(self.recalibrate)
         lay.addWidget(btn_recal)
@@ -249,7 +255,15 @@ class Sidebar(QWidget):
         self.row_frames.set_value(str(n_frames))
         self.row_res.set_value(res)
 
-    def set_calibrated(self, ok: bool):
-        self.calib_status.setText("✓ Calibrated" if ok else "Not calibrated")
-        self.calib_status.setStyleSheet(
-            f"color: {'#4ed67a' if ok else '#e65c5c'};")
+    def set_calibrated(self, ok: bool, warnings=()):
+        warnings = list(warnings)
+        if ok and warnings:
+            self.calib_status.setText("⚠ Calibrated (with problems)")
+            self.calib_status.setStyleSheet("color:#e0a33a;")
+        else:
+            self.calib_status.setText("✓ Calibrated" if ok else "Not calibrated")
+            self.calib_status.setStyleSheet(
+                f"color: {'#4ed67a' if ok else '#e65c5c'};")
+        self.calib_warn.setText("\n\n".join(f"• {w}" for w in warnings))
+        self.calib_warn.setToolTip("\n\n".join(warnings))
+        self.calib_warn.setVisible(bool(warnings))

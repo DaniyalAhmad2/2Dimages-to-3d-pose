@@ -481,7 +481,9 @@ class MainWindow(QMainWindow):
         if p.frames and p.frames[0].images:
             res = "(images)"
         self.sidebar.set_project(p.name, len(p.frames), 2, res)
-        self.sidebar.set_calibrated(self.model.rig is not None)
+        from pose3d.calib.quality import check_rig
+        self.sidebar.set_calibrated(self.model.rig is not None,
+                                    check_rig(self.model.rig))
         self.timeline.populate(p.frames, self.load_image)
         self.timeline_header.set_count(len(p.frames))
         self._apply_view_orientation()
