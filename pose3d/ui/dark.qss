@@ -9,8 +9,6 @@ QWidget {
 #topbar { background: #0a0c11; border-bottom: 1px solid #1e2230; }
 #projectTitle { font-size: 14px; font-weight: 600; }
 #savedLabel { color: #4ed67a; font-weight: 600; }
-#topTool { background: transparent; border: none; color: #aeb4c2; padding: 4px 8px; }
-#topTool:hover { color: #ffffff; }
 
 /* sidebar */
 #sidebar { background: #0a0c11; border-right: 1px solid #1e2230; }

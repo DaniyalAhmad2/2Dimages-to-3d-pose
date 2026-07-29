@@ -143,9 +143,6 @@ class MainWindow(QMainWindow):
         self.btn_import = QPushButton("⬆  Import Images")
         self.btn_export = QPushButton("⬇  Export Results")
         lay.addWidget(self.btn_import); lay.addWidget(self.btn_export)
-        for t in ("⚙ Settings", "? Help"):
-            b = QToolButton(); b.setText(t); b.setObjectName("topTool")
-            lay.addWidget(b)
         return bar
 
     def _build_action_row(self):
