@@ -181,3 +181,36 @@ def test_buttons_are_wired(qapp, tmp_path):
     assert win.btn_undo.isEnabled()
     win.btn_undo.click()
     assert not model.frame().corrected[CAM_LEFT][6]
+
+
+def test_import_dialog_opens(qapp):
+    """The Import Images button must actually open its dialog.
+
+    Regression guard: a broken import inside import_dialog.py made the button
+    silently do nothing — Qt swallows exceptions raised in a slot, so the only
+    trace was a stack dump in the container log. Nothing constructed this
+    dialog, so the whole suite stayed green.
+    """
+    from pose3d.ui.import_dialog import ImportDialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    dlg = ImportDialog()                     # imports + builds cleanly
+    assert dlg.left_pick is not None and dlg.right_pick is not None
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    opened = {}
+    win._run_import_dialog = lambda d: opened.setdefault("dlg", d)
+    win.btn_import.click()                   # must reach the dialog, not raise
+    assert isinstance(opened.get("dlg"), ImportDialog)
+
+
+def test_file_pickers_offer_the_shared_folders():
+    """The picker must start somewhere the app can actually read, or it lists
+    an empty folder and looks broken."""
+    from pose3d.ui import filedialog
+    folders = filedialog.shared_folders()
+    assert folders, "no readable folder offered to the file picker"
+    assert all(p.is_dir() for p in folders)
+    assert filedialog.default_dir() == str(folders[0])

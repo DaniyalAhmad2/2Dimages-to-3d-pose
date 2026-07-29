@@ -285,8 +285,23 @@ class MainWindow(QMainWindow):
         self._refresh_views(); self._refresh_timeline_status()
 
     def _on_import(self):
-        from pose3d.ui.import_dialog import ImportDialog
-        dlg = ImportDialog(self)
+        from PySide6.QtWidgets import QMessageBox
+        try:
+            from pose3d.ui.import_dialog import ImportDialog
+            dlg = ImportDialog(self)
+        except Exception as e:
+            # Qt swallows exceptions raised inside a slot, so without this the
+            # button just appears to do nothing and the traceback goes only to
+            # the container log, where nobody is looking.
+            import traceback
+            traceback.print_exc()
+            QMessageBox.critical(
+                self, "Could not open the import dialog",
+                f"{type(e).__name__}: {e}")
+            return
+        return self._run_import_dialog(dlg)
+
+    def _run_import_dialog(self, dlg):
         if dlg.exec() and dlg.result_folder:
             if self.open_callback is not None:
                 self.open_callback(dlg.result_folder)   # opens a fresh window

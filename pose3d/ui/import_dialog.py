@@ -29,6 +29,7 @@ from pose3d.calib.resolve import (
 )
 from pose3d.core.importer import build_project, match_frames
 from pose3d.core.io_project import save_project
+from pose3d.ui import filedialog
 
 
 class _FilePicker(QWidget):
@@ -194,8 +195,7 @@ class ImportDialog(QDialog):
             det = self._ensure_detector()
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
-            from pose3d.ui import filedialog
-from pose3d.core.project import CAMERAS
+            from pose3d.core.project import CAMERAS
             for i, frame in enumerate(project.frames):
                 if prog.wasCanceled():
                     return
