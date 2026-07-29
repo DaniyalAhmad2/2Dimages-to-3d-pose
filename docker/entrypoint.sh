@@ -5,14 +5,18 @@ set -euo pipefail
 
 DISPLAY_NUM="${DISPLAY_NUM:-99}"
 export DISPLAY=":${DISPLAY_NUM}"
-GEOMETRY="${POSE3D_GEOMETRY:-1600x1000x24}"
-WEB_PORT="${POSE3D_PORT:-8080}"
+GEOMETRY="${POSE3D_GEOMETRY:-1920x1080x24}"
+# The container always serves on this port; compose maps a host port onto it.
+# POSE3D_PUBLIC_PORT is only what we tell the user to open, so the two cannot
+# drift apart the way they did when this reused POSE3D_PORT for both.
+WEB_PORT=8080
+PUBLIC_PORT="${POSE3D_PUBLIC_PORT:-$WEB_PORT}"
 
 cleanup() { pkill -P $$ >/dev/null 2>&1 || true; }
 trap cleanup EXIT INT TERM
 
 echo "[pose3d] starting virtual display ${DISPLAY} (${GEOMETRY})"
-Xvfb "${DISPLAY}" -screen 0 "${GEOMETRY}" -nolisten tcp &
+Xvfb "${DISPLAY}" -screen 0 "${GEOMETRY}" -nolisten tcp +extension RANDR &
 
 for _ in $(seq 1 100); do
     xdpyinfo -display "${DISPLAY}" >/dev/null 2>&1 && break
@@ -25,9 +29,9 @@ fi
 
 echo "[pose3d] starting VNC server"
 x11vnc -display "${DISPLAY}" -forever -shared -nopw -quiet -noxdamage \
-       -rfbport 5900 -bg >/dev/null
+       -xrandr resize -rfbport 5900 -bg >/dev/null
 
-echo "[pose3d] serving UI on http://localhost:${WEB_PORT}"
+echo "[pose3d] serving UI on http://localhost:${PUBLIC_PORT}"
 websockify --web=/usr/share/novnc "${WEB_PORT}" localhost:5900 >/dev/null 2>&1 &
 
 # Sanity-check the GL stack the 3D view depends on; warn rather than die so the
@@ -40,7 +44,7 @@ fi
 
 echo "[pose3d] launching application"
 echo "[pose3d] ---------------------------------------------------------------"
-echo "[pose3d]  Open  http://localhost:${WEB_PORT}  in your browser"
+echo "[pose3d]  Open  http://localhost:${PUBLIC_PORT}  in your browser"
 echo "[pose3d]  Your files are under /workspace (mapped to the folder you ran"
 echo "[pose3d]  this from). Projects are saved to /workspace/pose3d_projects."
 echo "[pose3d] ---------------------------------------------------------------"

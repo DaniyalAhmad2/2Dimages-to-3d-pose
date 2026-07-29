@@ -60,3 +60,24 @@ QScrollBar::handle:horizontal { background: #262b3a; border-radius: 5px; min-wid
 QScrollBar:vertical { width: 10px; background: #0b0d13; }
 QScrollBar::handle:vertical { background: #262b3a; border-radius: 5px; min-height: 30px; }
 QStatusBar { background: #0a0c11; color: #8a91a3; border-top: 1px solid #1e2230; }
+
+/* File pickers. The container has no desktop portal, so Qt's own dialog is
+   what actually appears; style it to match the rest of the app. */
+QFileDialog { background: #12141b; color: #dfe3ec; }
+QFileDialog QWidget { background: #12141b; color: #dfe3ec; }
+QFileDialog QListView, QFileDialog QTreeView,
+QFileDialog QLineEdit, QFileDialog QComboBox {
+    background: #1a1d26; color: #dfe3ec;
+    border: 1px solid #2a2f3d; border-radius: 4px; padding: 2px 4px;
+}
+QFileDialog QListView::item:selected, QFileDialog QTreeView::item:selected {
+    background: #2f6fd0; color: #ffffff;
+}
+QFileDialog QHeaderView::section {
+    background: #1a1d26; color: #aeb4c2; border: 0; padding: 4px;
+}
+QFileDialog QPushButton, QFileDialog QToolButton {
+    background: #232735; color: #dfe3ec;
+    border: 1px solid #2f3545; border-radius: 4px; padding: 4px 10px;
+}
+QFileDialog QPushButton:hover, QFileDialog QToolButton:hover { background: #2c3242; }

@@ -296,7 +296,8 @@ class MainWindow(QMainWindow):
                     f"Imported to {dlg.result_folder}", 8000)
 
     def _on_export(self):
-        from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        from pose3d.ui import filedialog
         import numpy as np
         from pose3d.core.skeleton import NUM_JOINTS
         frames = self.model.project.frames
@@ -323,7 +324,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if go != QMessageBox.StandardButton.Yes:
                 return
-        out = QFileDialog.getExistingDirectory(self, "Export results to folder")
+        out = filedialog.existing_directory(self, "Export results to folder")
         if not out:
             return
         poses = np.stack([f.fitted3d for f in frames])   # native units; camera auto-frames

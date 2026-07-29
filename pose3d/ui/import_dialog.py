@@ -46,15 +46,15 @@ class _FilePicker(QWidget):
 
     def _browse(self):
         if self.kind == "files":
-            paths, _ = QFileDialog.getOpenFileNames(self, "Select images", "", self.filt)
+            paths = filedialog.open_files(self, "Select images", self.filt)
             self.paths = paths
             self.line.setText(f"{len(paths)} file(s)" if paths else "")
         elif self.kind == "dir":
-            d = QFileDialog.getExistingDirectory(self, "Select folder")
+            d = filedialog.existing_directory(self, "Select folder")
             self.paths = [d] if d else []
             self.line.setText(d)
         else:
-            p, _ = QFileDialog.getOpenFileName(self, "Select file", "", self.filt)
+            p = filedialog.open_file(self, "Select file", self.filt)
             self.paths = [p] if p else []
             self.line.setText(p)
 
@@ -67,11 +67,20 @@ class ImportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Import Images & Calibration")
         self.setMinimumWidth(560)
+        self._hint = filedialog.location_hint()
         self.result_folder: str | None = None
         self._detector = None
         self._projects_root = Path(projects_root or (Path.home() / "pose3d_projects"))
 
         root = QVBoxLayout(self)
+
+        # Running in a container, the app can only read folders shared with it;
+        # browsing anywhere else shows an empty list and looks broken.
+        if self._hint:
+            hint = QLabel(self._hint)
+            hint.setWordWrap(True)
+            hint.setStyleSheet("color:#e0a33a; font-size:11px;")
+            root.addWidget(hint)
 
         # --- images ---
         img_box = QGroupBox("Synced Images")
@@ -185,7 +194,8 @@ class ImportDialog(QDialog):
             det = self._ensure_detector()
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
-            from pose3d.core.project import CAMERAS
+            from pose3d.ui import filedialog
+from pose3d.core.project import CAMERAS
             for i, frame in enumerate(project.frames):
                 if prog.wasCanceled():
                     return

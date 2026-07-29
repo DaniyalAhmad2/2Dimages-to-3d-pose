@@ -33,6 +33,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         libx11-6 libxext6 libxrender1 libxi6 libxfixes3 libxxf86vm1 \
         libsm6 libice6 libfontconfig1 libfreetype6 \
         fonts-dejavu-core xz-utils ca-certificates \
+        adwaita-icon-theme \
     && rm -rf /var/lib/apt/lists/*
 
 # --- Blender (export engine) ---------------------------------------------
@@ -86,6 +87,7 @@ ENV LIBGL_ALWAYS_SOFTWARE=1 \
     QT_X11_NO_MITSHM=1 \
     QT_QPA_PLATFORM=xcb \
     POSE3D_BLENDER=/opt/blender/blender \
+    POSE3D_MAXIMIZE=1 \
     HOME=/workspace \
     PYTHONPATH=/app
 

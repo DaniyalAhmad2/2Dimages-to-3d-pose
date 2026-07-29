@@ -15,10 +15,22 @@ services:
       # Already using port 8080? Run:  POSE3D_PORT=8090 docker compose up
       - "${POSE3D_PORT:-8080}:8080"
     volumes:
+      # writable: projects and exports land here, on your machine
       - ./workspace:/workspace
+      # Read-only view of your own files, so the file picker can reach camera
+      # images without copying them in. A container can ONLY see folders shared
+      # with it, so anything outside this is invisible to the app.
+      # Defaults to the folder you launched from. To expose more:
+      #   Linux/macOS   POSE3D_FILES=$HOME docker compose up
+      #   Windows       $env:POSE3D_FILES="C:\Users\You"; docker compose up
+      - ${POSE3D_FILES:-.}:/host:ro
     # Qt/X11 keep window surfaces in shared memory; the 64 MB default is tight
     # at this window size.
     shm_size: "1gb"
+    environment:
+      # purely so the startup message names the port YOU opened, not the
+      # container's internal one
+      POSE3D_PUBLIC_PORT: "${POSE3D_PORT:-8080}"
     stdin_open: true
     tty: true
     restart: "no"

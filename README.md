@@ -45,6 +45,30 @@ $env:POSE3D_PORT=8090; docker compose up
 Identical: `docker compose up`, then <http://localhost:8080>. To change the port,
 `POSE3D_PORT=8090 docker compose up`.
 
+### Which folders the app can see
+
+The application runs in a container, which means it can **only** open files in
+folders that are explicitly shared with it — the rest of your disk is invisible
+to it. Two are shared:
+
+| Inside the app | On your machine | |
+|---|---|---|
+| `/workspace` | the `workspace` folder next to this file | read + write |
+| `/host` | the folder you launched from | read only |
+
+To let it reach your images without moving them, point `POSE3D_FILES` at a
+wider folder before starting:
+
+```bash
+POSE3D_FILES=$HOME docker compose up                      # Linux / macOS
+```
+```powershell
+$env:POSE3D_FILES="C:\Users\You"; docker compose up      # Windows
+```
+
+That folder then appears as `/host` in the file picker, with a shortcut in its
+sidebar.
+
 ### Where your files go
 
 A `workspace` folder is created next to this file and is shared with the
@@ -119,5 +143,8 @@ On Windows PowerShell: `$env:POSE3D_PORT=8090; docker compose up`
 **The 3D view is slow.** The container renders in software, with no GPU. It is
 fine for review; large captures are smoother in the exported video.
 
-**Images don't appear after import.** They must be inside the `workspace`
-folder — the application can only see that folder, not the rest of your disk.
+**The file picker doesn't show my files.** A container can only see folders
+shared with it. By default that is the folder you launched from. Start it with
+`POSE3D_FILES=$HOME docker compose up` (PowerShell:
+`$env:POSE3D_FILES="C:\Users\You"`) to browse a wider folder — see
+"Which folders the app can see" above.

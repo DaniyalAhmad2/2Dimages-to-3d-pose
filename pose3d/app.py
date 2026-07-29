@@ -9,6 +9,7 @@ images + calibration and opens it in a fresh window.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -61,7 +62,12 @@ def open_project_window(project_folder: str | None):
     model = build_model(project_folder)
     win = MainWindow(model, open_callback=open_project_window)
     _WINDOWS.append(win)
-    win.show()
+    # In the container the app IS the desktop, so fill the virtual screen
+    # rather than floating a fixed-size window inside it with a border around.
+    if os.environ.get("POSE3D_MAXIMIZE", "0") == "1":
+        win.showMaximized()
+    else:
+        win.show()
     return win
 
 
@@ -73,6 +79,12 @@ def main():
     from PySide6.QtCore import QCoreApplication, Qt
     QCoreApplication.setAttribute(Qt.ApplicationAttribute.AA_ShareOpenGLContexts)
     app = QApplication(sys.argv)
+    # Containers ship no desktop environment, so Qt has no icon theme to fall
+    # back on and file-dialog toolbar buttons render blank. Name one explicitly
+    # when the image provides it.
+    from PySide6.QtGui import QIcon
+    if not QIcon.themeName() and os.path.isdir("/usr/share/icons/Adwaita"):
+        QIcon.setThemeName("Adwaita")
     load_stylesheet(app)
     open_project_window(folder)
     sys.exit(app.exec())
