@@ -30,6 +30,10 @@ TARGET_RATIO = {("thigh.L", "shin.L"): 1.00, ("thigh.R", "shin.R"): 1.00,
                 ("upper_arm.L", "forearm.L"): 1.27,
                 ("upper_arm.R", "forearm.R"): 1.27}
 
+# Hip joint height as a fraction of stature. Get this wrong and the figure
+# reads as long-bodied and short-legged however good the limb ratios are.
+HIP_HEIGHT = 0.53
+
 
 def parse_args():
     argv = sys.argv
@@ -37,6 +41,11 @@ def parse_args():
     p = argparse.ArgumentParser()
     p.add_argument("--out", required=True)
     p.add_argument("--report", action="store_true")
+    p.add_argument("--balance-trunk", action="store_true",
+                   help="also shorten the trunk so the hip joint sits at "
+                        "HIP_HEIGHT of stature. A rig whose body above the hip "
+                        "is too long reads as long-bodied and short-legged even "
+                        "when its individual limb lengths are correct.")
     return p.parse_args(argv)
 
 
@@ -80,6 +89,26 @@ def main():
         raise SystemExit("no skinned mesh found")
 
     scales = plan_scales(arm)
+
+    if args.balance_trunk:
+        # World space throughout: mesh verts are object-local while bone heads
+        # are armature-local, and mixing the two silently produces nonsense.
+        meshes_z = [(m.matrix_world @ v.co).z
+                    for m in meshes for v in m.data.vertices]
+        floor, crown = min(meshes_z), max(meshes_z)
+        hip = (arm.matrix_world @ arm.data.bones["thigh.L"].head_local).z
+        h0 = hip - floor                      # hip height, unchanged by this
+        above = crown - hip                   # what we scale
+        f = HIP_HEIGHT
+        # want above*t / (above*t + h0) == 1 - f
+        t = h0 * (1 - f) / (above * f) if above > 1e-9 else 1.0
+        t = float(min(max(t, 0.5), 2.0))
+        print(f"hip at {100*h0/(crown-floor):.1f}% of stature (human {100*f:.0f}%): "
+              f"scaling the trunk by {t:.3f}")
+        for name in ("hips", "spine", "chest"):
+            if name in arm.data.bones:
+                scales[name] = scales.get(name, 1.0) * t
+
     print("rebalancing limbs (total length preserved):")
     for name, k in sorted(scales.items()):
         print(f"  {name:14s} {bone_len(arm, name):.3f} -> "
