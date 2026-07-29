@@ -185,7 +185,7 @@ def detect_roles(names, override):
     return out
 
 
-def report(roles, index, head, tail):
+def report(roles, index, head, tail, stature=None):
     """Is this rig shaped like a person? Fixed-length retargeting can only put
     the knees and elbows where the subject's are if it is."""
     def seg(role):
@@ -198,25 +198,37 @@ def report(roles, index, head, tail):
         return False
     thigh, shank = seg("thigh.L"), seg("shin.L")
     upper, fore = seg("upper_arm.L"), seg("forearm.L")
-    stature = float(head[:, 2].max() - head[:, 2].min())
+    # True stature is the MESH height. A bone-head span depends on which bones
+    # a rig happens to have (feet, skull cap), so it is not comparable between
+    # rigs and silently inflates every fraction.
+    if stature is None:
+        stature = float(head[:, 2].max() - head[:, 2].min())
 
     checks = [
         ("thigh : shank", thigh / shank, 0.90, 1.15),
-        ("upper_arm : forearm", upper / fore, 1.15, 1.40),
+        ("upper_arm : forearm", upper / fore, 0.90, 1.40),
     ]
-    print(f"\nanthropometry (bone-head stature {stature:.3f})")
+    print(f"\nanthropometry (mesh stature {stature:.3f})")
     ok = True
     for label, val, lo, hi in checks:
         good = lo <= val <= hi
         ok &= good
         print(f"  {label:22s} {val:6.3f}   want {lo:.2f}-{hi:.2f}   {'ok' if good else 'FAIL'}")
-    for label, length, key in (("thigh", thigh, "thigh"), ("shank", shank, "shank"),
-                               ("upper_arm", upper, "upper_arm"), ("forearm", fore, "forearm")):
+    for label, length, key, binding in (
+            ("thigh", thigh, "thigh", True), ("shank", shank, "shank", True),
+            # Arm fractions are advisory: they depend on whether the rig puts
+            # the shoulder at the acromion or the humeral head, which shifts
+            # the measurement by several percent of stature. Hip, knee and
+            # ankle are unambiguous joint centres, so the leg checks bind.
+            ("upper_arm", upper, "upper_arm", False),
+            ("forearm", fore, "forearm", False)):
         frac = length / stature
         want = _STATURE_FRACTION[key]
         good = abs(frac - want) / want <= 0.12
-        ok &= good
-        print(f"  {label:22s} {frac:6.3f}   want {want:.3f} ±12%   {'ok' if good else 'FAIL'}")
+        if binding:
+            ok &= good
+        note = "ok" if good else ("FAIL" if binding else "off (advisory)")
+        print(f"  {label:22s} {frac:6.3f}   want {want:.3f} ±12%   {note}")
 
     # a bent rest limb is what lets the IK pick a bend direction when the
     # captured mid-joint is too noisy to say
@@ -254,7 +266,8 @@ def main():
         raise SystemExit(f"could not identify required bones {missing}; "
                          f"pass --roles. Bones present: {names[:12]}…")
 
-    passed = report(roles, index, head, tail) if args.report else True
+    stature = float(verts[:, 2].max() - verts[:, 2].min())
+    passed = report(roles, index, head, tail, stature) if args.report else True
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)

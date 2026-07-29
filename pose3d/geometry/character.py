@@ -192,6 +192,16 @@ class Character:
                 self._ik[self.role[up]] = (self.role[lo], mid_j, end_j)
         self._rest_pole = self._compute_rest_poles()
         self._joint_src = self._resolve_joint_sources()
+        # The pelvis is aimed at the torso midpoint. Measure that from the rig's
+        # OWN rest torso direction, not from the hips bone's axis: the two do not
+        # coincide, so using the bone axis rotates the pelvis (and both legs with
+        # it) even when the subject matches the rig exactly.
+        rj = self.rest_joints()
+        mid = (rj[int(Joint.NECK)] + rj[int(Joint.PELVIS)]) / 2.0
+        d = mid - rj[int(Joint.PELVIS)]
+        n = np.linalg.norm(d)
+        self._rest_torso = (d / n if n > 1e-9 and not np.isnan(d).any()
+                            else self.tail[self.hips_idx] - self.head[self.hips_idx])
         self._scale = None          # uniform scale, set by fit_to_subject
 
     # --- rig introspection -------------------------------------------------
@@ -449,10 +459,9 @@ class Character:
         R_hips = np.eye(3)
         mid = resolve(_MID)
         if mid is not None:
-            rest_dir = self.tail[self.hips_idx] - hips_head
             want = mid - hips_pos
-            if np.linalg.norm(rest_dir) > 1e-9 and np.linalg.norm(want) > 1e-9:
-                R_hips = _align(rest_dir, want)
+            if np.linalg.norm(want) > 1e-9:
+                R_hips = _align(self._rest_torso, want)
         skin[self.hips_idx][:3, :3] = R_hips
         skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
 
