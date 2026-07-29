@@ -62,12 +62,17 @@ def open_project_window(project_folder: str | None):
     model = build_model(project_folder)
     win = MainWindow(model, open_callback=open_project_window)
     _WINDOWS.append(win)
-    # In the container the app IS the desktop, so fill the virtual screen
-    # rather than floating a fixed-size window inside it with a border around.
+    # In the container the app IS the desktop, so fill the virtual screen rather
+    # than floating a fixed-size window inside it. showMaximized() is no use
+    # here: maximising is a window-manager job and the container runs none, so
+    # set the geometry outright.
     if os.environ.get("POSE3D_MAXIMIZE", "0") == "1":
-        win.showMaximized()
-    else:
-        win.show()
+        from PySide6.QtWidgets import QApplication
+        qapp = QApplication.instance()
+        screen = qapp.primaryScreen() if qapp is not None else None
+        if screen is not None:
+            win.setGeometry(screen.availableGeometry())
+    win.show()
     return win
 
 
