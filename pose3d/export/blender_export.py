@@ -13,6 +13,7 @@ from pathlib import Path
 import numpy as np
 
 from pose3d.config import blender_binary
+from pose3d.runtime import subprocess_kwargs
 from pose3d.core.skeleton import BONES, JOINT_NAMES, MIXAMO_BONE, NUM_JOINTS
 
 _JOB = Path(__file__).with_name("blender_job.py")
@@ -143,14 +144,18 @@ def export_animation(
     if not render_video:
         cmd.append("--no-video")
 
+    # A frozen GUI has no usable stdin for the child to inherit, its output is
+    # UTF-8 whatever the machine's code page says, and on Windows a console
+    # child flashes a black window over the UI. See pose3d.runtime.
+    kw = subprocess_kwargs()
     try:
         if on_line is None:
-            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+            proc = subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
             stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
         else:
             # stream Blender's output so the caller can show live progress
             p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, text=True, bufsize=1)
+                                 stderr=subprocess.STDOUT, bufsize=1, **kw)
             chunks = []
             for line in p.stdout:
                 chunks.append(line)
@@ -160,15 +165,27 @@ def export_animation(
                     pass
             p.wait(timeout=timeout)
             stdout, stderr, rc = "".join(chunks), "", p.returncode
+    except subprocess.TimeoutExpired:
+        return ExportResult(
+            bvh=None, fbx=None, mp4=None, returncode=124, stdout="",
+            stderr=(f"Blender did not finish within {timeout} s and was stopped.\n\n"
+                    "A long take can legitimately take a while to render; try "
+                    "exporting without the video, or a shorter selection."))
     except FileNotFoundError:
-        # say which binary is missing and how to point at one, instead of
-        # surfacing a bare OSError from subprocess
+        # must precede OSError, of which it is a subclass: say which binary is
+        # missing and how to point at one, instead of a bare OSError
         return ExportResult(
             bvh=None, fbx=None, mp4=None, returncode=127, stdout="",
             stderr=(f"Blender was not found (tried: {blender}).\n\n"
                     "Export needs Blender 5.x. Install it and either put it on "
                     "PATH or set the POSE3D_BLENDER environment variable to the "
                     "blender executable."))
+    except OSError as e:
+        # e.g. POSE3D_BLENDER pointing at a folder, or a non-executable file
+        return ExportResult(
+            bvh=None, fbx=None, mp4=None, returncode=126, stdout="",
+            stderr=(f"Could not run Blender at '{blender}'.\n\n{type(e).__name__}: {e}\n\n"
+                    "Set POSE3D_BLENDER to the blender executable itself."))
 
     def _exists(ext):
         p = out_dir / f"{name}.{ext}"

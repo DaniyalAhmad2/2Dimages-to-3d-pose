@@ -2,16 +2,12 @@
 import numpy as np
 import pytest
 
-from pose3d.config import character_blend
-
-pytest.importorskip("numpy")
-
-_HAVE = character_blend() is not None
+from tests.gates import needs_character
 from pose3d.core.skeleton import Joint
 from tests.synth import sample_skeleton_3d
 
 
-@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+@needs_character()
 def test_character_skins_to_pose():
     from pose3d.geometry.character import Character
     pose = sample_skeleton_3d()
@@ -24,7 +20,7 @@ def test_character_skins_to_pose():
     assert abs(verts[:, 2].max() - pose[:, 2].max()) < 0.4 * (pose[:, 2].max() - pose[:, 2].min())
 
 
-@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+@needs_character()
 def test_character_raises_correct_side():
     """Raising the LEFT wrist must lift the character's LEFT-side vertices."""
     from pose3d.geometry.character import Character
@@ -41,7 +37,7 @@ def test_character_raises_correct_side():
     assert (v1[left, 2].mean() - v0[left, 2].mean()) > 0.05
 
 
-@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+@needs_character()
 def test_character_handles_sparse_pose():
     from pose3d.geometry.character import Character
     pose = sample_skeleton_3d()
@@ -50,7 +46,7 @@ def test_character_handles_sparse_pose():
     assert verts is not None and not np.isnan(verts).any()
 
 
-@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+@needs_character()
 def test_bones_stay_connected_when_posed():
     """Bones joined in the rest rig must stay joined once posed.
 
@@ -83,7 +79,7 @@ def test_bones_stay_connected_when_posed():
                 f"by {gap:.3f} at lean={lean}deg")
 
 
-@pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+@needs_character()
 def test_pose_bone_matrices_reproduce_lbs():
     """The bone matrices sent to Blender must reproduce the live-view skinning
     exactly (setting pose_bone.matrix = M drives the identical deform), so the

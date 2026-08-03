@@ -12,10 +12,13 @@ Two things differ from a normal desktop:
 from __future__ import annotations
 
 import os
+import tempfile
 from pathlib import Path
 
 from PySide6.QtCore import QUrl
 from PySide6.QtWidgets import QFileDialog
+
+from pose3d.runtime import in_container
 
 # Where the user's own files are mounted. /workspace is writable and is where
 # projects and exports go; /host is the folder the app was launched from,
@@ -27,8 +30,13 @@ HOST = Path(os.environ.get("POSE3D_HOST", "/host"))
 def shared_folders() -> list[Path]:
     """Folders the app can actually read, most useful first."""
     out = [p for p in (WORKSPACE, HOST) if p.is_dir()]
-    if not out:                      # running natively, not in the container
-        out = [Path.home()]
+    if not out:
+        # Running natively: nothing is restricted, so this is only about where
+        # to start. The Windows bundle ships a `workspace` folder next to the
+        # exe for projects and exports; fall back to the user's home.
+        from pose3d.runtime import app_dir
+        local = app_dir() / "workspace"
+        out = [local] if local.is_dir() else [Path.home()]
     return out
 
 
@@ -38,7 +46,27 @@ def default_dir() -> str:
 
 
 def is_writable(path) -> bool:
-    return os.access(str(path), os.W_OK)
+    """Can the app actually create a file here?
+
+    Asking the operating system is not enough on Windows: os.access(W_OK) only
+    reports the folder's read-only *attribute* and ignores ACLs entirely, so it
+    answers True for C:\\Program Files. The export pre-flight guard would then
+    pass and the export would die minutes later inside Blender — which is the
+    exact failure that guard exists to prevent. So write something.
+    """
+    p = Path(path)
+    if not p.is_dir():
+        return False
+    try:
+        fd, name = tempfile.mkstemp(prefix=".pose3d-write-test-", dir=str(p))
+    except OSError:
+        return False
+    os.close(fd)
+    try:
+        os.unlink(name)
+    except OSError:                  # created but not removable; still writable
+        pass
+    return True
 
 
 def writable_dir() -> str:
@@ -65,9 +93,16 @@ def not_writable_message(path) -> str:
 
 
 def _prep(dlg: QFileDialog) -> None:
-    # the container has no portal; the Qt dialog is the one that actually works
-    dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-    dlg.setSidebarUrls([QUrl.fromLocalFile(str(p)) for p in shared_folders()])
+    if in_container():
+        # No desktop portal in the image, so Qt's "native" dialog degrades to a
+        # bare fallback; asking for the Qt one outright gives a usable dialog.
+        # Pinning the mounts matters too — browsing anywhere else shows an
+        # empty list, which reads as a broken app rather than as "not shared".
+        dlg.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+        dlg.setSidebarUrls([QUrl.fromLocalFile(str(p)) for p in shared_folders()])
+    # Everywhere else the OS dialog is the right one: it knows about drives,
+    # network locations, OneDrive and the user's own Recent list, none of which
+    # Qt's fallback can offer.
 
 
 def _run(dlg: QFileDialog):

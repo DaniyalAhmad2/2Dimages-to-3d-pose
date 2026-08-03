@@ -16,6 +16,7 @@ from __future__ import annotations
 import numpy as np
 
 from pose3d.core.skeleton import NUM_JOINTS, derive_joints, map_halpe26
+from pose3d.detect import models
 from pose3d.detect.base import Detection, KeypointDetector
 
 
@@ -25,14 +26,21 @@ class RTMPoseDetector(KeypointDetector):
                  kpt_thr: float = 0.2):
         self.feet = feet
         self.kpt_thr = kpt_thr           # below this -> treated as not detected
-        if feet:
+        self._map = map_halpe26 if feet else derive_joints  # Halpe26 / COCO-17
+
+        # Prefer weights shipped with the app: rtmlib otherwise downloads
+        # ~150 MB on first use, which needs a network and writes its progress
+        # to a stderr that does not exist in a windowed build. See detect.models.
+        w = models.resolve(mode=mode, feet=feet)
+        self.bundled = w is not None
+        if w is not None:
+            self._model = models.TwoStageDetector(w, backend=backend, device=device)
+        elif feet:
             from rtmlib import BodyWithFeet
             self._model = BodyWithFeet(mode=mode, backend=backend, device=device)
-            self._map = map_halpe26          # 26 keypoints (Halpe26)
         else:
             from rtmlib import Body
             self._model = Body(mode=mode, backend=backend, device=device)
-            self._map = derive_joints        # 17 keypoints (COCO-17)
         self.mode = mode
         self.device = device
 

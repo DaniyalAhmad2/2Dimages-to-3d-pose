@@ -76,8 +76,49 @@ def open_project_window(project_folder: str | None):
     return win
 
 
+def install_crash_handler() -> None:
+    """Make an unhandled exception visible instead of silent.
+
+    Started from a shortcut with no console, a crash otherwise just closes the
+    window: the client sees the app "not open" and has nothing to send us. Log
+    it and say where the log is.
+    """
+    import traceback
+
+    from pose3d.runtime import log_path
+
+    def hook(exc_type, exc, tb):
+        if issubclass(exc_type, KeyboardInterrupt):
+            sys.__excepthook__(exc_type, exc, tb)
+            return
+        text = "".join(traceback.format_exception(exc_type, exc, tb))
+        print(text, file=sys.stderr, flush=True)
+        try:
+            from PySide6.QtWidgets import QApplication, QMessageBox
+            if QApplication.instance() is not None:
+                QMessageBox.critical(
+                    None, "Pose3D stopped",
+                    f"{exc_type.__name__}: {exc}\n\n"
+                    f"Details were written to:\n{log_path()}")
+        except Exception:
+            pass                        # a dialog must never mask the crash
+
+    sys.excepthook = hook
+
+
 def main():
-    folder = sys.argv[1] if len(sys.argv) > 1 else None
+    # A frozen windowed build has no console to inherit, so anything that
+    # writes to stdout/stderr — rtmlib's download progress, a Qt warning, a
+    # traceback — hits None and raises. Give them a file to land in first.
+    from pose3d.runtime import ensure_std_streams
+    ensure_std_streams()
+    install_crash_handler()
+
+    if "--selftest" in sys.argv[1:]:
+        from pose3d.selftest import main as selftest
+        sys.exit(selftest([a for a in sys.argv[1:] if a != "--selftest"]))
+
+    folder = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
     # Share one GL context across windows so pyqtgraph's cached shader programs
     # stay valid when the Import flow opens a second window (otherwise
     # glUseProgram raises GLError 1281 on the new context).

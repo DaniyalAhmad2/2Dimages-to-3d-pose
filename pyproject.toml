@@ -4,12 +4,18 @@ version = "0.1.0"
 requires-python = ">=3.12"
 dependencies = [
     "numpy>=2.5.1",
-    "opencv-contrib-python>=4.8",
+    # *contrib* is required for cv2.aruco (calibration); *headless* keeps a
+    # second Qt out of the PyInstaller bundle, where it collides with PySide6.
+    # Held below 5.0: the test suite has only ever been run against 4.x, and a
+    # major OpenCV release is not something to discover on the client's machine.
+    "opencv-contrib-python-headless>=4.8,<5",
     "scipy>=1.18.0",
     "rtmlib>=0.0.13",
     "tqdm>=4.66",
     "onnxruntime>=1.20",
-    "PySide6>=6.7",
+    # -essentials is the same Qt modules the app uses; plain PySide6 adds
+    # WebEngine, 3D, Charts and friends — gigabytes we never import.
+    "pyside6-essentials>=6.7",
     "pyqtgraph>=0.13",
     "PyOpenGL>=3.1",
     "pillow>=10.0",
@@ -28,3 +34,17 @@ testpaths = ["tests"]
 [tool.uv]
 # The system resolver returns unreachable IPv6 for the wheel CDN on this host;
 # run uv/network commands with RES_OPTIONS="no-aaaa" to force IPv4.
+
+# rtmlib declares a dependency on plain `opencv-python`, which would be
+# installed alongside — and shadow — the *contrib* build, taking cv2.aruco with
+# it and breaking calibration. It also drags in torch-adjacent extras we never
+# use. We only need its pure-Python inference wrappers, so declare it as having
+# no dependencies of its own; the ones it actually imports (numpy, opencv, tqdm)
+# are direct dependencies above. This is the lockfile equivalent of the
+# `pip install --no-deps rtmlib` the Dockerfile already does.
+# No `version` key on purpose: with one, the override applies only to that
+# release, and rtmlib resolving one patch higher silently reinstates the
+# dependencies — which is exactly what happened.
+[[tool.uv.dependency-metadata]]
+name = "rtmlib"
+requires-dist = []

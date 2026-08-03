@@ -8,6 +8,41 @@ correct any joint by hand, and exports the result as a rigged character
 
 ## Running it
 
+There are two ways to run it, and on Windows the native one is better.
+
+| | Windows `.exe` | Docker |
+|---|---|---|
+| Platforms | Windows 10/11 | Windows, macOS, Linux |
+| 3D view | uses the graphics card | software-rendered, noticeably slower |
+| Prerequisites | none | Docker Desktop |
+| File access | anywhere on the machine | only pre-shared folders |
+| Download | ~1 GB zip | ~1.5 GB image |
+
+The 3D view is where most of the work happens — scrubbing frames, checking
+joints — so on Windows the native build is the one to use. Docker remains the
+answer for macOS and Linux, and for reproducing a problem in a known-identical
+environment.
+
+### Windows (native)
+
+Download `Pose3D-Windows.zip` from the
+[Releases page](https://github.com/DaniyalAhmad2/2Dimages-to-3d-pose/releases),
+extract it somewhere writable — Desktop or Documents, **not** Program Files —
+and run `Pose3D.exe`.
+
+Blender, the pose models and everything else are inside the folder. No
+installs, no internet.
+
+The first launch shows a blue **"Windows protected your PC"** screen. That is
+SmartScreen, and it appears for any application that has not been code-signed;
+it is not a virus warning. Click **More info** → **Run anyway**. It appears
+once.
+
+If the app fails to start or an export fails, `pose3d-log.txt` is written next
+to `Pose3D.exe` and will normally say why.
+
+### Docker (any platform)
+
 You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).
 Nothing else — Python, Blender and the pose model are all inside the image.
 
@@ -20,21 +55,11 @@ there and behaves exactly like a desktop window — mouse, dragging, everything.
 
 To stop it, press `Ctrl+C` in the terminal (or `docker compose down`).
 
-### Windows
-
-Works the same way. Install **Docker Desktop for Windows**, which will enable
-WSL 2 for you if it isn't already on (Windows 10 21H2 or later, or Windows 11).
-
-Then put `docker-compose.yml` in a folder, open **PowerShell** there and run:
-
-```powershell
-docker compose up
-```
-
-The first run downloads about 1.5 GB; after that it starts in seconds and needs
-no internet at all. Open <http://localhost:8080>.
-
-To use a different port on Windows:
+On **Windows**, install Docker Desktop for Windows (it enables WSL 2 for you if
+it isn't already on: Windows 10 21H2 or later, or Windows 11), put
+`docker-compose.yml` in a folder, open PowerShell there and run the same
+command. The first run downloads about 1.5 GB; after that it starts in seconds
+and needs no internet. To use a different port:
 
 ```powershell
 $env:POSE3D_PORT=8090; docker compose up
@@ -127,6 +152,29 @@ driven by your capture, automatically scaled to the subject's proportions.
 ---
 
 ## Troubleshooting
+
+### Windows `.exe`
+
+**"Windows protected your PC".** SmartScreen, shown for any unsigned
+application. **More info** → **Run anyway**. Once only.
+
+**It closes immediately, or nothing happens.** Read `pose3d-log.txt` next to
+`Pose3D.exe`. A windowed application has no console, so that file is where
+crashes and library errors go.
+
+**It worked, then stopped launching.** Anti-virus software sometimes
+quarantines a file out of `_internal\` because the build is unsigned. Check the
+quarantine list.
+
+**Export fails, or the app says a folder is read-only.** Export somewhere you
+own — `workspace\` inside the extracted folder is the default and always works.
+Program Files and most network drives do not.
+
+**`Pose3D.exe --selftest`** runs the same checks the release build is verified
+with — Blender, the rig, the pose models, OpenGL, and a real export — and
+prints which one is wrong. Worth running before reporting a problem.
+
+### Docker
 
 **The page doesn't load.** Give it a few seconds after `docker compose up` —
 the display server starts first. Check the terminal says

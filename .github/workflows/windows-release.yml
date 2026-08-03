@@ -1,0 +1,113 @@
+name: Windows release
+
+# Builds the .zip the client downloads, and proves it works before publishing:
+# the self-test runs against the ASSEMBLED BUNDLE, not against the source tree,
+# so a missing asset or an unfindable Blender fails here rather than on their
+# machine.
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Attach the bundle to a GitHub Release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies from the lockfile
+        run: uv sync --frozen --all-groups
+
+      - name: Cache Blender
+        id: blender-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/blender-5.1.1-windows-x64.zip
+          key: blender-5.1.1-windows-x64
+
+      - name: Download Blender
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path .cache | Out-Null
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://download.blender.org/release/Blender5.1/blender-5.1.1-windows-x64.zip" `
+            -OutFile ".cache/blender-5.1.1-windows-x64.zip"
+
+      - name: Cache pose weights
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: rtmlib-weights-balanced-v1
+
+      - name: Build the executable
+        run: uv run pyinstaller pose3d.spec --noconfirm --clean
+
+      - name: Assemble the bundle
+        run: |
+          uv run pwsh tools/make_windows_bundle.ps1 `
+            -Dist dist/Pose3D -Out build/Pose3D-Windows
+
+      - name: Self-test the assembled bundle
+        # The whole point of this job. Runs the exe the client will run, with
+        # PATH-visible Blender and the rtmlib cache deliberately NOT available,
+        # so it can only pass by finding what the bundle itself ships.
+        env:
+          POSE3D_BLENDER: ""
+          POSE3D_MODELS: ""
+          XDG_CACHE_HOME: ${{ github.workspace }}\.empty-cache
+        run: |
+          New-Item -ItemType Directory -Force -Path .empty-cache | Out-Null
+          & build/Pose3D-Windows/Pose3D.exe --selftest
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "--- pose3d-log.txt ---"
+            Get-Content build/Pose3D-Windows/pose3d-log.txt -ErrorAction SilentlyContinue
+            exit 1
+          }
+
+      - name: Zip
+        # 7z, not Compress-Archive: 1.6 GB is slow through .NET's ZipArchive and
+        # close enough to its 2 GB ceiling to be worth avoiding.
+        run: |
+          7z a -tzip -mx=5 -bso0 -bsp0 Pose3D-Windows.zip build/Pose3D-Windows
+          "{0:N0} MB" -f ((Get-Item Pose3D-Windows.zip).Length / 1MB)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Pose3D-Windows
+          path: Pose3D-Windows.zip
+          # ~1 GB; the default 90 days of retention is not worth the storage
+          retention-days: 14
+          compression-level: 0
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/') || inputs.publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Pose3D-Windows.zip
+          generate_release_notes: true
+
+      - name: Upload logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release-logs
+          path: |
+            build/Pose3D-Windows/pose3d-log.txt
+            build/*.toc
+            build/*/warn*.txt
+          if-no-files-found: ignore

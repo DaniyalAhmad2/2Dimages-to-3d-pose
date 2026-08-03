@@ -1,3 +1,10 @@
+# Local dev tooling — never part of the deliverable
+.claude/
+CLAUDE.md
+.mcp.json
+.cursor/
+.aider*
+
 # Python
 __pycache__/
 *.py[cod]
@@ -12,8 +19,8 @@ build/
 dist/
 *.spec.bak
 
-# uv
-uv.lock
+# uv: uv.lock is committed on purpose — CI installs from it, so the Windows
+# build the client receives is built from exactly these versions.
 
 # Third-party dataset downloads + derived artifacts (re-downloadable; see
 # README_RUN.md). Small evidence files are force-added below.

@@ -48,21 +48,27 @@ RUN mkdir -p /opt \
     && /opt/blender/blender --version
 
 # --- Python dependencies --------------------------------------------------
-# opencv: the *contrib* build is required for cv2.aruco (calibration); the
-# headless variant avoids pulling a second Qt in alongside PySide6.
-# rtmlib is installed --no-deps because it would otherwise drag in the
-# non-contrib opencv and clobber aruco.
-RUN pip install --no-cache-dir \
-        "numpy>=2.5.1" \
-        "scipy>=1.18.0" \
-        "opencv-contrib-python-headless>=4.8" \
-        "onnxruntime>=1.20" \
-        "pyside6-essentials>=6.7" \
-        "pyqtgraph>=0.13" \
-        "PyOpenGL>=3.1" \
-        "pillow>=10.0" \
-        "tqdm>=4.66" \
-    && pip install --no-cache-dir --no-deps "rtmlib>=0.0.13"
+# Installed from the committed lockfile, hashes and all, so this image and the
+# Windows bundle contain the same versions the test suite ran against. This
+# used to be a hand-written list here, which silently drifted a whole major
+# OpenCV version ahead of the one anything was tested on.
+#
+# The constraints themselves live in pyproject.toml, including why opencv must
+# be the *contrib* build (cv2.aruco, for calibration) and *headless* (a second
+# Qt collides with PySide6), and why rtmlib is stripped of its dependencies.
+#
+# --no-deps is required, not an optimisation: the exported file is already the
+# lock's complete pinned closure, and without it pip re-reads rtmlib's own
+# metadata and reinstates the plain opencv build, shadowing contrib and taking
+# cv2.aruco — calibration — with it. uv's dependency override governs uv's
+# resolver only; it does not follow the package into pip.
+COPY pyproject.toml uv.lock /tmp/dep/
+RUN pip install --no-cache-dir uv \
+    && uv export --frozen --no-dev --no-emit-project \
+         --directory /tmp/dep -o /tmp/dep/requirements.txt \
+    && pip install --no-cache-dir --no-deps -r /tmp/dep/requirements.txt \
+    && pip uninstall -y uv \
+    && rm -rf /tmp/dep
 
 # --- pose detection weights ----------------------------------------------
 # Baked in so first use is instant and works offline. rtmlib looks under
@@ -87,6 +93,7 @@ ENV LIBGL_ALWAYS_SOFTWARE=1 \
     QT_X11_NO_MITSHM=1 \
     QT_QPA_PLATFORM=xcb \
     POSE3D_BLENDER=/opt/blender/blender \
+    POSE3D_CONTAINER=1 \
     POSE3D_MAXIMIZE=1 \
     HOME=/workspace \
     PYTHONPATH=/app

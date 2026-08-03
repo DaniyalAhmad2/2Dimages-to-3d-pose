@@ -8,12 +8,12 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pose3d.config import blender_binary
+from pose3d.config import blender_binary, character_blend
 from pose3d.export.blender_export import export_animation
+from tests.gates import needs_blender, needs_character
 from tests.synth import sample_skeleton_3d
 
 _BLENDER = blender_binary()
-_HAVE_BLENDER = Path(_BLENDER).exists()
 
 
 def _motion(n=5):
@@ -28,7 +28,7 @@ def _motion(n=5):
     return np.stack(seq)
 
 
-@pytest.mark.skipif(not _HAVE_BLENDER, reason="Blender binary not found")
+@needs_blender()
 def test_export_bvh_fbx(tmp_path):
     res = export_animation(_motion(), tmp_path, name="t", fps=30,
                            render_video=False, timeout=300)
@@ -37,12 +37,11 @@ def test_export_bvh_fbx(tmp_path):
     assert res.fbx and res.fbx.stat().st_size > 0
 
 
-from pose3d.config import character_blend
 _CHARACTER = character_blend()
 
 
-@pytest.mark.skipif(not (_HAVE_BLENDER and _CHARACTER),
-                    reason="bundled character not present")
+@needs_blender()
+@needs_character()
 def test_export_retargets_character(tmp_path):
     res = export_animation(_motion(), tmp_path, name="c", fps=24,
                            render_video=True, timeout=500, character=_CHARACTER)
@@ -55,8 +54,8 @@ def test_export_retargets_character(tmp_path):
     assert ok and float(frame.std()) > 3.0   # posed character is visible
 
 
-@pytest.mark.skipif(not (_HAVE_BLENDER and _CHARACTER),
-                    reason="bundled character not present")
+@needs_blender()
+@needs_character()
 def test_export_produces_hierarchical_mocap_rig(tmp_path):
     """The character export must be a real armature: a nested bone hierarchy
     with rotation animation. Regression guard — driving the rig by flattening it
@@ -78,7 +77,7 @@ def test_export_produces_hierarchical_mocap_rig(tmp_path):
     assert "End Site" in head
 
 
-@pytest.mark.skipif(not _HAVE_BLENDER, reason="Blender binary not found")
+@needs_blender()
 def test_export_with_video(tmp_path):
     res = export_animation(_motion(), tmp_path, name="v", fps=30,
                            render_video=True, timeout=600)

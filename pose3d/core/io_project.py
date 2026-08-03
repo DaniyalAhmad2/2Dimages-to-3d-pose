@@ -13,7 +13,8 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from pathlib import Path
+from contextlib import closing
+from pathlib import Path, PurePosixPath
 
 import numpy as np
 
@@ -70,18 +71,31 @@ def _store_image(path: str, folder: Path) -> str:
         return str(path)
 
 
+def _is_absolute(path: str) -> bool:
+    """Absolute on the machine that WROTE it, not just on this one.
+
+    Neither OS recognises the other's absolute paths: Windows sees no drive in
+    '/data/a.jpg', POSIX sees no leading slash in 'D:\\data\\a.jpg'. Either way
+    the path would be treated as relative, joined to the project folder, and
+    silently resolved to nonsense — so recognise both forms on both platforms.
+    """
+    if Path(path).is_absolute() or path.startswith(("/", "\\")):
+        return True
+    return len(path) > 2 and path[1] == ":" and path[2] in "\\/"
+
+
 def _resolve_image(path: str, folder: Path) -> str:
     """Path to hand back to the app when loading."""
     if not path:
         return path
     p = Path(path)
-    if not p.is_absolute():
+    if not _is_absolute(path):
         return str(folder / p)
     if p.exists():
         return str(p)
-    # An absolute path written on another machine (older projects): recover it
+    # An absolute path written on another machine (or another OS): recover it
     # if the same filename is present in this project's images/ folder.
-    cand = folder / "images" / p.name
+    cand = folder / "images" / PurePosixPath(path.replace("\\", "/")).name
     return str(cand) if cand.exists() else str(p)
 
 
@@ -151,8 +165,7 @@ def _connect(folder: Path) -> sqlite3.Connection:
 
 
 def _write_corrections(folder: Path, corrections: list[Correction]) -> None:
-    conn = _connect(folder)
-    with conn:
+    with closing(_connect(folder)) as conn, conn:
         conn.execute("DELETE FROM corrections")
         conn.executemany(
             "INSERT INTO corrections "
@@ -160,29 +173,25 @@ def _write_corrections(folder: Path, corrections: list[Correction]) -> None:
             "VALUES (?,?,?,?,?,?,?,?)",
             [(c.frame_id, c.cam, c.joint, c.old_xy[0], c.old_xy[1],
               c.new_xy[0], c.new_xy[1], c.ts) for c in corrections])
-    conn.close()
 
 
 def append_correction(folder: str | Path, c: Correction) -> None:
     """Append a single correction (used live during editing)."""
-    conn = _connect(Path(folder))
-    with conn:
+    with closing(_connect(Path(folder))) as conn, conn:
         conn.execute(
             "INSERT INTO corrections "
             "(frame_id,cam,joint,old_x,old_y,new_x,new_y,ts) "
             "VALUES (?,?,?,?,?,?,?,?)",
             (c.frame_id, c.cam, c.joint, c.old_xy[0], c.old_xy[1],
              c.new_xy[0], c.new_xy[1], c.ts))
-    conn.close()
 
 
 def _read_corrections(folder: Path) -> list[Correction]:
     if not (folder / CORRECTIONS_DB).exists():
         return []
-    conn = _connect(folder)
-    rows = conn.execute(
-        "SELECT frame_id,cam,joint,old_x,old_y,new_x,new_y,ts "
-        "FROM corrections ORDER BY id").fetchall()
-    conn.close()
+    with closing(_connect(folder)) as conn:
+        rows = conn.execute(
+            "SELECT frame_id,cam,joint,old_x,old_y,new_x,new_y,ts "
+            "FROM corrections ORDER BY id").fetchall()
     return [Correction(fr, cam, j, (ox, oy), (nx, ny), ts)
             for (fr, cam, j, ox, oy, nx, ny, ts) in rows]

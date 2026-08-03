@@ -20,9 +20,12 @@ if ! ls "$VENDOR"/blender-*-linux-x64.tar.xz >/dev/null 2>&1; then
     echo "Put blender-5.x.x-linux-x64.tar.xz there (export needs Blender 5.x)." >&2
     exit 1
 fi
-if ! ls "$VENDOR"/rtmlib-cache/*.onnx >/dev/null 2>&1; then
-    echo "ERROR: no ONNX weights in $VENDOR/rtmlib-cache/" >&2
-    echo "Copy them from ~/.cache/rtmlib/hub/checkpoints/ (yolox_m + rtmpose-m body7)." >&2
+# Same staging step the Windows release runs, so both deliveries carry exactly
+# the checkpoints rtmlib asks for rather than a hand-copied guess.
+PY="${POSE3D_PYTHON:-$ROOT/.venv/bin/python}"
+[ -x "$PY" ] || PY=python3
+if ! "$PY" tools/fetch_weights.py --out "$VENDOR/rtmlib-cache"; then
+    echo "ERROR: could not stage the ONNX weights into $VENDOR/rtmlib-cache/" >&2
     exit 1
 fi
 
@@ -34,7 +37,10 @@ docker run --rm --shm-size=1g --entrypoint bash "$IMAGE" -c '
 Xvfb :99 -screen 0 1280x800x24 -nolisten tcp >/dev/null 2>&1 &
 for _ in $(seq 1 100); do xdpyinfo -display :99 >/dev/null 2>&1 && break; sleep 0.1; done
 export DISPLAY=:99
-python /app/docker/smoketest.py'
+# --require-video: the image ships Mesa so headless Blender can render, so a
+# missing preview video means the image is broken, not merely degraded. The
+# Windows bundle deliberately does NOT require it — no software GL there.
+python /app/docker/smoketest.py --require-video'
 
 if [ "${1:-}" = "--push" ]; then
     echo "==> pushing $IMAGE"

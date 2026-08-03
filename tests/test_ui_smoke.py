@@ -6,6 +6,8 @@ Runs under the offscreen Qt platform (no display needed). Verifies:
 - MainWindow assembles without error.
 """
 import os
+import sys
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -216,16 +218,17 @@ def test_file_pickers_offer_the_shared_folders():
     assert filedialog.default_dir() == str(folders[0])
 
 
-def test_export_refuses_a_read_only_folder(qapp, tmp_path, monkeypatch):
-    """Picking a read-only folder must be refused up front.
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                    reason="chmod(0o500) does not make a directory read-only "
+                           "on Windows, so this cannot set up its own fixture")
+def test_a_read_only_directory_is_reported_as_unwritable(tmp_path):
+    """The probe must be a real write.
 
-    /host is shared read-only so source images can be browsed, and choosing it
-    used to fail minutes later inside Blender with a bare
-    "[Errno 30] Read-only file system".
+    os.access(W_OK) — what this used to call — reads the read-only *attribute*
+    on Windows and ignores ACLs, so it answers True for C:\\Program Files and
+    the export dies inside Blender long after the guard let it through.
     """
     from pose3d.ui import filedialog
-    from pose3d.ui.main_window import MainWindow
-    from pose3d.ui.model import ProjectModel
 
     ro = tmp_path / "readonly"
     ro.mkdir()
@@ -233,22 +236,53 @@ def test_export_refuses_a_read_only_folder(qapp, tmp_path, monkeypatch):
     try:
         assert not filedialog.is_writable(ro)
         assert filedialog.is_writable(tmp_path)
-
-        data, rig, gt = _project_with_rig()
-        win = MainWindow(ProjectModel(data, rig))
-        monkeypatch.setattr(filedialog, "existing_directory",
-                            lambda *a, **k: str(ro))
-        warned = {}
-        import PySide6.QtWidgets as W
-        monkeypatch.setattr(W.QMessageBox, "warning",
-                            lambda *a, **k: warned.setdefault("msg", a[2]))
-        started = {"n": 0}
-        monkeypatch.setattr(MainWindow, "_start_export_worker",
-                            lambda *a, **k: started.__setitem__("n", 1),
-                            raising=False)
-
-        win._on_export()
-        assert "read-only" in warned.get("msg", "").lower(), warned
-        assert started["n"] == 0, "export ran despite an unwritable destination"
     finally:
         ro.chmod(0o700)
+
+
+def test_is_writable_holds_on_every_platform(tmp_path):
+    """Platform-neutral half of the above: a normal folder is writable, a
+    missing one is not, and the probe leaves nothing behind."""
+    from pose3d.ui import filedialog
+
+    assert filedialog.is_writable(tmp_path)
+    assert not filedialog.is_writable(tmp_path / "does-not-exist")
+    assert not filedialog.is_writable(tmp_path / "a-file.txt")
+    assert list(tmp_path.iterdir()) == [], "the write probe left a file behind"
+
+
+def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatch):
+    """Picking an unwritable folder must be refused up front.
+
+    /host is shared read-only so source images can be browsed, and choosing it
+    used to fail minutes later inside Blender with a bare
+    "[Errno 30] Read-only file system".
+
+    The refusal is driven through is_writable rather than through real
+    permissions, so this covers Windows — where no chmod can produce the
+    fixture, but ACLs produce the situation constantly.
+    """
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    dest = tmp_path / "protected"
+    dest.mkdir()
+    monkeypatch.setattr(filedialog, "is_writable",
+                        lambda p: Path(p) != dest)
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(dest))
+    warned = {}
+    import PySide6.QtWidgets as W
+    monkeypatch.setattr(W.QMessageBox, "warning",
+                        lambda *a, **k: warned.setdefault("msg", a[2]))
+    started = {"n": 0}
+    monkeypatch.setattr(MainWindow, "_start_export_worker",
+                        lambda *a, **k: started.__setitem__("n", 1),
+                        raising=False)
+
+    win._on_export()
+    assert "read-only" in warned.get("msg", "").lower(), warned
+    assert started["n"] == 0, "export ran despite an unwritable destination"

@@ -1,0 +1,97 @@
+name: Windows tests
+
+# The first real Windows signal. We have no Windows machine, so until this
+# runs, every Windows claim in this repo is a guess.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Install dependencies from the lockfile
+        # --frozen: install exactly what is committed. Resolving here instead
+        # would mean CI tests versions the client never receives.
+        run: uv sync --frozen --all-groups
+
+      - name: Cache Blender
+        id: blender-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/blender-5.1.1-windows-x64.zip
+          key: blender-5.1.1-windows-x64
+
+      - name: Download Blender
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          New-Item -ItemType Directory -Force -Path .cache | Out-Null
+          $ProgressPreference = 'SilentlyContinue'
+          Invoke-WebRequest -UseBasicParsing `
+            -Uri "https://download.blender.org/release/Blender5.1/blender-5.1.1-windows-x64.zip" `
+            -OutFile ".cache/blender-5.1.1-windows-x64.zip"
+
+      - name: Install Blender
+        run: |
+          Expand-Archive .cache/blender-5.1.1-windows-x64.zip -DestinationPath .cache/blender -Force
+          $dir = (Get-ChildItem .cache/blender -Directory | Select-Object -First 1).FullName
+          # config.py finds this via POSE3D_BLENDER; the bundle instead ships it
+          # in a blender\ folder beside the exe, which is covered by its own test
+          "POSE3D_BLENDER=$dir\blender.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          & "$dir\blender.exe" --version
+
+      - name: Cache pose weights
+        id: weights-cache
+        uses: actions/cache@v4
+        with:
+          path: .cache/models
+          key: rtmlib-weights-balanced-lightweight-v1
+
+      - name: Fetch pose weights
+        run: |
+          uv run python tools/fetch_weights.py --out .cache/models
+          uv run python tools/fetch_weights.py --out .cache/models --mode lightweight
+          "POSE3D_MODELS=${{ github.workspace }}\.cache\models" |
+            Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+      - name: Run the test suite
+        env:
+          # Without these the Blender, rig and weights tests SKIP, and this job
+          # goes green having never exercised the export path — the one thing
+          # this workflow exists to prove.
+          POSE3D_REQUIRE_BLENDER: "1"
+          POSE3D_REQUIRE_ASSETS: "1"
+          POSE3D_REQUIRE_WEIGHTS: "1"
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          uv run python -m pytest tests/ -q `
+            --ignore=tests/validate_panoptic_geometry.py `
+            --ignore=tests/validate_panoptic_rtmpose.py `
+            --ignore=tests/build_demo_project.py
+
+      - name: Self-test from source
+        # Same checks the shipped bundle runs, minus the video: a GPU-less
+        # runner has no usable GL for EEVEE, which check_video() reports as
+        # degraded rather than failing.
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: uv run python -m pose3d.selftest --no-video
+
+      - name: Upload failure log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-test-logs
+          path: |
+            pose3d-log.txt
+          if-no-files-found: ignore

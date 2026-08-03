@@ -9,12 +9,11 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pose3d.config import character_blend
 from pose3d.core.skeleton import BONES, Joint
+from tests.gates import needs_character
 from tests.synth import sample_skeleton_3d
 
-_HAVE = character_blend() is not None
-pytestmark = pytest.mark.skipif(not _HAVE, reason="bundled character asset missing")
+pytestmark = needs_character()
 
 
 def _ch():

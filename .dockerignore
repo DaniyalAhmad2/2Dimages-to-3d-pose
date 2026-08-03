@@ -31,7 +31,8 @@ venv/
 wheelhouse/
 build/
 dist/
-uv.lock
+# uv.lock is NOT excluded: the image installs from it, so it and the Windows
+# bundle carry the same versions the test suite ran against.
 
 # --- capture data / datasets / scratch (huge, and client-specific) ---
 assets/
