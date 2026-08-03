@@ -111,13 +111,26 @@ try {
         Write-Host "==> zipping to $archiveOut"
         # 7-Zip where available: Compress-Archive takes many minutes on a 1.6 GB
         # tree and is uncomfortably close to its 2 GB ceiling.
-        if (Get-Command 7z -ErrorAction SilentlyContinue) {
-            & 7z a -tzip -mx=5 -bso0 -bsp0 $archiveOut $Out | Out-Null
-            if ($LASTEXITCODE -ne 0) { throw "7z failed ($LASTEXITCODE)" }
-        } else {
-            $ProgressPreference = 'SilentlyContinue'
-            Compress-Archive -Path $Out -DestinationPath $archiveOut -CompressionLevel Optimal
-        }
+        #
+        # Zipped from the PARENT of $Out, so entries begin at the bundle folder
+        # rather than carrying whatever path $Out was given. Windows' MAX_PATH
+        # is 260 and Blender's deepest file is already ~148 characters in, so
+        # a stray prefix here is subtracted from wherever the client extracts.
+        $parent = Split-Path -Parent (Resolve-Path $Out)
+        $leaf = Split-Path -Leaf $Out
+        $absArchive = Join-Path (Resolve-Path .) (Split-Path -Leaf $archiveOut)
+        Push-Location $parent
+        try {
+            if (Get-Command 7z -ErrorAction SilentlyContinue) {
+                & 7z a -tzip -mx=5 -bso0 -bsp0 $absArchive $leaf | Out-Null
+                if ($LASTEXITCODE -ne 0) { throw "7z failed ($LASTEXITCODE)" }
+            } else {
+                $ProgressPreference = 'SilentlyContinue'
+                Compress-Archive -Path $leaf -DestinationPath $absArchive `
+                                 -CompressionLevel Optimal
+            }
+        } finally { Pop-Location }
+        $archiveOut = $absArchive
         $zmb = [math]::Round((Get-Item $archiveOut).Length / 1MB, 0)
         Write-Host "==> $archiveOut, $zmb MB"
     }

@@ -19,10 +19,50 @@ from PySide6.QtWidgets import QApplication
 _WINDOWS: list = []
 
 
-def load_stylesheet(app: QApplication) -> None:
+def apply_dark_theme(app: QApplication) -> None:
+    """Make the app dark everywhere, not just where the stylesheet reaches.
+
+    dark.qss covers the widgets we style by name, but Qt draws everything else
+    — splitter handles, tool tips, menus, combo popups, disabled text, focus
+    rings — from the *system* palette and with the host's native style. On a
+    Windows machine set to light mode that means light chrome punched through a
+    dark UI: the splitter handles vanished against the panels, and the accuracy
+    gauge was filled with the native window colour behind near-white text.
+
+    Fusion is the one style that honours a supplied palette identically on
+    every platform, so pin both rather than inheriting whatever the desktop is
+    set to. This is a dark-themed application by design; it should not change
+    appearance with the user's OS setting.
+    """
+    from PySide6.QtGui import QColor, QPalette
+
+    app.setStyle("Fusion")
+    p = QPalette()
+    p.setColor(QPalette.ColorRole.Window, QColor("#0d0f15"))
+    p.setColor(QPalette.ColorRole.WindowText, QColor("#e6e8ee"))
+    p.setColor(QPalette.ColorRole.Base, QColor("#0f1219"))
+    p.setColor(QPalette.ColorRole.AlternateBase, QColor("#12151d"))
+    p.setColor(QPalette.ColorRole.Text, QColor("#e6e8ee"))
+    p.setColor(QPalette.ColorRole.Button, QColor("#161a24"))
+    p.setColor(QPalette.ColorRole.ButtonText, QColor("#e6e8ee"))
+    p.setColor(QPalette.ColorRole.ToolTipBase, QColor("#12151d"))
+    p.setColor(QPalette.ColorRole.ToolTipText, QColor("#e6e8ee"))
+    p.setColor(QPalette.ColorRole.Highlight, QColor("#3d7bfd"))
+    p.setColor(QPalette.ColorRole.HighlightedText, QColor("#ffffff"))
+    p.setColor(QPalette.ColorRole.PlaceholderText, QColor("#8a91a3"))
+    p.setColor(QPalette.ColorRole.Link, QColor("#6ea8ff"))
+    for role in (QPalette.ColorRole.Text, QPalette.ColorRole.ButtonText,
+                 QPalette.ColorRole.WindowText):
+        p.setColor(QPalette.ColorGroup.Disabled, role, QColor("#5a6072"))
+    app.setPalette(p)
+
     qss = Path(__file__).parent / "ui" / "dark.qss"
     if qss.exists():
         app.setStyleSheet(qss.read_text())
+
+
+# kept: older call sites (and tests) refer to this name
+load_stylesheet = apply_dark_theme
 
 
 def build_model(project_folder: str | None):
@@ -131,7 +171,7 @@ def main():
     from PySide6.QtGui import QIcon
     if not QIcon.themeName() and os.path.isdir("/usr/share/icons/Adwaita"):
         QIcon.setThemeName("Adwaita")
-    load_stylesheet(app)
+    apply_dark_theme(app)
     open_project_window(folder)
     sys.exit(app.exec())
 

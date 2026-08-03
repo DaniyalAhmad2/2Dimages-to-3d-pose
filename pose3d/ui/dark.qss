@@ -55,6 +55,17 @@ QCheckBox { spacing: 8px; color: #d6dae4; }
 /* graphics + timeline */
 QGraphicsView { background: #0b0d13; border: 1px solid #1a1e29; border-radius: 6px; }
 QListView { background: #0b0d13; border: 1px solid #1a1e29; border-radius: 6px; }
+/* splitters — the drag handles between the camera views, the 3D view and the
+   accuracy column. Unstyled, Qt draws these from the system palette, so on a
+   light-mode host they were invisible against the dark panels and there was no
+   sign the panes could be resized at all. Give them a real edge, a comfortable
+   grab width, and a hover colour so the affordance is discoverable. */
+QSplitter::handle { background: #1e2230; }
+QSplitter::handle:horizontal { width: 6px; margin: 0 1px; }
+QSplitter::handle:vertical { height: 6px; margin: 1px 0; }
+QSplitter::handle:hover { background: #3d7bfd; }
+QSplitter::handle:pressed { background: #5a90ff; }
+
 QScrollBar:horizontal { height: 10px; background: #0b0d13; }
 QScrollBar::handle:horizontal { background: #262b3a; border-radius: 5px; min-width: 30px; }
 QScrollBar:vertical { width: 10px; background: #0b0d13; }

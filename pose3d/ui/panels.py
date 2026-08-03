@@ -22,6 +22,11 @@ COL_GREEN = QColor(78, 214, 122)
 COL_AMBER = QColor(240, 190, 74)
 COL_RED = QColor(235, 92, 92)
 COL_PURPLE = QColor(170, 120, 240)
+# #cardPanel from dark.qss. Custom-painted widgets must fill this themselves —
+# a stylesheet background is not drawn for a QWidget subclass that overrides
+# paintEvent, so anything relying on it inherits the host's system colour.
+COL_PANEL = QColor(15, 18, 25)
+COL_TEXT = QColor(235, 238, 245)
 
 
 def accuracy_pct(err_px: float) -> float:
@@ -82,6 +87,12 @@ class PoseAccuracyGauge(QWidget):
     def paintEvent(self, _e):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        # Paint our own background rather than relying on whatever is behind.
+        # Overriding paintEvent means Qt does not apply the stylesheet's
+        # background to this subclass, so the widget was filled with the host's
+        # native window colour — light, on a Windows machine in light mode —
+        # and the near-white readout below became unreadable.
+        p.fillRect(self.rect(), COL_PANEL)
         side = min(self.width(), self.height()) - 16
         rect = QRectF((self.width() - side) / 2, 8, side, side)
         # track
@@ -95,7 +106,7 @@ class PoseAccuracyGauge(QWidget):
         # start at top (90deg), clockwise
         p.drawArc(rect, 90 * 16, -int(360 * 16 * pct / 100.0))
         # text
-        p.setPen(QColor(235, 238, 245))
+        p.setPen(COL_TEXT)
         f = QFont(); f.setPointSize(22); f.setBold(True); p.setFont(f)
         txt = "--" if np.isnan(self._pct) else f"{pct:.0f}%"
         p.drawText(rect, Qt.AlignmentFlag.AlignCenter, txt)

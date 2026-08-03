@@ -1,0 +1,140 @@
+"""The UI must look the same whatever the host's theme is set to.
+
+This is a dark-themed application, but Qt draws anything the stylesheet does
+not name from the *system* palette. On a Windows machine in light mode that
+punched light chrome through the dark UI: the splitter handles disappeared
+against the panels, and the accuracy gauge was filled with the native window
+colour behind its near-white readout.
+
+These render against a deliberately LIGHT palette — the failing condition —
+and assert on actual pixels, because the bug is invisible to any test that
+only checks widgets were constructed.
+"""
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import pytest
+
+pytest.importorskip("PySide6")
+
+from PySide6.QtGui import QColor, QPalette          # noqa: E402
+from PySide6.QtWidgets import QApplication          # noqa: E402
+
+
+@pytest.fixture
+def light_host(qapp):
+    """A host desktop set to light mode, which is what broke."""
+    before = qapp.palette()
+    light = QPalette()
+    for role in (QPalette.ColorRole.Window, QPalette.ColorRole.Base,
+                 QPalette.ColorRole.Button):
+        light.setColor(role, QColor("#ffffff"))
+    for role in (QPalette.ColorRole.WindowText, QPalette.ColorRole.Text,
+                 QPalette.ColorRole.ButtonText):
+        light.setColor(role, QColor("#000000"))
+    qapp.setPalette(light)
+    yield qapp
+    qapp.setPalette(before)
+
+
+@pytest.fixture
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+def _render(w, size=(200, 200)):
+    w.resize(*size)
+    w.show()
+    QApplication.instance().processEvents()
+    return w.grab().toImage()
+
+
+def _luma(img, x, y):
+    c = img.pixelColor(x, y)
+    return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+
+
+def test_the_accuracy_gauge_stays_readable_on_a_light_host(light_host):
+    """Regression guard: the gauge overrides paintEvent, so the stylesheet
+    background is never drawn for it. It used to inherit the host's window
+    colour, leaving near-white text on white."""
+    from pose3d.ui.panels import PoseAccuracyGauge
+
+    g = PoseAccuracyGauge()
+    g.set_value(92.0)
+    img = _render(g)
+
+    # sample the corners, which are background whatever the arc is doing
+    corners = [_luma(img, 2, 2), _luma(img, img.width() - 3, 2),
+               _luma(img, 2, img.height() - 3)]
+    assert max(corners) < 90, (
+        f"gauge background is light ({corners}) — the near-white readout "
+        "would be invisible on it")
+
+
+def test_the_gauge_readout_contrasts_with_its_own_background(light_host):
+    from pose3d.ui.panels import COL_PANEL, COL_TEXT
+
+    def luma(c):
+        return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
+
+    assert luma(COL_TEXT) - luma(COL_PANEL) > 120, "readout has too little contrast"
+
+
+def test_the_dark_theme_survives_a_light_system_palette(light_host):
+    """A real widget, rendered — not the palette we just set.
+
+    Asserting on the style object is a dead end: a stylesheet replaces it with
+    QStyleSheetStyle whose baseStyle() is None. What matters anyway is whether
+    ordinary chrome comes out dark on a light-mode host, so render some.
+    """
+    from PySide6.QtWidgets import QPushButton
+
+    from pose3d.app import apply_dark_theme
+
+    apply_dark_theme(light_host)
+    assert light_host.palette().color(
+        QPalette.ColorRole.Window).lightness() < 60
+
+    img = _render(QPushButton("Export"), (140, 34))
+    corners = [_luma(img, 3, 3), _luma(img, img.width() - 4, img.height() - 4)]
+    assert max(corners) < 110, (
+        f"button chrome is light ({corners}) — the host theme is leaking in")
+
+
+def test_the_splitter_handle_is_visible_against_the_panels(light_host):
+    """The handle must differ from the panels either side, or the panes look
+    fixed and there is no sign they can be dragged at all."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QSplitter, QWidget
+
+    from pose3d.app import apply_dark_theme
+
+    apply_dark_theme(light_host)
+    sp = QSplitter(Qt.Orientation.Horizontal)
+    for _ in range(2):
+        w = QWidget()
+        w.setObjectName("cardPanel")
+        sp.addWidget(w)
+    img = _render(sp, (240, 80))
+
+    h = sp.handle(1).geometry()
+    assert h.width() >= 4, f"handle is only {h.width()}px — hard to grab"
+    mid_y = img.height() // 2
+    handle = _luma(img, h.center().x(), mid_y)
+    panel = _luma(img, max(0, h.left() - 12), mid_y)
+    assert abs(handle - panel) > 6, (
+        f"handle ({handle:.0f}) is indistinguishable from the panel "
+        f"({panel:.0f}) — the split looks unmovable")
+
+
+def test_splitter_handles_are_styled():
+    """Belt and braces on the stylesheet itself: the hover cue is what makes
+    the affordance discoverable, and a render test will not catch its absence."""
+    from pathlib import Path
+
+    qss = (Path(__file__).resolve().parent.parent
+           / "pose3d" / "ui" / "dark.qss").read_text()
+    assert "QSplitter::handle" in qss, "splitter handles are unstyled"
+    assert "QSplitter::handle:hover" in qss, "no hover cue on the drag handle"

@@ -103,9 +103,31 @@ jobs:
       - name: Zip
         # 7z, not Compress-Archive: 1.6 GB is slow through .NET's ZipArchive and
         # close enough to its 2 GB ceiling to be worth avoiding.
+        #
+        # Zipped from INSIDE build/ so entries begin at Pose3D-Windows\ rather
+        # than build\Pose3D-Windows\. Six characters sounds trivial; it is not.
+        # Windows' MAX_PATH is 260 and this bundle's deepest entry — Blender's
+        # USD/MaterialX tree — is already ~148, so every wasted prefix
+        # character comes off the user's extraction path. Extracting the first
+        # build failed with "path too long".
         run: |
-          7z a -tzip -mx=5 -bso0 -bsp0 Pose3D-Windows.zip build/Pose3D-Windows
+          Push-Location build
+          7z a -tzip -mx=5 -bso0 -bsp0 ../Pose3D-Windows.zip Pose3D-Windows
+          $rc = $LASTEXITCODE
+          Pop-Location
+          if ($rc -ne 0) { throw "7z failed ($rc)" }
           "{0:N0} MB" -f ((Get-Item Pose3D-Windows.zip).Length / 1MB)
+          # Fail here rather than let a deep path surface on the client's
+          # machine: leave room for a realistic extraction root.
+          $deepest = 7z l -ba -slt Pose3D-Windows.zip |
+            Select-String '^Path = ' |
+            ForEach-Object { $_.Line.Substring(7).Length } |
+            Measure-Object -Maximum
+          Write-Host "deepest path in archive: $($deepest.Maximum) chars"
+          if ($deepest.Maximum -gt 180) {
+            throw "deepest archive path is $($deepest.Maximum) chars; " +
+                  "that leaves under 80 for the extraction root on a 260-char limit"
+          }
 
       - uses: actions/upload-artifact@v4
         with:

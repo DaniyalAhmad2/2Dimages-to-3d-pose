@@ -38,7 +38,7 @@ def test_a_flag_is_not_mistaken_for_a_project_folder(monkeypatch):
     seen = {}
     monkeypatch.setattr(app, "open_project_window",
                         lambda f: seen.setdefault("folder", f))
-    monkeypatch.setattr(app, "load_stylesheet", lambda a: None)
+    monkeypatch.setattr(app, "apply_dark_theme", lambda a: None)
 
     class FakeQApp:                      # never start a real event loop here
         def __init__(self, argv):
@@ -46,6 +46,15 @@ def test_a_flag_is_not_mistaken_for_a_project_folder(monkeypatch):
 
         def exec(self):
             return 0
+
+        def setStyle(self, _s):
+            pass
+
+        def setPalette(self, _p):
+            pass
+
+        def setStyleSheet(self, _s):
+            pass
 
     monkeypatch.setattr(app, "QApplication", FakeQApp)
     with pytest.raises(SystemExit):
