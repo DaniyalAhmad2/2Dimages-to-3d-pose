@@ -70,6 +70,13 @@ jobs:
           POSE3D_BLENDER: ""
           POSE3D_MODELS: ""
           XDG_CACHE_HOME: ${{ github.workspace }}\.empty-cache
+          # This runner has no GPU: Blender dies in WGL and Qt's context
+          # returns GL_INVALID_OPERATION on the first draw call. That is a
+          # property of the machine, not the build, so GL problems are reported
+          # as degraded HERE only. Packaging faults — the 3D view missing from
+          # the bundle at all — still fail, and on the client's machine
+          # `Pose3D.exe --selftest` stays strict, which is the point of it.
+          POSE3D_NO_GL: "1"
         run: |
           New-Item -ItemType Directory -Force -Path .empty-cache | Out-Null
           # Start-Process -Wait, not `&`: Pose3D.exe is built for the GUI

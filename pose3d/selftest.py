@@ -87,29 +87,49 @@ def check_qt_opengl() -> str:
     single most likely thing to be missing from a frozen or headless build."""
     if not os.environ.get("DISPLAY") and not IS_WINDOWS and not sys.platform == "darwin":
         raise Skip("no DISPLAY")
-    from PySide6.QtWidgets import QApplication
 
-    from pose3d.core.skeleton import NUM_JOINTS
-    from pose3d.ui.view3d import View3D
-    app = QApplication.instance() or QApplication([])
-    v = View3D()
-    v.resize(320, 240)
-    v.show()
-    app.processEvents()
-    pose = np.zeros((NUM_JOINTS, 3))
-    pose[:, 2] = np.linspace(0, 1.7, NUM_JOINTS)
-    v.set_pose(pose)
-    app.processEvents()
+    # Two different failures live here, and conflating them is what makes this
+    # check either useless or unpassable. An import error means the 3D view is
+    # missing from the build — a packaging defect, always fatal. A context or
+    # draw-call error means this machine has no usable OpenGL, which is a
+    # property of the hardware, not the build: a GPU-less CI runner cannot
+    # provide one at all. POSE3D_NO_GL says so explicitly, and only then does
+    # the second kind degrade. On the client's machine, where `--selftest` is
+    # the thing that diagnoses a black 3D view, it stays fatal.
+    try:
+        from PySide6.QtWidgets import QApplication
 
-    # Constructing the widget is not proof of anything: Qt reports "Failed to
-    # create context" on stderr and carries on, so a build with no usable GL
-    # reaches this line looking healthy. Read back an actual frame instead.
-    if not v.isValid() or v.context() is None:
-        raise AssertionError(
-            "the 3D view has no OpenGL context — it would render nothing")
-    img = v.grabFramebuffer()
-    if img.isNull() or img.width() < 1 or img.height() < 1:
-        raise AssertionError("the 3D view produced no frame")
+        from pose3d.core.skeleton import NUM_JOINTS
+        from pose3d.ui.view3d import View3D
+    except ImportError as e:
+        raise AssertionError(f"the 3D view is missing from this build: {e}") from e
+
+    try:
+        app = QApplication.instance() or QApplication([])
+        v = View3D()
+        v.resize(320, 240)
+        v.show()
+        app.processEvents()
+        pose = np.zeros((NUM_JOINTS, 3))
+        pose[:, 2] = np.linspace(0, 1.7, NUM_JOINTS)
+        v.set_pose(pose)
+        app.processEvents()
+
+        # Constructing the widget is not proof of anything: Qt reports "Failed
+        # to create context" on stderr and carries on, so a build with no
+        # usable GL reaches this line looking healthy. Read back a real frame.
+        if not v.isValid() or v.context() is None:
+            raise AssertionError(
+                "the 3D view has no OpenGL context — it would render nothing")
+        img = v.grabFramebuffer()
+        if img.isNull() or img.width() < 1 or img.height() < 1:
+            raise AssertionError("the 3D view produced no frame")
+    except Exception as e:
+        if os.environ.get("POSE3D_NO_GL") == "1":
+            raise Degraded(
+                f"no usable OpenGL on this machine: {type(e).__name__}: "
+                f"{str(e).splitlines()[0] if str(e) else ''}") from e
+        raise
     return f"GL context valid, rendered {img.width()}x{img.height()}"
 
 

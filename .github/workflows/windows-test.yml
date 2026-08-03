@@ -89,8 +89,18 @@ jobs:
         # Same checks the shipped bundle runs, minus the video: a GPU-less
         # runner has no usable GL for EEVEE, which check_video() reports as
         # degraded rather than failing.
+        #
+        # Deliberately NOT offscreen, unlike the pytest step above. The
+        # offscreen platform plugin provides no OpenGL context at all, so the
+        # 3D-view check could not pass under it no matter how healthy the build
+        # — the check would be unfalsifiable. Letting Qt choose exercises the
+        # real path, including the software OpenGL that PySide6 ships for
+        # machines whose driver is inadequate.
         env:
-          QT_QPA_PLATFORM: offscreen
+          # ...and if even that cannot give a context here, say so rather than
+          # fail: this runner has no GPU. A packaging fault — the 3D view
+          # missing from the build — still fails. See check_qt_opengl.
+          POSE3D_NO_GL: "1"
         run: uv run python -m pose3d.selftest --no-video
 
       - name: Upload failure log

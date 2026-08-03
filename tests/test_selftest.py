@@ -78,6 +78,49 @@ def test_a_skipped_check_does_not_pass_silently(monkeypatch):
     assert "  PASS  gl" not in text
 
 
+def test_a_missing_3d_view_fails_even_where_gl_is_unavailable(monkeypatch):
+    """The two GL failures must stay distinguishable. A GPU-less runner cannot
+    provide a context — that degrades. The 3D view being absent from the bundle
+    is a packaging defect and must fail even there, or the exact thing this
+    check exists to catch would be waved through on every CI build."""
+    import builtins
+    monkeypatch.setenv("POSE3D_NO_GL", "1")
+    monkeypatch.setenv("DISPLAY", ":0")
+    real_import = builtins.__import__
+
+    def no_view3d(name, *a, **k):
+        if name == "pose3d.ui.view3d":
+            raise ImportError("No module named 'pose3d.ui.view3d'")
+        return real_import(name, *a, **k)
+
+    monkeypatch.setattr(builtins, "__import__", no_view3d)
+    with pytest.raises(AssertionError) as e:
+        selftest.check_qt_opengl()
+    assert "missing from this build" in str(e.value)
+
+
+def test_no_gpu_degrades_the_gl_check_instead_of_failing(monkeypatch):
+    monkeypatch.setenv("POSE3D_NO_GL", "1")
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "pose3d.ui.view3d.View3D",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("GLError 1282")))
+    with pytest.raises(selftest.Degraded) as e:
+        selftest.check_qt_opengl()
+    assert "no usable OpenGL" in str(e.value)
+
+
+def test_without_the_flag_a_dead_gl_context_is_still_fatal(monkeypatch):
+    """On the client's machine `--selftest` is what diagnoses a black 3D view."""
+    monkeypatch.delenv("POSE3D_NO_GL", raising=False)
+    monkeypatch.setenv("DISPLAY", ":0")
+    monkeypatch.setattr(
+        "pose3d.ui.view3d.View3D",
+        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("GLError 1282")))
+    with pytest.raises(RuntimeError):
+        selftest.check_qt_opengl()
+
+
 def test_missing_weights_names_where_it_looked(monkeypatch):
     """A bundle assembled with the models folder in the wrong place is the
     likeliest packaging mistake; the message has to be actionable."""
