@@ -10,7 +10,7 @@ import pytest
 
 from pose3d.config import blender_binary, character_blend
 from pose3d.export.blender_export import export_animation
-from tests.gates import needs_blender, needs_character
+from tests.gates import needs_blender, needs_character, needs_video_render
 from tests.synth import sample_skeleton_3d
 
 _BLENDER = blender_binary()
@@ -43,11 +43,25 @@ _CHARACTER = character_blend()
 @needs_blender()
 @needs_character()
 def test_export_retargets_character(tmp_path):
+    """The skinned character FBX — what the client imports. No rendering, so
+    this holds even where Blender has no usable OpenGL."""
     res = export_animation(_motion(), tmp_path, name="c", fps=24,
-                           render_video=True, timeout=500, character=_CHARACTER)
+                           render_video=False, timeout=500, character=_CHARACTER)
     assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
     # a real skinned character FBX is much larger than a stick figure
     assert res.fbx and res.fbx.stat().st_size > 100_000
+
+
+@needs_blender()
+@needs_character()
+@needs_video_render()
+def test_rendered_video_shows_the_posed_character(tmp_path):
+    """Separate from the FBX above on purpose: rendering is the one part that
+    legitimately cannot run on a machine without OpenGL, and it must not be
+    able to mask a broken character export."""
+    res = export_animation(_motion(), tmp_path, name="c", fps=24,
+                           render_video=True, timeout=500, character=_CHARACTER)
+    assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
     import cv2
     cap = cv2.VideoCapture(str(res.mp4)); cap.set(cv2.CAP_PROP_POS_FRAMES, 5)
     ok, frame = cap.read(); cap.release()
@@ -78,6 +92,7 @@ def test_export_produces_hierarchical_mocap_rig(tmp_path):
 
 
 @needs_blender()
+@needs_video_render()
 def test_export_with_video(tmp_path):
     res = export_animation(_motion(), tmp_path, name="v", fps=30,
                            render_video=True, timeout=600)

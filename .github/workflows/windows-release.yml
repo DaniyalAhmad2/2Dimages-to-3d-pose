@@ -72,12 +72,26 @@ jobs:
           XDG_CACHE_HOME: ${{ github.workspace }}\.empty-cache
         run: |
           New-Item -ItemType Directory -Force -Path .empty-cache | Out-Null
-          & build/Pose3D-Windows/Pose3D.exe --selftest
-          if ($LASTEXITCODE -ne 0) {
-            Write-Host "--- pose3d-log.txt ---"
-            Get-Content build/Pose3D-Windows/pose3d-log.txt -ErrorAction SilentlyContinue
-            exit 1
+          # Start-Process -Wait, not `&`: Pose3D.exe is built for the GUI
+          # subsystem (console=False), and PowerShell does not wait for those —
+          # `&` returns immediately and $LASTEXITCODE describes the launch, not
+          # the self-test, so this gate would pass without proving anything.
+          $p = Start-Process -FilePath build/Pose3D-Windows/Pose3D.exe `
+                 -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow `
+                 -RedirectStandardOutput selftest-out.txt `
+                 -RedirectStandardError selftest-err.txt
+          # Where the output lands depends on whether a console got attached:
+          # with none, ensure_std_streams() sends it to pose3d-log.txt beside
+          # the exe. Print whichever exist, so a PASSING run still shows which
+          # Blender and which weights the bundle actually found.
+          foreach ($f in @("selftest-out.txt", "selftest-err.txt",
+                           "build/Pose3D-Windows/pose3d-log.txt")) {
+            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+              Write-Host "--- $f ---"
+              Get-Content $f
+            }
           }
+          if ($p.ExitCode -ne 0) { throw "bundle self-test failed ($($p.ExitCode))" }
 
       - name: Zip
         # 7z, not Compress-Archive: 1.6 GB is slow through .NET's ZipArchive and

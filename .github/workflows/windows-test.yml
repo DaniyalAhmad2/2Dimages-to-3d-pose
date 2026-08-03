@@ -72,6 +72,12 @@ jobs:
           POSE3D_REQUIRE_BLENDER: "1"
           POSE3D_REQUIRE_ASSETS: "1"
           POSE3D_REQUIRE_WEIGHTS: "1"
+          # ...but the preview video genuinely cannot be produced here. This
+          # runner has no GPU, and unlike Linux there is no software GL to fall
+          # back on, so headless Blender fails to find WGL extensions and dies
+          # with EXCEPTION_ACCESS_VIOLATION. Everything the client imports —
+          # BVH, FBX, the retargeted character — is still required above.
+          POSE3D_NO_VIDEO: "1"
           QT_QPA_PLATFORM: offscreen
         run: |
           uv run python -m pytest tests/ -q `

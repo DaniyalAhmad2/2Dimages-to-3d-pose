@@ -46,6 +46,21 @@ def needs_character():
                  "bundled character asset missing")
 
 
+def needs_video_render():
+    """Rendering the preview mp4 drives EEVEE through whatever OpenGL the
+    machine has, which is a much stronger requirement than writing BVH/FBX.
+
+    A GPU-less Windows runner has no GL and no software fallback: Blender dies
+    with EXCEPTION_ACCESS_VIOLATION after failing to find WGL extensions. The
+    container ships Mesa precisely so this works, and a developer machine has a
+    real GPU, so this runs by default and only the environments that genuinely
+    cannot render opt out with POSE3D_NO_VIDEO=1.
+    """
+    return _gate(os.environ.get("POSE3D_NO_VIDEO") != "1",
+                 "POSE3D_REQUIRE_VIDEO",
+                 "POSE3D_NO_VIDEO=1: no OpenGL for headless Blender here")
+
+
 def needs_weights(mode: str = "balanced"):
     from pose3d.detect import models
     return _gate(models.resolve(mode=mode) is not None,
