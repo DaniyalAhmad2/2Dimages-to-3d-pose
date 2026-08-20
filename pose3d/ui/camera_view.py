@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget,
 )
 
-from pose3d.core.skeleton import BONES, NUM_JOINTS, rag_status
+from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, rag_status
+from pose3d.ui.panels import acc_color, acc_label, accuracy_pct
 
 RAG_COLORS = {
     "green": QColor(80, 220, 120),
@@ -22,6 +23,10 @@ RAG_COLORS = {
     "red": QColor(235, 90, 90),
     "corrected": QColor(170, 120, 240),
 }
+
+# accuracy band -> dot colour, so the joints themselves show where the pose is
+# weak instead of the user cross-referencing a separate list
+_BAND_STATUS = {"High": "green", "Medium": "amber", "Low": "red"}
 
 
 class _JointSignals(QObject):
@@ -121,6 +126,8 @@ class CameraView(QGraphicsView):
     def set_pose(self, xy: np.ndarray, scores: np.ndarray,
                  corrected: np.ndarray | None = None):
         """Place joints from (NUM_JOINTS,2) pixel coords + scores."""
+        self._scores = np.asarray(scores, float)
+        self._corrected = corrected
         for j, item in enumerate(self._joints):
             p = xy[j]
             if np.isnan(p).any():
@@ -132,12 +139,51 @@ class CameraView(QGraphicsView):
             item.signals.blockSignals(True)
             item.setPos(float(p[0]), float(p[1]))
             item.signals.blockSignals(False)
-            if corrected is not None and corrected[j]:
-                item.set_status("corrected")
-            else:
-                s = scores[j]
-                item.set_status("red" if np.isnan(s) else rag_status(float(s)))
+        self._apply_status()
         self._refresh_bones()
+
+    def set_accuracy(self, errors) -> None:
+        """Per-joint reprojection error (px), or None when not triangulated."""
+        self._accuracy = None if errors is None else np.asarray(errors, float)
+        self._apply_status()
+
+    def _apply_status(self) -> None:
+        """Colour each joint and set its tooltip.
+
+        Accuracy (reprojection error) is what the user is actually judging
+        when correcting a pose, so it drives the colour whenever it exists;
+        detector confidence is the fallback before triangulation. Hovering
+        names the joint and gives the number, replacing the old SELECTED JOINT
+        panel — the info appears where the user is already looking.
+        """
+        acc = getattr(self, "_accuracy", None)
+        scores = getattr(self, "_scores", None)
+        corrected = getattr(self, "_corrected", None)
+        for j, item in enumerate(self._joints):
+            name = JOINT_NAMES[j]
+            err = float(acc[j]) if acc is not None and j < len(acc) else float("nan")
+            if np.isfinite(err):
+                pct = accuracy_pct(err)
+                band = acc_label(pct)
+                status = _BAND_STATUS.get(band, "red")
+                col = acc_color(pct).name()
+                tip = (f"<b>{name}</b><br>"
+                       f"<span style='color:{col};'>accuracy {pct:.0f}% "
+                       f"({band})</span>")
+            else:
+                s = (float(scores[j]) if scores is not None and j < len(scores)
+                     else float("nan"))
+                status = "red" if np.isnan(s) else rag_status(s)
+                col = RAG_COLORS[status].name()
+                conf = "--" if np.isnan(s) else f"{100.0 * s:.0f}%"
+                tip = (f"<b>{name}</b><br>"
+                       f"<span style='color:{col};'>detection confidence "
+                       f"{conf}</span>")
+            if corrected is not None and j < len(corrected) and corrected[j]:
+                status = "corrected"
+                tip += "<br><span style='color:#aa78f0;'>corrected by hand</span>"
+            item.set_status(status)
+            item.setToolTip(tip)
 
     def _on_moved_live(self, joint_id: int, pos: QPointF):
         # cheap live feedback during the drag: just redraw the bone lines
@@ -252,3 +298,6 @@ class CameraPanel(QWidget):
 
     def set_filename(self, name: str):
         self.filename.setText(name)
+
+    def set_accuracy(self, errors) -> None:
+        self.view.set_accuracy(errors)

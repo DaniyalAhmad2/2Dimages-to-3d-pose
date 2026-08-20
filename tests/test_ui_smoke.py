@@ -124,7 +124,7 @@ def test_3d_fullscreen_toggle_is_in_app(qapp):
 
     # the readouts and the timeline stay available, so frames can be stepped
     # through and judged without leaving the large view
-    for w in (win.pose_acc, win.accuracy, win.selected):
+    for w in (win.pose_acc, win.accuracy):
         assert w.window() is win, "accuracy panel left the fullscreen view"
         assert not w.isHidden()
     assert not win._tl_area.isHidden(), "timeline hidden in fullscreen"
@@ -134,7 +134,7 @@ def test_3d_fullscreen_toggle_is_in_app(qapp):
     assert not win._mid.isHidden()
     # panels returned to the right column, in their original order
     order = [win._rightcol.widget(i) for i in range(win._rightcol.count())]
-    assert order[:4] == [win._view3d_card, win.pose_acc, win.accuracy, win.selected]
+    assert order[:3] == [win._view3d_card, win.pose_acc, win.accuracy]
 
 
 def test_main_window_builds(qapp):

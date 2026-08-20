@@ -27,6 +27,16 @@ from pose3d.core.skeleton import BONES, Joint, NUM_JOINTS
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
 _MID = "MID"   # midpoint(pelvis, neck) — the torso split point
+_HEAD_AIM = "HEAD_AIM"   # Joint.HEAD, corrected for the nose-vs-skull-axis bias
+
+# The HEAD joint is the NOSE in the default COCO-17 pipeline, and a nose is not
+# on the neck's axis: measured against the torso line (NECK->PELVIS), the nose
+# direction sits ~45 deg forward on real captures (demo take median 49.6 deg,
+# Test-motion take median 40.0 deg), while this rig's rest head direction is
+# ~4 deg. Aiming the neck bone straight at the nose would therefore pitch the
+# head down permanently, so the target is rotated back by this anatomical
+# offset before aiming (see the _HEAD_AIM branch in _skin_matrices).
+_NOSE_PITCH = np.radians(45.0)
 
 # Pipeline role -> candidate bone names, tried in order. Covers the legacy
 # Blender meta-rig (what we ship), Rigify, and Mixamo/UE naming so a replacement
@@ -60,6 +70,10 @@ _ROLE_ALIASES = {
 _DIRECT = {
     "spine": (Joint.PELVIS, _MID),
     "chest": (_MID, Joint.NECK),
+    # the head is a passenger of the neck (one head point carries no roll), so
+    # aiming the neck at the bias-corrected HEAD is what makes nodding and
+    # turning follow the capture at all
+    "neck": (Joint.NECK, _HEAD_AIM),
     # the clavicles carry the arms; drive them or the arm roots miss the
     # shoulders and a noisy shoulder swings the whole arm
     "clavicle.L": (Joint.NECK, Joint.LEFT_SHOULDER),
@@ -74,8 +88,10 @@ _DIRECT = {
     "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
 }
 
-# Limbs solved with two-bone IK: (upper role, lower role, mid joint, end joint).
-# The upper bone's aim comes out of the IK solve rather than _DIRECT.
+# Limb chains: (upper role, lower role, mid joint, end joint). When the mid
+# joint is captured, both bones aim at their own joints via _DIRECT so the
+# bend follows the capture; two-bone IK runs only when the mid joint is
+# occluded, recovering the chain from the end effector alone.
 _IK_CHAINS = (
     ("upper_arm.L", "forearm.L", Joint.LEFT_ELBOW, Joint.LEFT_WRIST),
     ("upper_arm.R", "forearm.R", Joint.RIGHT_ELBOW, Joint.RIGHT_WRIST),
@@ -202,6 +218,21 @@ class Character:
         n = np.linalg.norm(d)
         self._rest_torso = (d / n if n > 1e-9 and not np.isnan(d).any()
                             else self.tail[self.hips_idx] - self.head[self.hips_idx])
+        # The neck BONE's rest angle off the torso line. _bone_fk aims the bone
+        # axis — not the joint read-back — at the target, so this is the angle
+        # that makes a subject holding the anatomical neutral (_NOSE_PITCH)
+        # leave the neck exactly at rest (residual ~1 deg, vs ~6 deg if the
+        # read-back direction were used as the reference).
+        self._rest_head_pitch = 0.0
+        if "neck" in self.role:
+            nb = self.role["neck"]
+            axis = self.tail[nb] - self.head[nb]
+            td = rj[int(Joint.NECK)] - rj[int(Joint.PELVIS)]
+            an, tn = np.linalg.norm(axis), np.linalg.norm(td)
+            if an > 1e-9 and tn > 1e-9 and np.isfinite(axis).all() \
+                    and np.isfinite(td).all():
+                cosr = float(np.clip(np.dot(axis / an, td / tn), -1.0, 1.0))
+                self._rest_head_pitch = float(np.arccos(cosr))
         self._scale = None          # uniform scale, set by fit_to_subject
 
     # --- rig introspection -------------------------------------------------
@@ -332,6 +363,40 @@ class Character:
         self._scale = None
 
     # --- posing ------------------------------------------------------------
+    def _head_aim_target(self, J, pelvis):
+        """Where the neck should aim, correcting the nose-vs-skull-axis bias.
+
+        Computed in pose space — angles survive the rigid + uniform-scale
+        to_rig map. The captured head direction is expressed as an angle off
+        the torso line (NECK->PELVIS), shifted so the anatomical neutral
+        (_NOSE_PITCH) lands on the rig's own rest head pitch, and clamped at
+        the torso line: with only one head point there is no way to tell
+        "looking up" apart from data that uses the skull-axis convention
+        (synthetic tests, the self-test pose), so looking up saturates at
+        neutral instead of bending those captures backward.
+        """
+        h, n = J(Joint.HEAD), J(Joint.NECK)
+        if h is None or n is None or pelvis is None \
+                or not np.isfinite(np.asarray(pelvis)).all():
+            return None                    # nothing to correct against: inherit
+        d = h - n
+        t = n - pelvis
+        dn, tn = float(np.linalg.norm(d)), float(np.linalg.norm(t))
+        if dn < 1e-9 or tn < 1e-9:
+            return None
+        t_hat = t / tn
+        cos_th = float(np.clip(np.dot(d / dn, t_hat), -1.0, 1.0))
+        theta = float(np.arccos(cos_th))
+        want = max(self._rest_head_pitch + theta - _NOSE_PITCH, 0.0)
+        perp = d / dn - cos_th * t_hat     # the plane the nod happens in
+        pn = float(np.linalg.norm(perp))
+        if pn < 1e-9:
+            # head direction collinear with the torso: no defined nod plane,
+            # and the corrected angle is 0 there anyway
+            return n + dn * t_hat
+        dir_c = np.cos(want) * t_hat + np.sin(want) * (perp / pn)
+        return n + dn * dir_c
+
     def _bone_fk(self, b, base, end):
         """Skin matrix for bone b, hanging off its already-posed parent.
 
@@ -446,6 +511,9 @@ class Character:
                 # whenever the pelvis itself was missing
                 a = J(Joint.NECK)
                 return None if a is None else to_rig((a + pelvis) / 2.0)
+            if spec == _HEAD_AIM:
+                p = self._head_aim_target(J, pelvis)
+                return None if p is None else to_rig(p)
             p = J(spec)
             return None if p is None else to_rig(p)
 
@@ -474,15 +542,25 @@ class Character:
 
             end = solved.pop(b, None)
             if end is None and b in self._ik:
+                # IK is the OCCLUSION fallback, not the primary path. When the
+                # mid joint (knee/elbow) is captured, per-bone aiming below
+                # tracks it exactly; two-bone IK would instead set the bend
+                # angle purely from the root->end distance and use the captured
+                # mid only to pick the bend plane — so dragging a knee up to
+                # the hip left the rig's knee half bent, which is the defect
+                # this ordering fixes. The trade: the end effector can sit off
+                # by the (fitted, ~2%) proportion mismatch instead of landing
+                # exactly.
                 lb, mid_j, end_j = self._ik[b]
-                target = resolve(end_j)
-                if target is not None:
-                    sol = self._solve_ik(b, lb, base, resolve(mid_j), target)
-                    if sol is not None:
-                        end, solved[lb] = sol
+                if resolve(mid_j) is None:
+                    target = resolve(end_j)
+                    if target is not None:
+                        sol = self._solve_ik(b, lb, base, None, target)
+                        if sol is not None:
+                            end, solved[lb] = sol
             if end is None and b in self._direct:
-                # no IK (occluded end joint): fall back to aiming at this
-                # bone's own joint, which still tracks the capture
+                # the primary path: aim this bone at its own captured joint,
+                # so every joint DIRECTION follows the capture
                 end = resolve(self._direct[b][1])
 
             skin[b] = base if end is None else self._bone_fk(b, base, end)

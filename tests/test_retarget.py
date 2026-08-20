@@ -1,8 +1,11 @@
 """The character mimics the capture without ever deforming.
 
 These guard the inversion: the rig's bone lengths are inviolable and motion
-transfers as rotation only, with two-bone IK putting the end effectors as close
-to the captured joints as fixed-length limbs allow.
+transfers as rotation only. Every bone aims at its own captured joint, so
+joint DIRECTIONS track the capture exactly — dragging a knee moves the rig's
+knee — while end effectors land within the fitted proportion mismatch. Two-bone
+IK remains as the occlusion fallback, recovering a limb from its end effector
+when the mid joint is missing.
 """
 from pathlib import Path
 
@@ -87,19 +90,31 @@ def _subject_from_rig(ch):
     return ch._from_rig(ch.rest_joints(), np.zeros(3), 1.0, np.eye(3))
 
 
-def test_ik_reaches_target_when_in_range():
+def test_end_effectors_land_close_when_in_range():
+    """Direction-first retargeting still puts wrists and ankles essentially on
+    the captured points for a matching build. (The old IK contract demanded
+    1e-6 exactness; per-bone aiming instead accumulates the sub-0.2% seam
+    between bone axes and joint read-back points, which is invisible and the
+    price of the knee actually following the capture.)"""
     ch = _ch()
     sub = _subject_from_rig(ch)
     valid = ~np.isnan(sub).any(1)
     ch.fit_to_subject(sub[None])
     got = ch.posed_joints(sub, valid)
+    h = _height(sub)
     for j in (Joint.LEFT_WRIST, Joint.RIGHT_WRIST,
               Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE):
-        assert np.linalg.norm(got[int(j)] - sub[int(j)]) < 1e-6, j.name
+        assert np.linalg.norm(got[int(j)] - sub[int(j)]) / h < 0.005, j.name
 
 
 def test_posed_joints_match_captured_when_proportions_match():
-    """With a matching build, every joint lands within 1% of body height."""
+    """With a matching build, every joint lands within 1% of body height.
+
+    HEAD is exempted with a wider band: the read-back is the head-bone mid
+    (a skull point), the capture is nose-convention, and the neck's bias
+    clamp deliberately holds a skull-convention subject at rest — a ~1.2%
+    offset by construction, not a defect.
+    """
     ch = _ch()
     sub = _subject_from_rig(ch)
     valid = ~np.isnan(sub).any(1)
@@ -109,20 +124,44 @@ def test_posed_joints_match_captured_when_proportions_match():
     for j in range(len(got)):
         if np.isnan(sub[j]).any() or np.isnan(got[j]).any():
             continue
-        assert np.linalg.norm(got[j] - sub[j]) / h < 0.01, Joint(j).name
+        band = 0.025 if j == int(Joint.HEAD) else 0.01
+        assert np.linalg.norm(got[j] - sub[j]) / h < band, Joint(j).name
+
+
+def test_arm_follows_the_captured_elbow_direction():
+    """The defect this exists to prevent: the captured mid joint must set the
+    limb's actual bend, not merely its bend plane. Under IK, dragging the
+    elbow only rotated the bend plane and the arm stayed at whatever angle the
+    shoulder->wrist distance implied."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    pose = sub.copy()
+    sh = pose[int(Joint.LEFT_SHOULDER)]
+    # a sharply bent arm: elbow out to the side, wrist back up near the shoulder
+    pose[int(Joint.LEFT_ELBOW)] = sh + np.array([-0.25, 0.05, -0.10])
+    pose[int(Joint.LEFT_WRIST)] = sh + np.array([-0.05, 0.15, 0.10])
+    got = ch.posed_joints(pose, ~np.isnan(pose).any(1))
+
+    want = pose[int(Joint.LEFT_ELBOW)] - sh
+    have = got[int(Joint.LEFT_ELBOW)] - got[int(Joint.LEFT_SHOULDER)]
+    cos = np.dot(want, have) / (np.linalg.norm(want) * np.linalg.norm(have))
+    assert cos > 0.995, f"upper arm ignored the captured elbow (cos={cos:.4f})"
 
 
 def test_ik_falls_short_gracefully_out_of_range():
-    """An unreachable target leaves the limb straight, short by exactly the
+    """With the MID JOINT OCCLUDED, IK recovers the limb from the end effector:
+    an unreachable target leaves the limb straight, short by exactly the
     difference — the closest a fixed-length limb can get."""
     ch = _ch()
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     pose = sub.copy()
-    # fling the wrist far beyond arm's reach, straight out to the side
+    # fling the wrist far beyond arm's reach; the elbow is not captured, so
+    # the chain must be recovered from the wrist alone (the IK path)
     sh = pose[int(Joint.LEFT_SHOULDER)]
     pose[int(Joint.LEFT_WRIST)] = sh + np.array([-10.0, 0.0, 0.0])
-    pose[int(Joint.LEFT_ELBOW)] = sh + np.array([-1.0, 0.0, 0.2])
+    pose[int(Joint.LEFT_ELBOW)] = np.nan
     valid = ~np.isnan(pose).any(1)
     got = ch.posed_joints(pose, valid)
 
@@ -181,6 +220,132 @@ def test_ik_pole_degenerate_falls_back_to_rest_bend():
     missing[int(Joint.LEFT_KNEE)] = np.nan
     got2 = ch.posed_joints(missing, ~np.isnan(missing).any(1))
     assert not np.isnan(got2[int(Joint.LEFT_ANKLE)]).any()
+
+
+# --- the neck --------------------------------------------------------------
+
+def _rot_about(axis, deg):
+    """Rotation matrix about a unit axis (Rodrigues)."""
+    a = np.radians(deg)
+    k = axis / np.linalg.norm(axis)
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
+
+
+def _nose_convention(ch, sub):
+    """Move the subject's HEAD point from the rig's skull convention to the
+    nose convention real captures use: ~45 deg forward of the torso line."""
+    from pose3d.geometry.character import _NOSE_PITCH
+    p = sub.copy()
+    neck = p[int(Joint.NECK)]
+    torso = neck - p[int(Joint.PELVIS)]
+    right = p[int(Joint.RIGHT_SHOULDER)] - p[int(Joint.LEFT_SHOULDER)]
+    d = p[int(Joint.HEAD)] - neck
+    cur = np.arccos(np.clip(np.dot(d / np.linalg.norm(d),
+                                   torso / np.linalg.norm(torso)), -1, 1))
+    # rotate whichever way about the shoulder axis actually lands the nose at
+    # the anatomical angle — "forward" depends on which way the rig faces
+    t_hat = torso / np.linalg.norm(torso)
+    best = None
+    for sign in (1.0, -1.0):
+        cand = _rot_about(right, sign * np.degrees(_NOSE_PITCH - cur)) @ d
+        th = np.arccos(np.clip(np.dot(cand / np.linalg.norm(cand), t_hat), -1, 1))
+        if best is None or abs(th - _NOSE_PITCH) < best[0]:
+            best = (abs(th - _NOSE_PITCH), cand)
+    p[int(Joint.HEAD)] = neck + best[1]
+    return p
+
+
+def _neck_rotation_vs_chest(ch, pose):
+    skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1))
+    Rn = skin[ch.role["neck"]][:3, :3]
+    Rc = skin[ch.role["chest"]][:3, :3]
+    rel = Rn @ Rc.T
+    return np.degrees(np.arccos(np.clip((np.trace(rel) - 1) / 2, -1, 1)))
+
+
+def test_neck_is_at_rest_for_a_neutral_nose():
+    """A nose held at the anatomical neutral must leave the neck at rest —
+    the bias correction exists so real captures do not stare at the floor."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    assert _neck_rotation_vs_chest(ch, _nose_convention(ch, sub)) < 6.0
+
+
+def test_nodding_the_nose_bends_the_neck():
+    """Regression guard for the welded neck: neck/head were in no driving
+    table, so the head inherited the chest verbatim and dragging the nose did
+    nothing at all."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    neutral = _nose_convention(ch, sub)
+
+    nod = neutral.copy()
+    neck = nod[int(Joint.NECK)]
+    right = nod[int(Joint.RIGHT_SHOULDER)] - nod[int(Joint.LEFT_SHOULDER)]
+    torso = neck - nod[int(Joint.PELVIS)]
+    t_hat = torso / np.linalg.norm(torso)
+    d = nod[int(Joint.HEAD)] - neck
+    # nod FORWARD: chin toward chest, i.e. the angle off the torso line grows.
+    # Which rotation sign does that depends on the rig's facing, so pick it.
+    cands = [_rot_about(right, s * 25.0) @ d for s in (1.0, -1.0)]
+    nod[int(Joint.HEAD)] = neck + max(
+        cands, key=lambda c: np.arccos(np.clip(
+            np.dot(c / np.linalg.norm(c), t_hat), -1, 1)))
+
+    before = _neck_rotation_vs_chest(ch, neutral)
+    after = _neck_rotation_vs_chest(ch, nod)
+    assert after - before > 15.0, (
+        f"neck barely moved for a 25 deg nod ({before:.1f} -> {after:.1f} deg)")
+
+    # and the posed head PITCHES by a comparable angle — measured as the
+    # read-back head's angle off the torso line, since the read-back (a skull
+    # point) and the target (a nose) sit at different phase angles and their
+    # displacement chords legitimately differ in direction
+    def head_pitch(pose):
+        got = ch.posed_joints(pose, ~np.isnan(pose).any(1))
+        v = got[int(Joint.HEAD)] - got[int(Joint.NECK)]
+        return np.degrees(np.arccos(np.clip(
+            np.dot(v / np.linalg.norm(v), t_hat), -1, 1)))
+
+    dp = head_pitch(nod) - head_pitch(neutral)
+    assert 12.0 < dp < 40.0, f"posed head pitched {dp:.1f} deg for a 25 deg nod"
+
+
+def test_missing_head_leaves_the_neck_inherited():
+    """No head point -> the neck rides the chest exactly as before the fix."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    pose = sub.copy()
+    pose[int(Joint.HEAD)] = np.nan
+    skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1))
+    assert np.allclose(skin[ch.role["neck"]], skin[ch.role["chest"]])
+    assert not np.isnan(ch.posed_joints(pose, ~np.isnan(pose).any(1))).any()
+
+
+def test_knee_dragged_to_the_hip_folds_the_thigh():
+    """The reported defect, verbatim: the captured knee moved almost onto the
+    hip, and the rig's knee stayed half bent because IK only read the
+    hip->ankle distance. The thigh must now point where the captured knee is."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    pose = sub.copy()
+    hip = pose[int(Joint.LEFT_HIP)]
+    knee = pose[int(Joint.LEFT_KNEE)]
+    # 80% of the way from the knee to the hip, pulled forward so the fold
+    # direction is unambiguous
+    target = hip + 0.2 * (knee - hip) + np.array([0.0, 0.35, 0.05])
+    pose[int(Joint.LEFT_KNEE)] = target
+    got = ch.posed_joints(pose, ~np.isnan(pose).any(1))
+
+    want = target - hip
+    have = got[int(Joint.LEFT_KNEE)] - got[int(Joint.LEFT_HIP)]
+    cos = np.dot(want, have) / (np.linalg.norm(want) * np.linalg.norm(have))
+    assert cos > 0.99, f"thigh did not follow the dragged knee (cos={cos:.4f})"
 
 
 # --- stability and fallbacks ----------------------------------------------

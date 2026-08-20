@@ -1,8 +1,10 @@
 """Main dashboard window — laid out to match the Animation Dashboard mockup.
 
 Top bar | Sidebar | [Left cam][Right cam] + action row | right column
-(3D preview + pose-accuracy gauge + joint accuracy + selected joint) | Timeline.
-Panels talk only through the ProjectModel signal hub.
+(3D preview + pose-accuracy gauge + joint accuracy) | Timeline. Per-joint
+detail lives on the keypoints themselves: hovering one in a camera view names
+it and shows its accuracy. Panels talk only through the ProjectModel signal
+hub.
 """
 from __future__ import annotations
 
@@ -50,11 +52,10 @@ class _ExportWorker(QThread):
         self.finished_res.emit(res)
 
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
-from pose3d.core.skeleton import JOINT_NAMES
 from pose3d.ui.camera_view import CameraPanel
 from pose3d.ui.model import ProjectModel
 from pose3d.ui.panels import (
-    JointAccuracyList, PoseAccuracyPanel, SelectedJointPanel, Sidebar,
+    JointAccuracyList, PoseAccuracyPanel, Sidebar,
 )
 from pose3d.ui.timeline import Timeline, TimelineHeader
 from pose3d.ui.view3d import View3D
@@ -183,12 +184,11 @@ class MainWindow(QMainWindow):
 
         self.pose_acc = PoseAccuracyPanel(); self.pose_acc.setObjectName("cardPanel")
         self.accuracy = JointAccuracyList(); self.accuracy.setObjectName("cardPanel")
-        self.selected = SelectedJointPanel(); self.selected.setObjectName("cardPanel")
 
-        for w in (card, self.pose_acc, self.accuracy, self.selected):
+        for w in (card, self.pose_acc, self.accuracy):
             col.addWidget(w)
         col.setCollapsible(0, False)
-        col.setSizes([460, 190, 240, 130])   # 3D gets the most room by default
+        col.setSizes([460, 190, 300])   # 3D gets the most room by default
         self._rightcol = col
         return col
 
@@ -196,7 +196,6 @@ class MainWindow(QMainWindow):
     def _wire(self):
         for panel in (self.cam_left, self.cam_right):
             panel.view.jointDragged.connect(self._on_drag)
-            panel.view.jointPicked.connect(self._on_pick)
         self.timeline.frameSelected.connect(self.model.set_frame)
 
         self.model.frameChanged.connect(self._on_frame_changed)
@@ -232,15 +231,13 @@ class MainWindow(QMainWindow):
         self.model.set_joint_2d(cam, joint, pos.x(), pos.y())
         self._mark_unsaved()
 
-    def _on_pick(self, cam, joint):
-        f = self.model.frame()
-        score = float(np.nanmax([f.scores[CAM_LEFT][joint], f.scores[CAM_RIGHT][joint]]))
-        corrected = bool(f.corrected[CAM_LEFT][joint] or f.corrected[CAM_RIGHT][joint])
-        self.selected.set_joint(JOINT_NAMES[joint], score, corrected)
-
     def _on_accuracy(self, errors):
         overall = self.accuracy.update_errors(errors)
         self.pose_acc.set_overall(overall)
+        # the keypoints themselves are colour-banded by the same numbers, and
+        # hovering one shows the figure — replaces the old SELECTED JOINT card
+        self.cam_left.set_accuracy(errors)
+        self.cam_right.set_accuracy(errors)
 
     def _on_auto_toggled(self, on):
         self.model.auto_recalc = on
@@ -397,7 +394,7 @@ class MainWindow(QMainWindow):
             side = QWidget()
             sl = QVBoxLayout(side)
             sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(6)
-            for w in (self.pose_acc, self.accuracy, self.selected):
+            for w in (self.pose_acc, self.accuracy):
                 sl.addWidget(w)
             sl.addStretch(1)
 
@@ -418,9 +415,9 @@ class MainWindow(QMainWindow):
             self._root_lay.removeWidget(self._fs_split)
             # put the panels back in the right column, in their original order
             self._rightcol.insertWidget(0, self._view3d_card)
-            for i, w in enumerate((self.pose_acc, self.accuracy, self.selected), 1):
+            for i, w in enumerate((self.pose_acc, self.accuracy), 1):
                 self._rightcol.insertWidget(i, w)
-            self._rightcol.setSizes([460, 190, 240, 130])
+            self._rightcol.setSizes([460, 190, 300])
             self._fs_side.deleteLater()
             self._fs_split.deleteLater()
             self._fs_split = self._fs_side = None

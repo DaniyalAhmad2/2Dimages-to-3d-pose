@@ -23,7 +23,6 @@ QWidget {
 #cardPanel { background: #0f1219; border: 1px solid #1e2230; border-radius: 10px; }
 #panelTitle { color: #aeb4c2; font-size: 12px; font-weight: 700; letter-spacing: 1px; }
 #fileLabel { color: #7f8698; font-size: 12px; }
-#selJointName { font-size: 15px; font-weight: 600; }
 #legendLabel { color: #aeb4c2; font-size: 11px; }
 
 /* buttons */

@@ -1,8 +1,9 @@
-"""Sidebar, Pose-Accuracy gauge, Joint-accuracy list, Selected-Joint panel.
+"""Sidebar, Pose-Accuracy gauge, Joint-accuracy list.
 
 Styled to match the Animation Dashboard mockup: sectioned sidebar with info
-rows, a circular pose-accuracy gauge, a per-joint accuracy list (as %), and a
-selected-joint detail panel.
+rows, a circular pose-accuracy gauge and a per-joint accuracy list (as %).
+Per-joint detail on demand lives on the camera keypoints themselves (hover),
+not in a separate panel.
 """
 from __future__ import annotations
 
@@ -124,9 +125,11 @@ class PoseAccuracyPanel(QWidget):
         lay.addWidget(_section("POSE ACCURACY"))
         self.gauge = PoseAccuracyGauge()
         lay.addWidget(self.gauge)
-        for txt, col in (("High (95-100%)", COL_GREEN),
-                         ("Medium (85-94%)", COL_AMBER),
-                         ("Low (0-84%)", COL_RED)):
+        # the same bands acc_label() actually applies (ACC_HIGH/ACC_MED) —
+        # this legend used to claim 95/85 while the code banded at 85/70
+        for txt, col in (("High (85-100%)", COL_GREEN),
+                         ("Medium (70-84%)", COL_AMBER),
+                         ("Low (0-69%)", COL_RED)):
             row = QHBoxLayout()
             dot = QLabel("●"); dot.setStyleSheet(f"color: {col.name()};")
             row.addWidget(dot); row.addWidget(QLabel(txt)); row.addStretch(1)
@@ -162,29 +165,6 @@ class JointAccuracyList(QWidget):
             self.list.addItem(item)
         valid = pcts[~np.isnan(pcts)]
         return float(valid.mean()) if valid.size else float("nan")
-
-
-class SelectedJointPanel(QWidget):
-    """Shows the currently-picked joint: name, confidence, status."""
-
-    def __init__(self):
-        super().__init__()
-        lay = QVBoxLayout(self)
-        lay.setContentsMargins(10, 8, 10, 8)
-        lay.addWidget(_section("SELECTED JOINT"))
-        self.name = QLabel("—"); self.name.setObjectName("selJointName")
-        lay.addWidget(self.name)
-        self.conf = _InfoRow("Confidence", "—"); lay.addWidget(self.conf)
-        self.status = _InfoRow("Status", "—"); lay.addWidget(self.status)
-        lay.addStretch(1)
-
-    def set_joint(self, name: str, score: float, corrected: bool):
-        col = acc_color(100 if score >= 0.6 else (75 if score >= 0.35 else 20))
-        self.name.setText(f"●  {name}")
-        self.name.setStyleSheet(f"color: {col.name()}; font-size: 15px;")
-        self.conf.set_value("--" if np.isnan(score) else f"{score:.2f}")
-        self.status.set_value("Corrected" if corrected else
-                              ("Detected" if score > 0 else "Missing"))
 
 
 class Sidebar(QWidget):
