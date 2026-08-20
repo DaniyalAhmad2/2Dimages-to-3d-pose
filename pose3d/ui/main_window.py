@@ -277,44 +277,10 @@ class MainWindow(QMainWindow):
         self._refresh_views(); self._refresh_timeline_status()
 
     def _on_recalibrate(self):
-        self._upgrade_assumed_intrinsics()
         self.model.recompute_all()
         self._apply_view_orientation()   # poses changed: re-fit the character
         self._refresh_views(); self._refresh_timeline_status()
         self._refresh_calibration_status()
-
-    def _upgrade_assumed_intrinsics(self):
-        """Re-derive guessed intrinsics from the photos' EXIF, then re-solve.
-
-        Projects imported before EXIF was used stored f = max(w, h), which is
-        ~45% too long on a phone and warps triangulated depth. Recalibrate is
-        exactly where the user expects that to be fixed — but the extrinsics
-        were solved against the wrong K, so both have to be redone.
-        """
-        rig = self.model.rig
-        if rig is None:
-            return
-        from pose3d.calib.quality import looks_assumed
-        if not any(looks_assumed(k) for k in rig.intr.values()):
-            return
-        try:
-            import cv2
-            from pose3d.calib.resolve import resolve_calibration, save_rig
-            cal = resolve_calibration(self.model.project,
-                                      lambda p: cv2.imread(str(p)))
-            if not (cal.ok and cal.rig is not None):
-                return
-            if all(looks_assumed(k) for k in cal.rig.intr.values()):
-                return              # no EXIF either: nothing gained
-            self.model.rig = cal.rig
-            if self.model.project_dir:
-                from pathlib import Path
-                save_rig(cal.rig, Path(self.model.project_dir) / "calibration")
-            self.statusBar().showMessage(
-                "Re-derived camera intrinsics from the photos' EXIF.", 6000)
-        except Exception:
-            import traceback
-            traceback.print_exc()      # keep the plain recompute working
 
     def _refresh_calibration_status(self):
         from pose3d.calib.quality import check_rig

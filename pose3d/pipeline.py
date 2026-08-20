@@ -43,8 +43,22 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             frame.scores[cam] = det.scores
 
 
+# Epipolar tolerance as a fraction of the image DIAGONAL. A flat 30 px was
+# implicitly tuned for ~1080p; on the client's 3072x4080 phone captures that
+# is 0.7% of image height, tight enough to cut through the middle of a
+# legitimate distribution and silently delete a third of every pose. This
+# reproduces ~30 px at 1080p and scales with the sensor.
+_EPI_THR_FRAC = 0.014
+
+
+def epipolar_threshold(rig: CalibratedRig) -> float:
+    """Pixels of epipolar disagreement tolerated, scaled to the image size."""
+    w, h = rig.intr[CAM_LEFT].image_size
+    return float(_EPI_THR_FRAC * np.hypot(w, h))
+
+
 def validate_cross_view(project: ProjectData, rig: CalibratedRig,
-                        epi_thr: float = 30.0) -> int:
+                        epi_thr: float | None = None) -> int:
     """Drop 2D observations that are geometrically inconsistent across views.
 
     When a joint is occluded/out-of-frame in one camera, the detector often
@@ -58,6 +72,8 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
 
     Returns the number of observations dropped.
     """
+    if epi_thr is None:
+        epi_thr = epipolar_threshold(rig)
     dropped = 0
     for frame in project.frames:
         for j in range(NUM_JOINTS):
@@ -85,19 +101,23 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
 
 
 def triangulate_project(project: ProjectData, rig: CalibratedRig,
-                        validate: bool = True) -> None:
+                        validate: bool = True) -> int:
     """Fill each frame's raw pose3d from its two 2D views.
 
     By default first drops cross-view-inconsistent observations (occlusion
-    hallucinations) so they don't corrupt the 3D pose.
+    hallucinations) so they don't corrupt the 3D pose. Returns how many were
+    dropped, so callers can tell the user — a bad calibration rejects good
+    detections wholesale, which looks exactly like a detection failure.
     """
+    dropped = 0
     if validate:
-        validate_cross_view(project, rig)
+        dropped = validate_cross_view(project, rig)
     for frame in project.frames:
         frame.pose3d = triangulate_points(
             frame.kp2d[CAM_LEFT], frame.kp2d[CAM_RIGHT],
             rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
             rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    return dropped
 
 
 def fit_project(project: ProjectData, bone_lengths=None,

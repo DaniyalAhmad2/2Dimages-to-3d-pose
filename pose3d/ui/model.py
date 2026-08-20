@@ -47,12 +47,17 @@ class ProjectModel(QObject):
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
         from pose3d.pipeline import fit_project, triangulate_project
-        triangulate_project(self.project, self.rig)
+        dropped = triangulate_project(self.project, self.rig)
         self._bone_lengths = None
         fit_project(self.project, smooth=True)
         self.set_frame(self.current)
-        self.statusMessage.emit(
-            f"Recalculated 3D for {len(self.project.frames)} frames")
+        msg = f"Recalculated 3D for {len(self.project.frames)} frames"
+        total = max(1, len(self.project.frames) * NUM_JOINTS)
+        if dropped / total >= 0.15:
+            # not a detection failure, even though it looks like one
+            msg += (f" — {dropped} keypoints ({dropped / total:.0%}) rejected "
+                    f"as inconsistent between the two views (calibration)")
+        self.statusMessage.emit(msg)
 
     def redetect_all(self, detector, load_image) -> None:
         """Re-run the detector on every frame, then recompute 3D."""

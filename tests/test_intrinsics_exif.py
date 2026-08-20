@@ -62,22 +62,26 @@ def test_zero_focal_is_rejected(tmp_path):
     assert focal_from_exif(_jpeg_with_f35(tmp_path / "z.jpg", (640, 480), 0)) is None
 
 
-def test_approx_intrinsics_prefer_exif(tmp_path):
+def test_the_default_focal_is_the_size_guess_not_exif(tmp_path):
+    """EXIF is physically the right focal and empirically the wrong one here.
+
+    On the client's captures f=2833 (EXIF) made the two views disagree —
+    median epipolar 26.6 px, 38% of keypoints rejected by validate_cross_view,
+    which emptied the 3D view — while the baseless f=max(w,h)=4080 gave 4.9 px
+    and rejected nothing. With extrinsics solved from a single planar marker
+    using the same K, the guess is self-consistent and the true focal is not.
+    focal_from_exif stays tested as the input to a future focal *selection*
+    step scored on tags not used for the extrinsics.
+    """
     from pose3d.calib.resolve import _approx_intrinsics
 
     img = np.zeros((4080, 3072, 3), np.uint8)
     p = _jpeg_with_f35(tmp_path / "shot.jpg", (3072, 4080), 24)
 
-    got = _approx_intrinsics(img, p)
-    assert got.source == "exif"
-    assert got.K[0, 0] == pytest.approx(focal_from_exif(p))
-    assert not looks_assumed(got), "EXIF intrinsics must not read as guessed"
-
-    # no path / no EXIF: the old behaviour, still flagged
-    fallback = _approx_intrinsics(img)
-    assert fallback.source == "assumed"
-    assert fallback.K[0, 0] == 4080.0
-    assert looks_assumed(fallback)
+    for got in (_approx_intrinsics(img), _approx_intrinsics(img, p)):
+        assert got.source == "assumed"
+        assert got.K[0, 0] == 4080.0
+        assert looks_assumed(got)
 
 
 def test_source_survives_a_save_load_round_trip(tmp_path):
@@ -85,24 +89,3 @@ def test_source_survives_a_save_load_round_trip(tmp_path):
                    source="exif")
     k.save(tmp_path / "i.json")
     assert Intrinsics.load(tmp_path / "i.json").source == "exif"
-
-
-def test_exif_intrinsics_get_their_own_warning():
-    """Better than a guess, still not a calibration — the user should be told
-    which of the two they have."""
-    from pose3d.calib.extrinsics import Extrinsics
-    from pose3d.pipeline import CalibratedRig
-
-    def intr(source):
-        return Intrinsics(K=np.array([[2830.0, 0, 1536.0],
-                                      [0, 2830.0, 2040.0], [0, 0, 1.0]]),
-                          dist=np.zeros((1, 5)), image_size=(3072, 4080),
-                          source=source)
-
-    e = Extrinsics(R=np.eye(3), t=np.zeros(3))
-    msgs = " ".join(check_rig(CalibratedRig(intr("exif"), intr("exif"), e, e)))
-    assert "EXIF" in msgs
-    assert "assumed from the image size" not in msgs
-
-    msgs2 = " ".join(check_rig(CalibratedRig(intr("measured"), intr("measured"), e, e)))
-    assert "EXIF" not in msgs2

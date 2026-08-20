@@ -68,24 +68,27 @@ class CalibrationResult:
 
 
 def _approx_intrinsics(image: np.ndarray, path=None) -> Intrinsics:
-    """Pinhole model for a camera we were never given a calibration for.
+    """Rough pinhole model from image size: f≈max(w,h), principal point=centre.
 
-    The focal comes from the photo's EXIF when it is there, and only otherwise
-    from the old f≈max(w,h) guess. That guess is badly wrong on a phone — a
-    Pixel 10 Pro shooting 3072x4080 is ~2830 px, not 4080 — and an over-long
-    focal warps triangulated depth, which shows up as the figure leaning by an
-    amount that changes with where it stands. Principal point stays at the
-    centre and distortion stays zero either way; only a checkerboard can give
-    those.
+    Physically this is a guess with no basis — the EXIF 35mm-equivalent says a
+    Pixel 10 Pro shooting 3072x4080 is ~2833 px, not 4080. It is nonetheless
+    what we use, because it is what MEASURES better: with extrinsics solved
+    from a single planar marker using the same K, f=4080 gives a
+    self-consistent stereo pair on the client's captures (median epipolar
+    4.9 px, nothing rejected by validate_cross_view) and f=2833 does not
+    (26.6 px, 38% of observations rejected, which emptied the 3D view).
+
+    `focal_from_exif` is kept and tested for the principled version of this:
+    score candidate focals by cross-validated epipolar error on the corners of
+    tags NOT used to solve the extrinsics, and keep the winner. That needs
+    multi-marker extrinsics first, so nothing selects EXIF automatically yet.
+    `path` is accepted and ignored so that work does not have to re-thread it.
     """
     h, w = image.shape[:2]
-    f = focal_from_exif(path) if path is not None else None
-    source = "exif" if f else "assumed"
-    if not f:
-        f = float(max(w, h))
+    f = float(max(w, h))
     K = np.array([[f, 0, w / 2.0], [0, f, h / 2.0], [0, 0, 1.0]], dtype=float)
     return Intrinsics(K=K, dist=np.zeros((1, 5), dtype=float),
-                      image_size=(w, h), source=source)
+                      image_size=(w, h), source="assumed")
 
 
 def resolve_calibration(

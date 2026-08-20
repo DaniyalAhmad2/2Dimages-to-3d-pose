@@ -75,18 +75,6 @@ def check_rig(rig) -> list[str]:
             f"measured. Depth and limb angles will be skewed — shoot a "
             f"checkerboard with each camera to calibrate them.")
 
-    # A tier better than the guess and worth distinguishing: the focal is the
-    # camera's own, so depth is roughly right, but there is still no distortion
-    # model and the principal point is assumed centred.
-    exif = [cam for cam, k in rig.intr.items()
-            if getattr(k, "source", None) == "exif"]
-    if exif:
-        who = " and ".join(sorted(exif))
-        msgs.append(
-            f"Camera intrinsics for {who} came from the photos' EXIF focal "
-            f"length, not a calibration. Good enough to judge poses; shoot a "
-            f"checkerboard if you need exact angles or lens distortion "
-            f"corrected.")
 
     sizes = {cam: tuple(k.image_size) for cam, k in rig.intr.items()}
     if len(set(sizes.values())) > 1:
