@@ -130,11 +130,17 @@ jobs:
           }
 
       - uses: actions/upload-artifact@v4
+        # Convenience only — the run page download. NOT the delivery path:
+        # each zip is ~655 MB, three of them blew the account's Actions
+        # artifact storage quota and this step started failing while the
+        # build itself was fine. Release assets (below) do not count against
+        # that quota, so a quota failure here must not kill the run.
+        continue-on-error: true
         with:
           name: Pose3D-Windows
           path: Pose3D-Windows.zip
-          # ~1 GB; the default 90 days of retention is not worth the storage
-          retention-days: 14
+          # quota is the binding constraint, not time
+          retention-days: 5
           compression-level: 0
 
       - name: Publish release
@@ -143,6 +149,12 @@ jobs:
         with:
           files: Pose3D-Windows.zip
           generate_release_notes: true
+          # A manual dispatch publishes a DRAFT under a synthetic tag name:
+          # visible to repo collaborators for testing, no public release and
+          # no tag actually created unless someone presses Publish. Real tags
+          # (v*) publish for real.
+          draft: ${{ !startsWith(github.ref, 'refs/tags/') }}
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
 
       - name: Upload logs on failure
         if: failure()
