@@ -78,15 +78,18 @@ def fit_bone_lengths(
     raw3d = np.asarray(raw3d, float).reshape(NUM_JOINTS, 3)
     observed = ~np.isnan(raw3d).any(1)
 
+    if not observed.any():
+        # Nothing was seen in this frame, so there is nothing to fit toward.
+        # Solving anyway would either fail outright or, with fill_missing,
+        # invent a whole skeleton out of the bone lengths alone.
+        return raw3d.copy()
+
     # initial guess: observed points as-is; missing filled from parent + bone
     x0 = raw3d.copy()
-    if not observed.any():
-        x0[:] = 0.0
-    else:
-        centroid = np.nanmean(raw3d, axis=0)
-        for j in range(NUM_JOINTS):
-            if not observed[j]:
-                x0[j] = centroid
+    centroid = np.nanmean(raw3d, axis=0)
+    for j in range(NUM_JOINTS):
+        if not observed[j]:
+            x0[j] = centroid
     x0 = np.nan_to_num(x0, nan=0.0)
 
     bones = [(int(a), int(b), bone_lengths[(int(a), int(b))]) for a, b in BONES]
@@ -104,7 +107,19 @@ def fit_bone_lengths(
             res.append(bone_weight * (d - L))
         return np.asarray(res)
 
-    sol = least_squares(residuals, x0.ravel(), method="lm", max_nfev=200)
+    # Levenberg-Marquardt is faster but refuses an under-determined problem:
+    # it needs residuals >= variables. Variables are fixed at NUM_JOINTS*3
+    # (45), residuals are 3 per OBSERVED joint plus one per bone, so lm needs
+    # about 11 of the 15 joints present. Sparse frames are routine — the
+    # detector is unreliable on the client's grey mannequin and
+    # validate_cross_view deliberately drops inconsistent observations — and
+    # scipy's ValueError used to abort the whole import. Fall back to trf,
+    # which handles the under-determined case; the un-observed joints are then
+    # only loosely pinned by the bone terms, which is exactly what
+    # `fill_missing` already governs.
+    n_res = 3 * int(observed.sum()) + len(bones)
+    method = "lm" if n_res >= NUM_JOINTS * 3 else "trf"
+    sol = least_squares(residuals, x0.ravel(), method=method, max_nfev=200)
     fitted = sol.x.reshape(NUM_JOINTS, 3)
     if not fill_missing:
         fitted[~observed] = np.nan     # do not invent un-observed joints

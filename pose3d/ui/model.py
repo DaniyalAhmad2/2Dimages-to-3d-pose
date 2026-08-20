@@ -126,8 +126,16 @@ class ProjectModel(QObject):
         # re-fit this frame to keep bone lengths consistent
         if self._bone_lengths is None:
             self._compute_bone_lengths()
-        f.fitted3d = fit_bone_lengths(f.pose3d, self._bone_lengths,
-                                      fill_missing=False)
+        try:
+            f.fitted3d = fit_bone_lengths(f.pose3d, self._bone_lengths,
+                                          fill_missing=False)
+        except Exception:
+            # Qt swallows exceptions raised in a slot, so a fit that failed on
+            # a sparse frame would make the drag look like it did nothing.
+            # Showing the raw triangulation is better than showing nothing.
+            import traceback
+            traceback.print_exc()
+            f.fitted3d = np.asarray(f.pose3d, float)
         self.pose3dChanged.emit(f.fitted3d)
         self.accuracyChanged.emit(self._accuracy(self.current))
 

@@ -111,9 +111,20 @@ def fit_project(project: ProjectData, bone_lengths=None,
         fb = fallback_bone_lengths()
         bone_lengths = {k: (v if v > 1e-6 else fb[k]) for k, v in measured.items()}
 
-    fitted = np.stack([
-        fit_bone_lengths(f.pose3d, bone_lengths, fill_missing=False)
-        for f in project.frames]) if project.frames else raw
+    # One awkward frame must never lose the whole take: fall back to its raw
+    # triangulation and carry on. The import dialog wraps this in a blanket
+    # except, so anything raised here used to surface as "Import failed" with
+    # every other frame's work discarded.
+    per_frame = []
+    for f in project.frames:
+        try:
+            per_frame.append(
+                fit_bone_lengths(f.pose3d, bone_lengths, fill_missing=False))
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            per_frame.append(np.asarray(f.pose3d, float))
+    fitted = np.stack(per_frame) if per_frame else raw
     if smooth and len(fitted) > 1:
         fitted = smooth_temporal(fitted, alpha=alpha)
     for f, pose in zip(project.frames, fitted):
