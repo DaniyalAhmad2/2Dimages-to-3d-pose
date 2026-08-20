@@ -97,42 +97,32 @@ def sequence_up(poses: np.ndarray):
     return m / n if n > 1e-9 else None
 
 
-# A pose-estimated up further than this from every world axis means the
-# calibration frame is arbitrary and cannot be trusted as a gravity reference.
-_AXIS_SNAP_MAX = np.radians(35.0)
-
-
 def resolve_up(poses):
     """The vertical to display and export against: (unit vector, source).
 
-    source is "axis" or "estimated" (or (None, "estimated") when no frame
-    yields an up-vector at all).
+    source is "estimated" (or (None, "estimated") when no frame yields one).
 
-    The world frame comes from the calibration markers, and when those are
-    taped square — on a wall or flat on the floor — the frame's AXES are
-    gravity-true even though none of them is nominally "up" (measured takes
-    were 60-90 deg off +Z). So: estimate the subject's average body line,
-    and if a signed world axis lies within _AXIS_SNAP_MAX of it, use that
-    axis. Unlike levelling on the body line itself, this preserves the
-    subject's genuine lean — per frame AND held across the whole take, single
-    -frame projects included — which body-line levelling silently erased.
+    This levels on the subject's average body line. It is not a true gravity
+    reference — lean held across a whole take is normalised away, and in a
+    single-frame project the subject is forced upright — but on this rig it is
+    the best available, and here is why the obvious alternatives are not:
 
-    The cost, accepted and visible in the UI: markers taped crooked by some
-    angle tilt the scene by that angle (indistinguishable from genuine lean).
-    When no axis is close the frame is treated as arbitrary and the body-line
-    average itself is used, which normalises average lean — exactly the old
-    behaviour.
+    * The calibration world frame is NOT gravity-aligned. Its axes come from
+      whichever ArUco tag `resolve_calibration` happened to pick, and the tags
+      are taped at arbitrary rotations: measured on the client's take, three
+      markers in one image disagreed about "up" by 6, 92 and 89 degrees. A
+      version of this function that snapped to the nearest world axis inherited
+      that error and tilted the figure ~26 degrees forward.
+    * The cameras' own up-vectors are a gravity proxy (they were held roughly
+      upright), but they disagreed with the body line by 18 degrees on the same
+      take — hand-held tilt plus extrinsics error from a single 5 cm marker.
+
+    Both become viable once extrinsics are solved from the full tag layout
+    rather than one arbitrary tag; until then, self-levelling is the honest
+    default and the sidebar says so.
     """
     bu = sequence_up(poses)
-    if bu is None:
-        return None, "estimated"
-    axis = int(np.argmax(np.abs(bu)))
-    snapped = np.zeros(3)
-    snapped[axis] = np.sign(bu[axis]) or 1.0
-    cos = float(np.clip(np.dot(bu, snapped), -1.0, 1.0))
-    if np.arccos(cos) <= _AXIS_SNAP_MAX:
-        return snapped, "axis"
-    return bu, "estimated"
+    return (bu, "estimated") if bu is not None else (None, "estimated")
 
 
 def de_tilt_matrix(up: np.ndarray) -> np.ndarray:

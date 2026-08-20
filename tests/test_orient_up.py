@@ -1,10 +1,9 @@
-"""Which way is up — and whose up is it.
+"""Which way is up — and why the calibration cannot tell us.
 
-The world frame comes from the calibration markers; when they are taped
-square its AXES are gravity-true even though none is nominally +Z. resolve_up
-snaps to the nearest axis so the subject's genuine lean — including lean held
-through a whole take, which body-line levelling silently erased — survives
-into the 3D view and the export.
+The world frame's axes come from whichever ArUco tag the calibration happened
+to pick, and tags taped at different rotations define different "ups" (6, 92
+and 89 degrees apart on the client's rig). So resolve_up levels on the
+subject's own body line instead, and the UI says that is what it did.
 """
 import numpy as np
 
@@ -27,49 +26,28 @@ def _torso_tilt(p):
     return float(np.degrees(np.arccos(np.clip(t[2] / np.linalg.norm(t), -1, 1))))
 
 
-def test_up_snaps_to_a_world_axis_when_one_is_close():
-    """An upright subject in a world whose up is -Y (a wall-mounted board):
-    resolve_up must return the exact axis, not the subject's own body line."""
+def test_markers_taped_at_different_rotations_are_not_a_vertical_reference():
+    """Why resolve_up does NOT trust the calibration frame's axes.
+
+    ArUco tags encode their own orientation, and on the client's rig the wall
+    tags are taped at different rotations — three markers in one image put
+    "up" 6, 92 and 89 degrees from the camera's. resolve_calibration picks the
+    lowest-id common tag, so the world frame's vertical is whatever rotation
+    that one happens to have. A version of resolve_up that snapped to the
+    nearest world axis inherited that and leaned the figure ~26 degrees.
+    """
     base = sample_skeleton_3d()
-    R = _rot([1, 0, 0], -90.0)          # world up becomes -Y
-    seq = np.stack([base @ R.T for _ in range(3)])
+    # a world frame rotated 90 deg about the view axis, as a sideways tag gives
+    R = _rot([0, 1, 0], 90.0)
+    seq = np.stack([base @ R.T] * 3)
     up, source = resolve_up(seq)
-    assert source == "axis"
-    assert np.allclose(np.abs(up), [0, 1, 0])
-    assert np.linalg.norm(up) == 1.0
+    assert source == "estimated"
+    # levelling still stands the figure up rather than following the bogus axis
+    assert _torso_tilt(seq[0] @ de_tilt_matrix(up).T) < 6.0
 
 
-def test_sustained_lean_survives_axis_snapping():
-    """The reported defect: the subject leans through the WHOLE take, and the
-    old body-line levelling defined that lean as vertical and erased it."""
-    base = sample_skeleton_3d()
-    piv = base[int(Joint.PELVIS)].copy()
-    leaned = (base - piv) @ _rot([1, 0, 0], 15.0).T + piv
-    seq = np.stack([leaned] * 3)        # 15 deg lean, every frame
-
-    up, source = resolve_up(seq)
-    assert source == "axis"             # 15 < 35: the axis wins
-    out = seq[0] @ de_tilt_matrix(up).T
-    assert _torso_tilt(out) > 10.0, "sustained lean was flattened"
-
-    # the old behaviour, for contrast: body-line levelling erases it
-    old = seq[0] @ de_tilt_matrix(sequence_up(seq)).T
-    assert _torso_tilt(old) < 6.0
-
-
-def test_single_frame_project_keeps_its_lean():
-    base = sample_skeleton_3d()
-    piv = base[int(Joint.PELVIS)].copy()
-    leaned = (base - piv) @ _rot([0, 1, 0], 20.0).T + piv
-    up, source = resolve_up(leaned[None])
-    assert source == "axis"
-    out = leaned @ de_tilt_matrix(up).T
-    assert _torso_tilt(out) > 14.0
-
-
-def test_arbitrary_world_frame_falls_back_to_estimation():
-    """Up far from every axis (a diagonal frame) cannot be trusted as
-    gravity; the old self-levelling remains the fallback."""
+def test_levelling_stands_the_subject_up_whatever_the_world_frame():
+    """The world frame is arbitrary, so orientation must not depend on it."""
     base = sample_skeleton_3d()
     R = _rot([1, 1, 0], 45.0)           # up lands ~45 deg from every axis
     seq = np.stack([base @ R.T] * 3)

@@ -25,6 +25,12 @@ class Intrinsics:
     dist: np.ndarray       # (1, N) distortion coeffs
     image_size: tuple[int, int]  # (width, height)
     rms: float = 0.0       # reprojection RMS from calibration (px)
+    # How the focal length was obtained, worst to best:
+    #   "assumed" — guessed from the image size; wrong by tens of percent
+    #   "exif"    — from the camera's 35mm-equivalent focal length; close
+    #   "measured"— checkerboard/ChArUco calibration; exact, with distortion
+    # Drives which warning the sidebar shows, and nothing else.
+    source: str = "measured"
 
     def save(self, path: str | Path) -> None:
         path = Path(path)
@@ -34,6 +40,7 @@ class Intrinsics:
             "dist": self.dist.tolist(),
             "image_size": list(self.image_size),
             "rms": float(self.rms),
+            "source": self.source,
         }, indent=2))
 
     @staticmethod
@@ -44,7 +51,50 @@ class Intrinsics:
             dist=np.array(d["dist"], dtype=float),
             image_size=tuple(d["image_size"]),
             rms=float(d.get("rms", 0.0)),
+            # projects written before this field existed hold whatever the
+            # import produced, which was always the image-size guess
+            source=str(d.get("source", "measured")),
         )
+
+
+# A 35mm frame's diagonal, the reference for "35mm-equivalent focal length".
+_FRAME35_DIAG_MM = 43.266615
+
+
+def focal_from_exif(image_path) -> float | None:
+    """Focal length in PIXELS from a photo's EXIF, or None.
+
+    Phones record `FocalLengthIn35mmFilm`: the focal a 35mm camera would need
+    for the same diagonal field of view. Rescaling it by this image's diagonal
+    recovers the pixel focal length, which is a far better starting point than
+    guessing f = max(width, height) — for a Pixel 10 Pro (24mm-equivalent,
+    3072x4080) the guess is ~45% too long, and an over-long focal warps
+    triangulated depth.
+    """
+    _F35, _EXIF_IFD = 41989, 0x8769
+    try:
+        from PIL import Image
+
+        with Image.open(image_path) as im:
+            w, h = im.size
+            exif = im.getexif()
+            # Real cameras put FocalLengthIn35mmFilm in the Exif sub-IFD, not
+            # the top-level one getexif() returns — a Pixel's IFD0 holds only
+            # make/model/orientation. Check both: PIL writes it to IFD0 when
+            # round-tripping, so files produced by other tools can have it
+            # there too.
+            f35 = exif.get(_F35) if exif else None
+            if f35 is None and exif:
+                f35 = exif.get_ifd(_EXIF_IFD).get(_F35)
+    except Exception:
+        return None                                # unreadable/no EXIF: caller falls back
+    try:
+        f35 = float(f35)
+    except (TypeError, ValueError):
+        return None
+    if not (f35 > 0) or not (w > 0 and h > 0):
+        return None
+    return f35 * float(np.hypot(w, h)) / _FRAME35_DIAG_MM
 
 
 def calibrate_checkerboard(
@@ -93,4 +143,5 @@ def calibrate_checkerboard(
 
     rms, K, dist, _rvecs, _tvecs = cv2.calibrateCamera(
         objpoints, imgpoints, image_size, None, None)
-    return Intrinsics(K=K, dist=dist, image_size=image_size, rms=float(rms))
+    return Intrinsics(K=K, dist=dist, image_size=image_size, rms=float(rms),
+                      source="measured")

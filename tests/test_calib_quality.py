@@ -50,14 +50,17 @@ def test_level_calibration_reports_nothing():
     assert check_rig(rig) == []
 
 
-def test_board_not_flat_is_reported():
-    """The fault behind a figure that leans: the world frame is not vertical."""
+def test_world_frame_not_vertical_is_reported():
+    """The world frame's up comes from one arbitrarily-rotated marker tag, so
+    the user has to be told the 3D view is levelling on the subject instead —
+    and what that costs (a lean held all take reads as upright)."""
     rig = _rig((_tipped_cam((-0.3, -3, 1.5)), _tipped_cam((0.3, -3, 1.5))),
                _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True),
                _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True))
     assert world_up_tilt(rig) > 60.0
     msgs = " ".join(check_rig(rig)).lower()
-    assert "off vertical" in msgs and "flat" in msgs
+    assert "off vertical" in msgs
+    assert "levels on the subject" in msgs
 
 
 def test_assumed_intrinsics_are_reported():

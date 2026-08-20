@@ -268,11 +268,9 @@ class Sidebar(QWidget):
 
     def set_vertical_source(self, source):
         """Say which vertical the 3D view is levelled against."""
-        if source == "axis":
+        if source == "estimated":
             self.vertical_ref.setText(
-                "Vertical: calibration axes — the subject's real lean is shown.")
-        elif source == "estimated":
-            self.vertical_ref.setText(
-                "Vertical: estimated from the subject — lean held through the "
-                "whole take is normalised.")
-        self.vertical_ref.setVisible(source in ("axis", "estimated"))
+                "Vertical: estimated from the subject, because the marker tags "
+                "do not agree on which way is up. A lean held through the whole "
+                "take reads as upright.")
+        self.vertical_ref.setVisible(source == "estimated")

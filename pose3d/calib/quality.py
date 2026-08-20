@@ -57,15 +57,15 @@ def check_rig(rig) -> list[str]:
 
     tilt = world_up_tilt(rig)
     if tilt is not None and tilt > _TILT_WARN_DEG:
-        # Not fatal by itself: the view levels against the nearest world AXIS
-        # (see pose3d.geometry.orient.resolve_up), which is gravity-true as
-        # long as the markers were taped square. What still matters is that a
-        # crooked board tilts the figure by exactly its own crookedness.
+        # The world frame's up comes from one ArUco tag, and tags taped at
+        # different rotations define different ups, so this is not on its own
+        # a reason to distrust the reconstruction — the view levels on the
+        # subject instead (orient.resolve_up). Say what it costs.
         msgs.append(
-            f"Calibration's nominal up is {tilt:.0f}° off vertical (board on a "
-            f"wall, or not flat). The view levels against the nearest world "
-            f"axis instead — accurate if the markers are square; a crooked "
-            f"board tilts the figure by the same amount.")
+            f"Calibration's nominal up is {tilt:.0f}° off vertical — the world "
+            f"frame comes from one marker tag, whose rotation is arbitrary. "
+            f"The 3D view levels on the subject instead, so a lean held for "
+            f"the whole take will read as upright.")
 
     assumed = [cam for cam, k in rig.intr.items() if looks_assumed(k)]
     if assumed:
@@ -74,6 +74,19 @@ def check_rig(rig) -> list[str]:
             f"Camera intrinsics for {who} were assumed from the image size, not "
             f"measured. Depth and limb angles will be skewed — shoot a "
             f"checkerboard with each camera to calibrate them.")
+
+    # A tier better than the guess and worth distinguishing: the focal is the
+    # camera's own, so depth is roughly right, but there is still no distortion
+    # model and the principal point is assumed centred.
+    exif = [cam for cam, k in rig.intr.items()
+            if getattr(k, "source", None) == "exif"]
+    if exif:
+        who = " and ".join(sorted(exif))
+        msgs.append(
+            f"Camera intrinsics for {who} came from the photos' EXIF focal "
+            f"length, not a calibration. Good enough to judge poses; shoot a "
+            f"checkerboard if you need exact angles or lens distortion "
+            f"corrected.")
 
     sizes = {cam: tuple(k.image_size) for cam, k in rig.intr.items()}
     if len(set(sizes.values())) > 1:
