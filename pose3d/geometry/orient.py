@@ -29,12 +29,18 @@ def upright_matrix(axis: int, sign: float) -> np.ndarray:
 
 
 def _frame_up(pose3d: np.ndarray, valid: np.ndarray):
-    """Unit up-vector for one pose (head minus the lowest available body joint),
-    or None if it can't be determined."""
+    """Unit up-vector for one pose (top of the body minus the lowest available
+    body joint), or None if it can't be determined.
+
+    The top reference is the NECK (shoulder midpoint — on the body axis), not
+    HEAD: HEAD is the NOSE in the default pipeline, which sits forward of the
+    body axis and was measured to tip the estimated up ~10 deg forward on a
+    real take, leaning the whole de-tilted scene.
+    """
     pose3d = np.asarray(pose3d, float).reshape(NUM_JOINTS, 3)
-    head = pose3d[int(Joint.HEAD)]
+    head = pose3d[int(Joint.NECK)]
     if np.isnan(head).any():
-        head = np.nanmean(pose3d[[int(Joint.NECK), int(Joint.HEAD)]], axis=0)
+        head = pose3d[int(Joint.HEAD)]
     ref = None
     for idxs in ([Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE],
                  [Joint.LEFT_KNEE, Joint.RIGHT_KNEE],
@@ -89,6 +95,44 @@ def sequence_up(poses: np.ndarray):
     m = np.mean(ups, axis=0)
     n = np.linalg.norm(m)
     return m / n if n > 1e-9 else None
+
+
+# A pose-estimated up further than this from every world axis means the
+# calibration frame is arbitrary and cannot be trusted as a gravity reference.
+_AXIS_SNAP_MAX = np.radians(35.0)
+
+
+def resolve_up(poses):
+    """The vertical to display and export against: (unit vector, source).
+
+    source is "axis" or "estimated" (or (None, "estimated") when no frame
+    yields an up-vector at all).
+
+    The world frame comes from the calibration markers, and when those are
+    taped square — on a wall or flat on the floor — the frame's AXES are
+    gravity-true even though none of them is nominally "up" (measured takes
+    were 60-90 deg off +Z). So: estimate the subject's average body line,
+    and if a signed world axis lies within _AXIS_SNAP_MAX of it, use that
+    axis. Unlike levelling on the body line itself, this preserves the
+    subject's genuine lean — per frame AND held across the whole take, single
+    -frame projects included — which body-line levelling silently erased.
+
+    The cost, accepted and visible in the UI: markers taped crooked by some
+    angle tilt the scene by that angle (indistinguishable from genuine lean).
+    When no axis is close the frame is treated as arbitrary and the body-line
+    average itself is used, which normalises average lean — exactly the old
+    behaviour.
+    """
+    bu = sequence_up(poses)
+    if bu is None:
+        return None, "estimated"
+    axis = int(np.argmax(np.abs(bu)))
+    snapped = np.zeros(3)
+    snapped[axis] = np.sign(bu[axis]) or 1.0
+    cos = float(np.clip(np.dot(bu, snapped), -1.0, 1.0))
+    if np.arccos(cos) <= _AXIS_SNAP_MAX:
+        return snapped, "axis"
+    return bu, "estimated"
 
 
 def de_tilt_matrix(up: np.ndarray) -> np.ndarray:

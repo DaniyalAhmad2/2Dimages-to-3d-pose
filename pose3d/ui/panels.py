@@ -203,6 +203,13 @@ class Sidebar(QWidget):
         self.calib_warn.setStyleSheet("color:#e0a33a; font-size:11px;")
         self.calib_warn.hide()
         lay.addWidget(self.calib_warn)
+        # which vertical the 3D view/export is levelled against — the answer
+        # to "is the model tilted, or is that what the images show?"
+        self.vertical_ref = QLabel("")
+        self.vertical_ref.setWordWrap(True)
+        self.vertical_ref.setStyleSheet("color:#8a91a3; font-size:11px;")
+        self.vertical_ref.hide()
+        lay.addWidget(self.vertical_ref)
         btn_recal = QPushButton("↻  Recalibrate 3D")
         btn_recal.clicked.connect(self.recalibrate)
         lay.addWidget(btn_recal)
@@ -258,3 +265,14 @@ class Sidebar(QWidget):
         self.calib_warn.setText("\n\n".join(f"• {w}" for w in warnings))
         self.calib_warn.setToolTip("\n\n".join(warnings))
         self.calib_warn.setVisible(bool(warnings))
+
+    def set_vertical_source(self, source):
+        """Say which vertical the 3D view is levelled against."""
+        if source == "axis":
+            self.vertical_ref.setText(
+                "Vertical: calibration axes — the subject's real lean is shown.")
+        elif source == "estimated":
+            self.vertical_ref.setText(
+                "Vertical: estimated from the subject — lean held through the "
+                "whole take is normalised.")
+        self.vertical_ref.setVisible(source in ("axis", "estimated"))

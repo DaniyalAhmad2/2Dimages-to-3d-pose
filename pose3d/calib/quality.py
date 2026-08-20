@@ -57,10 +57,15 @@ def check_rig(rig) -> list[str]:
 
     tilt = world_up_tilt(rig)
     if tilt is not None and tilt > _TILT_WARN_DEG:
+        # Not fatal by itself: the view levels against the nearest world AXIS
+        # (see pose3d.geometry.orient.resolve_up), which is gravity-true as
+        # long as the markers were taped square. What still matters is that a
+        # crooked board tilts the figure by exactly its own crookedness.
         msgs.append(
-            f"Calibration world is {tilt:.0f}° off vertical — the marker board "
-            f"was not lying flat. The figure will lean; put the board on the "
-            f"floor and recalibrate.")
+            f"Calibration's nominal up is {tilt:.0f}° off vertical (board on a "
+            f"wall, or not flat). The view levels against the nearest world "
+            f"axis instead — accurate if the markers are square; a crooked "
+            f"board tilts the figure by the same amount.")
 
     assumed = [cam for cam, k in rig.intr.items() if looks_assumed(k)]
     if assumed:

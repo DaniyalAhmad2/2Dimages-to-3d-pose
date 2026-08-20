@@ -473,19 +473,24 @@ class MainWindow(QMainWindow):
             self.timeline.set_status(i, status)
 
     def _apply_view_orientation(self):
-        """De-tilt the 3D view using the whole sequence, so the figure stands
-        upright (removes a consistent world-frame tilt from calibration) while
-        keeping genuine per-frame lean."""
+        """Orient the 3D view so "up" is trustworthy.
+
+        resolve_up prefers a calibration axis (gravity-true when the markers
+        were taped square), which preserves the subject's genuine lean — even
+        lean held across the whole take, which the old body-line levelling
+        silently erased. The sidebar says which reference is in use.
+        """
         import numpy as np
-        from pose3d.geometry.orient import sequence_up, de_tilt_matrix
+        from pose3d.geometry.orient import resolve_up, de_tilt_matrix
         frames = self.model.project.frames
         poses = [f.fitted3d for f in frames
                  if f.fitted3d is not None and not np.isnan(f.fitted3d).all()]
-        R = None
+        R, source = None, None
         if poses:
-            up = sequence_up(np.stack(poses))
+            up, source = resolve_up(np.stack(poses))
             if up is not None:
                 R = de_tilt_matrix(up)
+        self.sidebar.set_vertical_source(source)
         self.view3d.set_orientation(R)
         if poses:
             # size the character to this subject (same fit the export uses)
