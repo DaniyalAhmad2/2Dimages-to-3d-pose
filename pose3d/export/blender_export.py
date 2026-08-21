@@ -42,7 +42,7 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
     """
     try:
         from pose3d.geometry.character import Character
-        from pose3d.geometry.orient import (resolve_up, de_tilt_matrix,
+        from pose3d.geometry.orient import (sequence_up, de_tilt_matrix,
                                             detect_vertical, upright_matrix)
     except Exception:
         return None, None
@@ -52,10 +52,10 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
         return None, None
 
     poses3d = np.asarray(poses3d, float).reshape(-1, NUM_JOINTS, 3)
-    # orient exactly as the 3D view does (resolve_up prefers a gravity-true
-    # calibration axis, preserving genuine lean), so the export matches the
-    # preview pose-for-pose
-    up, _ = resolve_up(poses3d)
+    # orient exactly as the 3D view does, so the export matches the preview
+    # pose-for-pose (see orient.sequence_up for why the calibration frame is
+    # not used as the vertical reference)
+    up = sequence_up(poses3d)
     if up is not None:
         R = de_tilt_matrix(up).T
     else:

@@ -20,7 +20,7 @@ import numpy as np
 from pose3d.calib.extrinsics import (
     Extrinsics, detect_markers, estimate_extrinsics_for_marker, make_detector,
 )
-from pose3d.calib.intrinsics import Intrinsics, focal_from_exif
+from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
 from pose3d.pipeline import CalibratedRig
 
@@ -67,7 +67,7 @@ class CalibrationResult:
     approximate: bool = False   # True if intrinsics were guessed from image size
 
 
-def _approx_intrinsics(image: np.ndarray, path=None) -> Intrinsics:
+def _approx_intrinsics(image: np.ndarray) -> Intrinsics:
     """Rough pinhole model from image size: f≈max(w,h), principal point=centre.
 
     Physically this is a guess with no basis — the EXIF 35mm-equivalent says a
@@ -78,11 +78,10 @@ def _approx_intrinsics(image: np.ndarray, path=None) -> Intrinsics:
     4.9 px, nothing rejected by validate_cross_view) and f=2833 does not
     (26.6 px, 38% of observations rejected, which emptied the 3D view).
 
-    `focal_from_exif` is kept and tested for the principled version of this:
-    score candidate focals by cross-validated epipolar error on the corners of
-    tags NOT used to solve the extrinsics, and keep the winner. That needs
-    multi-marker extrinsics first, so nothing selects EXIF automatically yet.
-    `path` is accepted and ignored so that work does not have to re-thread it.
+    `intrinsics.focal_from_exif` is kept and tested for the principled version
+    of this: score candidate focals by cross-validated epipolar error on the
+    corners of tags NOT used to solve the extrinsics, and keep the winner.
+    That needs multi-marker extrinsics first.
     """
     h, w = image.shape[:2]
     f = float(max(w, h))
@@ -114,10 +113,8 @@ def resolve_calibration(
         if img_l is None or img_r is None:
             return CalibrationResult(False, None, "failed",
                                      "Could not read the first image pair.")
-        intr_left = intr_left or _approx_intrinsics(img_l, f0.images[CAM_LEFT])
-        intr_right = intr_right or _approx_intrinsics(img_r, f0.images[CAM_RIGHT])
-        # "approximate" still means "no checkerboard"; EXIF is much closer but
-        # still has no distortion model, so the flag stays set either way.
+        intr_left = intr_left or _approx_intrinsics(img_l)
+        intr_right = intr_right or _approx_intrinsics(img_r)
         approximate = True
 
     # --- extrinsics from upload ---

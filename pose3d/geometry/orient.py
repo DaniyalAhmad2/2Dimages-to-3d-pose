@@ -83,6 +83,21 @@ def sequence_up(poses: np.ndarray):
     own per-frame lean. Averaging cancels the (zero-mean) genuine lean and leaves
     the consistent world tilt, which `de_tilt_matrix` then removes. Returns None
     if no frame yields an up-vector.
+
+    This is not a true gravity reference — lean held across a whole take is
+    normalised away, and a single-frame project is forced upright. Both
+    alternatives were measured and are worse on this rig:
+
+    * The calibration world frame is NOT gravity-aligned. Its axes come from
+      whichever ArUco tag `resolve_calibration` picked, and the tags are taped
+      at arbitrary rotations: three markers in one image of the client's take
+      disagreed about "up" by 6, 92 and 89 degrees. Snapping to the nearest
+      world axis inherited that and tilted the figure ~26 degrees forward.
+    * The cameras' own up-vectors are a gravity proxy, but disagreed with the
+      body line by 18 degrees on the same take.
+
+    Both become viable once extrinsics are solved from the full tag layout
+    rather than one arbitrary tag.
     """
     poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
     ups = []
@@ -95,34 +110,6 @@ def sequence_up(poses: np.ndarray):
     m = np.mean(ups, axis=0)
     n = np.linalg.norm(m)
     return m / n if n > 1e-9 else None
-
-
-def resolve_up(poses):
-    """The vertical to display and export against: (unit vector, source).
-
-    source is "estimated" (or (None, "estimated") when no frame yields one).
-
-    This levels on the subject's average body line. It is not a true gravity
-    reference — lean held across a whole take is normalised away, and in a
-    single-frame project the subject is forced upright — but on this rig it is
-    the best available, and here is why the obvious alternatives are not:
-
-    * The calibration world frame is NOT gravity-aligned. Its axes come from
-      whichever ArUco tag `resolve_calibration` happened to pick, and the tags
-      are taped at arbitrary rotations: measured on the client's take, three
-      markers in one image disagreed about "up" by 6, 92 and 89 degrees. A
-      version of this function that snapped to the nearest world axis inherited
-      that error and tilted the figure ~26 degrees forward.
-    * The cameras' own up-vectors are a gravity proxy (they were held roughly
-      upright), but they disagreed with the body line by 18 degrees on the same
-      take — hand-held tilt plus extrinsics error from a single 5 cm marker.
-
-    Both become viable once extrinsics are solved from the full tag layout
-    rather than one arbitrary tag; until then, self-levelling is the honest
-    default and the sidebar says so.
-    """
-    bu = sequence_up(poses)
-    return (bu, "estimated") if bu is not None else (None, "estimated")
 
 
 def de_tilt_matrix(up: np.ndarray) -> np.ndarray:

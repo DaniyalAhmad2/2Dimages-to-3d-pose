@@ -60,7 +60,7 @@ def check_rig(rig) -> list[str]:
         # The world frame's up comes from one ArUco tag, and tags taped at
         # different rotations define different ups, so this is not on its own
         # a reason to distrust the reconstruction — the view levels on the
-        # subject instead (orient.resolve_up). Say what it costs.
+        # subject instead (orient.sequence_up). Say what it costs.
         msgs.append(
             f"Calibration's nominal up is {tilt:.0f}° off vertical — the world "
             f"frame comes from one marker tag, whose rotation is arbitrary. "
@@ -74,7 +74,6 @@ def check_rig(rig) -> list[str]:
             f"Camera intrinsics for {who} were assumed from the image size, not "
             f"measured. Depth and limb angles will be skewed — shoot a "
             f"checkerboard with each camera to calibrate them.")
-
 
     sizes = {cam: tuple(k.image_size) for cam, k in rig.intr.items()}
     if len(set(sizes.values())) > 1:

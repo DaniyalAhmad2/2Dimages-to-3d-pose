@@ -481,22 +481,20 @@ class MainWindow(QMainWindow):
     def _apply_view_orientation(self):
         """Orient the 3D view so "up" is trustworthy.
 
-        resolve_up prefers a calibration axis (gravity-true when the markers
-        were taped square), which preserves the subject's genuine lean — even
-        lean held across the whole take, which the old body-line levelling
-        silently erased. The sidebar says which reference is in use.
+        Levelled on the subject's own body line; see orient.sequence_up for why
+        neither the calibration frame nor the cameras can serve as gravity on
+        this rig. The sidebar states the cost of that.
         """
-        import numpy as np
-        from pose3d.geometry.orient import resolve_up, de_tilt_matrix
+        from pose3d.geometry.orient import sequence_up, de_tilt_matrix
         frames = self.model.project.frames
         poses = [f.fitted3d for f in frames
                  if f.fitted3d is not None and not np.isnan(f.fitted3d).all()]
-        R, source = None, None
+        R = None
         if poses:
-            up, source = resolve_up(np.stack(poses))
+            up = sequence_up(np.stack(poses))
             if up is not None:
                 R = de_tilt_matrix(up)
-        self.sidebar.set_vertical_source(source)
+        self.sidebar.show_levelling_note(R is not None)
         self.view3d.set_orientation(R)
         if poses:
             # size the character to this subject (same fit the export uses)

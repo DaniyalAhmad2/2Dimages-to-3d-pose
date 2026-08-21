@@ -15,24 +15,23 @@ from PySide6.QtWidgets import (
 )
 
 from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, rag_status
-from pose3d.ui.panels import acc_color, acc_label, accuracy_pct
+from pose3d.ui.panels import (
+    COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_band, acc_label,
+    accuracy_pct)
 
+# Shared with the accuracy panels so a joint's dot, its tooltip and the
+# JOINT ACCURACY list can never disagree about what "amber" means.
 RAG_COLORS = {
-    "green": QColor(80, 220, 120),
-    "amber": QColor(240, 190, 70),
-    "red": QColor(235, 90, 90),
-    "corrected": QColor(170, 120, 240),
+    "green": COL_GREEN,
+    "amber": COL_AMBER,
+    "red": COL_RED,
+    "corrected": COL_PURPLE,
 }
-
-# accuracy band -> dot colour, so the joints themselves show where the pose is
-# weak instead of the user cross-referencing a separate list
-_BAND_STATUS = {"High": "green", "Medium": "amber", "Low": "red"}
 
 
 class _JointSignals(QObject):
     moved = Signal(int, QPointF)     # joint id, new scene pos (live, during drag)
     released = Signal(int, QPointF)  # joint id, final pos (commit on mouse-up)
-    picked = Signal(int)             # joint id selected
 
 
 class JointItem(QGraphicsEllipseItem):
@@ -62,8 +61,7 @@ class JointItem(QGraphicsEllipseItem):
         return super().itemChange(change, value)
 
     def mousePressEvent(self, event):
-        self._press_pos = self.pos()
-        self.signals.picked.emit(self.joint_id)
+        self._press_pos = self.pos()      # the drag-commit test in mouseRelease
         super().mousePressEvent(event)
 
     def mouseReleaseEvent(self, event):
@@ -77,7 +75,6 @@ class JointItem(QGraphicsEllipseItem):
 class CameraView(QGraphicsView):
     """One camera's editable overlay."""
     jointDragged = Signal(str, int, QPointF)   # cam, joint, pos
-    jointPicked = Signal(str, int)
 
     def __init__(self, cam: str):
         super().__init__()
@@ -94,6 +91,9 @@ class CameraView(QGraphicsView):
         self._show_bones = True
         self._panning = False
         self._pan_start = None
+        self._accuracy = None       # per-joint reprojection error (px)
+        self._scores = None         # per-joint detector confidence
+        self._corrected = None      # per-joint hand-corrected flags
         self._build_items()
 
     def _build_items(self):
@@ -107,8 +107,6 @@ class CameraView(QGraphicsView):
             item = JointItem(j)
             item.signals.moved.connect(self._on_moved_live)       # bones only
             item.signals.released.connect(self._on_released)      # commit
-            item.signals.picked.connect(
-                lambda jid: self.jointPicked.emit(self.cam, jid))
             self._scene.addItem(item)
             self._joints.append(item)
 
@@ -148,7 +146,7 @@ class CameraView(QGraphicsView):
         self._apply_status()
 
     def _apply_status(self) -> None:
-        """Colour each joint and set its tooltip.
+        """Colour each joint and set its hover tooltip.
 
         Accuracy (reprojection error) is what the user is actually judging
         when correcting a pose, so it drives the colour whenever it exists;
@@ -156,34 +154,31 @@ class CameraView(QGraphicsView):
         names the joint and gives the number, replacing the old SELECTED JOINT
         panel — the info appears where the user is already looking.
         """
-        acc = getattr(self, "_accuracy", None)
-        scores = getattr(self, "_scores", None)
-        corrected = getattr(self, "_corrected", None)
         for j, item in enumerate(self._joints):
-            name = JOINT_NAMES[j]
-            err = float(acc[j]) if acc is not None and j < len(acc) else float("nan")
-            if np.isfinite(err):
-                pct = accuracy_pct(err)
-                band = acc_label(pct)
-                status = _BAND_STATUS.get(band, "red")
-                col = acc_color(pct).name()
-                tip = (f"<b>{name}</b><br>"
-                       f"<span style='color:{col};'>accuracy {pct:.0f}% "
-                       f"({band})</span>")
-            else:
-                s = (float(scores[j]) if scores is not None and j < len(scores)
-                     else float("nan"))
-                status = "red" if np.isnan(s) else rag_status(s)
-                col = RAG_COLORS[status].name()
-                conf = "--" if np.isnan(s) else f"{100.0 * s:.0f}%"
-                tip = (f"<b>{name}</b><br>"
-                       f"<span style='color:{col};'>detection confidence "
-                       f"{conf}</span>")
-            if corrected is not None and j < len(corrected) and corrected[j]:
-                status = "corrected"
-                tip += "<br><span style='color:#aa78f0;'>corrected by hand</span>"
+            status, tip = self._joint_status(j)
             item.set_status(status)
             item.setToolTip(tip)
+
+    def _joint_status(self, j: int) -> tuple[str, str]:
+        """(band key, tooltip html) for one joint."""
+        name = JOINT_NAMES[j]
+        err = float(self._accuracy[j]) if self._accuracy is not None else np.nan
+        if np.isfinite(err):
+            pct = accuracy_pct(err)
+            status = acc_band(pct)
+            detail = f"accuracy {pct:.0f}% ({acc_label(pct)})"
+        else:
+            s = float(self._scores[j]) if self._scores is not None else np.nan
+            status = "red" if np.isnan(s) else rag_status(s)
+            shown = "--" if np.isnan(s) else f"{100.0 * s:.0f}%"
+            detail = f"detection confidence {shown}"
+        tip = (f"<b>{name}</b><br>"
+               f"<span style='color:{RAG_COLORS[status].name()};'>{detail}</span>")
+        if self._corrected is not None and self._corrected[j]:
+            status = "corrected"
+            tip += (f"<br><span style='color:{RAG_COLORS['corrected'].name()};'>"
+                    f"corrected by hand</span>")
+        return status, tip
 
     def _on_moved_live(self, joint_id: int, pos: QPointF):
         # cheap live feedback during the drag: just redraw the bone lines

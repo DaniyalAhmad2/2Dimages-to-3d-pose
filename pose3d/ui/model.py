@@ -46,18 +46,15 @@ class ProjectModel(QObject):
         if self.rig is None:
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
-        from pose3d.pipeline import fit_project, triangulate_project
+        from pose3d.pipeline import (
+            fit_project, rejection_note, triangulate_project)
         dropped = triangulate_project(self.project, self.rig)
         self._bone_lengths = None
         fit_project(self.project, smooth=True)
         self.set_frame(self.current)
         msg = f"Recalculated 3D for {len(self.project.frames)} frames"
-        total = max(1, len(self.project.frames) * NUM_JOINTS)
-        if dropped / total >= 0.15:
-            # not a detection failure, even though it looks like one
-            msg += (f" — {dropped} keypoints ({dropped / total:.0%}) rejected "
-                    f"as inconsistent between the two views (calibration)")
-        self.statusMessage.emit(msg)
+        note = rejection_note(dropped, len(self.project.frames))
+        self.statusMessage.emit(f"{msg} — {note}" if note else msg)
 
     def redetect_all(self, detector, load_image) -> None:
         """Re-run the detector on every frame, then recompute 3D."""
@@ -134,13 +131,14 @@ class ProjectModel(QObject):
         try:
             f.fitted3d = fit_bone_lengths(f.pose3d, self._bone_lengths,
                                           fill_missing=False)
-        except Exception:
+        except Exception as e:
             # Qt swallows exceptions raised in a slot, so a fit that failed on
             # a sparse frame would make the drag look like it did nothing.
             # Showing the raw triangulation is better than showing nothing.
-            import traceback
-            traceback.print_exc()
             f.fitted3d = np.asarray(f.pose3d, float)
+            self.statusMessage.emit(
+                f"Bone fit failed on this frame ({type(e).__name__}); "
+                f"showing the raw triangulation")
         self.pose3dChanged.emit(f.fitted3d)
         self.accuracyChanged.emit(self._accuracy(self.current))
 

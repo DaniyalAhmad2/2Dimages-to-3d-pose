@@ -29,7 +29,9 @@ class Intrinsics:
     #   "assumed" — guessed from the image size; wrong by tens of percent
     #   "exif"    — from the camera's 35mm-equivalent focal length; close
     #   "measured"— checkerboard/ChArUco calibration; exact, with distortion
-    # Drives which warning the sidebar shows, and nothing else.
+    # Not read by the pipeline yet — `quality.looks_assumed` still infers the
+    # answer from K. Recorded now so the focal-selection step has somewhere to
+    # put its verdict.
     source: str = "measured"
 
     def save(self, path: str | Path) -> None:

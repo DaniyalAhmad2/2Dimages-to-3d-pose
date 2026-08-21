@@ -80,3 +80,16 @@ def sample_skeleton_3d():
         [-0.12, 0.03, 0.08],  # LEFT_ANKLE
         [0.12, 0.03, 0.08],   # RIGHT_ANKLE
     ], dtype=float)
+
+
+def rot_about(axis, deg):
+    """Rotation matrix of `deg` about `axis` (Rodrigues).
+
+    Shared so the orientation and retarget suites cannot drift apart on what
+    "rotate the subject 15 degrees" means.
+    """
+    a = np.radians(deg)
+    k = np.asarray(axis, float)
+    k = k / np.linalg.norm(k)
+    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
+    return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)

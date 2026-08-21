@@ -2,9 +2,9 @@
 
 The character's bone lengths are INVIOLABLE. Motion transfers as rotations only,
 so the mesh can never be stretched or sheared: the rig is fitted to the capture,
-not the other way round. Two-bone IK on the arms and legs puts the wrists and
-ankles as close to the captured joints as fixed-length bones allow, using the
-captured elbow/knee to choose which way the limb bends.
+not the other way round. Every bone aims at its own captured joint, so joint
+DIRECTIONS follow the capture exactly; two-bone IK is the occlusion fallback,
+recovering a limb from its end effector when the elbow or knee is missing.
 
 One uniform scale, fitted once per take, sizes the whole character to the
 subject. Being uniform it changes size, never shape.
@@ -127,11 +127,6 @@ _JOINT_FROM_RIG = {
 # is the mismatch the eye picks up first.
 _SCALE_WEIGHTS = {Joint.LEFT_KNEE: 2.0, Joint.RIGHT_KNEE: 2.0,
                   Joint.LEFT_ANKLE: 2.0, Joint.RIGHT_ANKLE: 2.0}
-
-# Below this fraction of the upper bone's length, the captured mid-joint is too
-# close to the root->target axis to say which way the limb bends, so the rig's
-# own rest bend takes over (blended, not switched, or the knee snaps sides).
-_POLE_EPS = 0.05
 
 
 def _align(a, b):
@@ -417,29 +412,20 @@ class Character:
         M[:3, 3] = head - R @ self.head[b]      # pin the head in place
         return M
 
-    def _pole(self, ub, base, root, u, mid, L1):
-        """Unit vector, perpendicular to u, giving the limb's bend direction."""
+    def _pole(self, ub, base, u):
+        """Unit vector, perpendicular to u, giving the limb's bend direction.
+
+        The rig's own rest bend is the only source available: IK now runs
+        exclusively when the captured mid joint is MISSING (see
+        `_skin_matrices`), so there is nothing else to aim the bend at.
+        """
         rest = base[:3, :3] @ self._rest_pole[ub]
         rest = rest - np.dot(rest, u) * u
         n_rest = np.linalg.norm(rest)
-        rest = rest / n_rest if n_rest > 1e-9 else _perp(u)
-        if mid is None:
-            return rest
-        v = (mid - root) - np.dot(mid - root, u) * u
-        n = float(np.linalg.norm(v))
-        tau = _POLE_EPS * L1
-        if n < 1e-12 or tau < 1e-12:
-            return rest
-        # blend rather than switch: a hard cutoff makes the knee snap sides
-        # frame to frame whenever the limb passes near-straight
-        t = float(np.clip((n - tau) / tau, 0.0, 1.0))
-        w = (1.0 - t) * rest + t * (v / n)
-        w = w - np.dot(w, u) * u
-        nw = np.linalg.norm(w)
-        return w / nw if nw > 1e-9 else rest
+        return rest / n_rest if n_rest > 1e-9 else _perp(u)
 
-    def _solve_ik(self, ub, lb, base, mid, end):
-        """Two-bone IK with FIXED bone lengths.
+    def _solve_ik(self, ub, lb, base, end):
+        """Two-bone IK with FIXED bone lengths — the OCCLUSION path.
 
         Returns (mid_target, end_target) to feed straight through `_bone_fk`:
         both are exactly one bone length from their respective roots, so the
@@ -456,7 +442,7 @@ class Character:
             return None
         u = d_vec / d
         dc = float(np.clip(d, abs(L1 - L2) + 1e-6, L1 + L2 - 1e-6))
-        w = self._pole(ub, base, root, u, mid, L1)
+        w = self._pole(ub, base, u)
         cos_a = float(np.clip((dc * dc + L1 * L1 - L2 * L2) / (2.0 * dc * L1), -1.0, 1.0))
         sin_a = float(np.sqrt(max(0.0, 1.0 - cos_a * cos_a)))
         knee = root + L1 * (cos_a * u + sin_a * w)
@@ -552,10 +538,10 @@ class Character:
                 # by the (fitted, ~2%) proportion mismatch instead of landing
                 # exactly.
                 lb, mid_j, end_j = self._ik[b]
-                if resolve(mid_j) is None:
+                if not valid[int(mid_j)]:              # mid joint occluded
                     target = resolve(end_j)
                     if target is not None:
-                        sol = self._solve_ik(b, lb, base, None, target)
+                        sol = self._solve_ik(b, lb, base, target)
                         if sol is not None:
                             end, solved[lb] = sol
             if end is None and b in self._direct:

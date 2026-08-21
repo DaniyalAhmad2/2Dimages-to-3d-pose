@@ -100,6 +100,26 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
     return dropped
 
 
+# Above this share of keypoints rejected, the cause is the calibration rather
+# than the detector, and the user has no way to tell those apart from the
+# symptoms (gaps in the 2D views, a sparse 3D pose).
+_REJECT_NOTE_FRAC = 0.15
+
+
+def rejection_note(dropped: int, n_frames: int) -> str:
+    """One sentence for the user about keypoints the cross-view check threw
+    away, or "" when the amount is unremarkable."""
+    total = max(1, n_frames * NUM_JOINTS)
+    frac = dropped / total
+    if frac < _REJECT_NOTE_FRAC:
+        return ""
+    return (f"{dropped} keypoints ({frac:.0%}) were rejected because the two "
+            f"views disagree about where they are. The detector found them; "
+            f"the calibration is what says they cannot both be right. Expect "
+            f"gaps in the 2D views and a sparse 3D pose — recalibrating with "
+            f"the markers clearly visible in both cameras is what fixes it.")
+
+
 def triangulate_project(project: ProjectData, rig: CalibratedRig,
                         validate: bool = True) -> int:
     """Fill each frame's raw pose3d from its two 2D views.
@@ -135,15 +155,20 @@ def fit_project(project: ProjectData, bone_lengths=None,
     # triangulation and carry on. The import dialog wraps this in a blanket
     # except, so anything raised here used to surface as "Import failed" with
     # every other frame's work discarded.
-    per_frame = []
+    per_frame, failed, first_error = [], 0, None
     for f in project.frames:
         try:
             per_frame.append(
                 fit_bone_lengths(f.pose3d, bone_lengths, fill_missing=False))
-        except Exception:
-            import traceback
-            traceback.print_exc()
+        except Exception as e:
+            # A bad calibration makes this systematic, not sporadic — printing
+            # a traceback per frame would bury the log in hundreds of copies.
+            failed += 1
+            first_error = first_error or f"{type(e).__name__}: {e}"
             per_frame.append(np.asarray(f.pose3d, float))
+    if failed:
+        print(f"bone fit fell back to the raw triangulation on {failed}/"
+              f"{len(project.frames)} frames; first was {first_error}")
     fitted = np.stack(per_frame) if per_frame else raw
     if smooth and len(fitted) > 1:
         fitted = smooth_temporal(fitted, alpha=alpha)

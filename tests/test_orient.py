@@ -4,12 +4,11 @@ import numpy as np
 
 from pose3d.core.skeleton import Joint
 from pose3d.geometry.orient import _frame_up, de_tilt_matrix, sequence_up
-from tests.synth import sample_skeleton_3d
+from tests.synth import rot_about, sample_skeleton_3d
 
 
 def _rotX(deg):
-    a = np.radians(deg)
-    return np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
+    return rot_about([1, 0, 0], deg)
 
 
 def _updown_tilt(p):

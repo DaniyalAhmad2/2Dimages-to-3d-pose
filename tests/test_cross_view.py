@@ -80,9 +80,19 @@ def test_triangulate_reports_what_it_threw_away():
     assert triangulate_project(data, rig) == 1
 
 
-def test_the_import_note_only_fires_when_it_matters():
-    from pose3d.ui.import_dialog import _rejection_note
-    assert _rejection_note(0, 10) == ""
-    assert _rejection_note(5, 10) == ""                  # 3%: normal occlusion
-    note = _rejection_note(60, 10)                       # 40%: something is wrong
+def test_the_rejection_note_only_fires_when_it_matters():
+    """One note, owned by the pipeline that owns the policy, so the import
+    dialog and the recalculate status line cannot drift apart."""
+    from pose3d.pipeline import rejection_note
+    assert rejection_note(0, 10) == ""
+    assert rejection_note(5, 10) == ""                   # 3%: normal occlusion
+    note = rejection_note(60, 10)                        # 40%: something is wrong
     assert "40%" in note and "calibration" in note.lower()
+
+
+def test_an_uncalibrated_import_still_reports_a_count():
+    """Regression guard: `dropped` used to be bound only inside the
+    `if rig is not None` branch, so importing without a calibration raised
+    NameError into the dialog's blanket handler and showed "Import failed"."""
+    from pose3d.pipeline import rejection_note
+    assert rejection_note(0, 0) == ""      # no frames, no calibration, no crash

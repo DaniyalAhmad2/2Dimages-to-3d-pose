@@ -64,26 +64,6 @@ class _FilePicker(QWidget):
 
 
 
-def _rejection_note(dropped: int, n_frames: int) -> str:
-    """Explain keypoints thrown away by the cross-view check.
-
-    A poor calibration makes the two views disagree, so good detections are
-    rejected as inconsistent — and because the check NaNs them out, the result
-    looks exactly like the detector failing: gaps in the 2D views and an empty
-    3D preview. Say which it was.
-    """
-    from pose3d.core.skeleton import NUM_JOINTS
-    total = max(1, n_frames * NUM_JOINTS)
-    frac = dropped / total
-    if frac < 0.15:
-        return ""
-    return (f"{dropped} keypoints ({frac:.0%}) were rejected because the two "
-            f"views disagree about where they are. The detector found them; "
-            f"the calibration is what says they cannot both be right. Expect "
-            f"gaps in the 2D views and a sparse 3D pose — recalibrating with "
-            f"the markers clearly visible in both cameras is what fixes it.")
-
-
 class ImportDialog(QDialog):
     def __init__(self, parent=None, projects_root: str | None = None):
         super().__init__(parent)
@@ -226,6 +206,7 @@ class ImportDialog(QDialog):
                 prog.setValue(i + 1); _pe()
 
             # reconstruct if calibrated
+            dropped = 0
             if rig is not None:
                 prog.setLabelText("Reconstructing 3D…"); _pe()
                 from pose3d.pipeline import fit_project, triangulate_project
@@ -237,7 +218,8 @@ class ImportDialog(QDialog):
             prog.close()
             self.result_folder = str(folder)
             msg = f"Imported {len(project.frames)} frames.\n{cal.message}"
-            note = _rejection_note(dropped, len(project.frames))
+            from pose3d.pipeline import rejection_note
+            note = rejection_note(dropped, len(project.frames))
             if note:
                 msg += "\n\n" + note
             QMessageBox.information(self, "Done", msg)

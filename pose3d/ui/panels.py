@@ -37,20 +37,28 @@ def accuracy_pct(err_px: float) -> float:
     return float(np.clip(100.0 * np.exp(-err_px / 6.0), 0.0, 100.0))
 
 
-def acc_color(pct: float) -> QColor:
+def acc_band(pct: float) -> str:
+    """Accuracy band key: "green" | "amber" | "red".
+
+    The single source of banding. `acc_color`, `acc_label` and the camera
+    views' joint dots all derive from this, so a legend reword cannot silently
+    change what colour a joint is drawn in.
+    """
     if np.isnan(pct):
-        return COL_RED
-    if pct >= ACC_HIGH:
-        return COL_GREEN
-    if pct >= ACC_MED:
-        return COL_AMBER
-    return COL_RED
+        return "red"
+    return "green" if pct >= ACC_HIGH else ("amber" if pct >= ACC_MED else "red")
+
+
+_BAND_COLORS = {"green": COL_GREEN, "amber": COL_AMBER, "red": COL_RED}
+_BAND_LABELS = {"green": "High", "amber": "Medium", "red": "Low"}
+
+
+def acc_color(pct: float) -> QColor:
+    return _BAND_COLORS[acc_band(pct)]
 
 
 def acc_label(pct: float) -> str:
-    if np.isnan(pct):
-        return "Low"
-    return "High" if pct >= ACC_HIGH else ("Medium" if pct >= ACC_MED else "Low")
+    return _BAND_LABELS[acc_band(pct)]
 
 
 def _section(title: str) -> QLabel:
@@ -205,7 +213,10 @@ class Sidebar(QWidget):
         lay.addWidget(self.calib_warn)
         # which vertical the 3D view/export is levelled against — the answer
         # to "is the model tilted, or is that what the images show?"
-        self.vertical_ref = QLabel("")
+        self.vertical_ref = QLabel(
+            "Vertical: estimated from the subject, because the marker tags do "
+            "not agree on which way is up. A lean held through the whole take "
+            "reads as upright.")
         self.vertical_ref.setWordWrap(True)
         self.vertical_ref.setStyleSheet("color:#8a91a3; font-size:11px;")
         self.vertical_ref.hide()
@@ -266,11 +277,6 @@ class Sidebar(QWidget):
         self.calib_warn.setToolTip("\n\n".join(warnings))
         self.calib_warn.setVisible(bool(warnings))
 
-    def set_vertical_source(self, source):
-        """Say which vertical the 3D view is levelled against."""
-        if source == "estimated":
-            self.vertical_ref.setText(
-                "Vertical: estimated from the subject, because the marker tags "
-                "do not agree on which way is up. A lean held through the whole "
-                "take reads as upright.")
-        self.vertical_ref.setVisible(source == "estimated")
+    def show_levelling_note(self, on: bool):
+        """Show how the 3D view decided which way is up (see orient.py)."""
+        self.vertical_ref.setVisible(bool(on))

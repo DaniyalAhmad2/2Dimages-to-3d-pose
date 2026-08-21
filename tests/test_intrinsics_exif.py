@@ -78,10 +78,11 @@ def test_the_default_focal_is_the_size_guess_not_exif(tmp_path):
     img = np.zeros((4080, 3072, 3), np.uint8)
     p = _jpeg_with_f35(tmp_path / "shot.jpg", (3072, 4080), 24)
 
-    for got in (_approx_intrinsics(img), _approx_intrinsics(img, p)):
-        assert got.source == "assumed"
-        assert got.K[0, 0] == 4080.0
-        assert looks_assumed(got)
+    assert focal_from_exif(p) is not None      # EXIF is readable...
+    got = _approx_intrinsics(img)              # ...and deliberately not used
+    assert got.source == "assumed"
+    assert got.K[0, 0] == 4080.0
+    assert looks_assumed(got)
 
 
 def test_source_survives_a_save_load_round_trip(tmp_path):

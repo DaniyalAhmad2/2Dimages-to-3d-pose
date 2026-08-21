@@ -14,7 +14,7 @@ import pytest
 
 from pose3d.core.skeleton import BONES, Joint
 from tests.gates import needs_character
-from tests.synth import sample_skeleton_3d
+from tests.synth import rot_about as _rot_about, sample_skeleton_3d
 
 pytestmark = needs_character()
 
@@ -223,14 +223,6 @@ def test_ik_pole_degenerate_falls_back_to_rest_bend():
 
 
 # --- the neck --------------------------------------------------------------
-
-def _rot_about(axis, deg):
-    """Rotation matrix about a unit axis (Rodrigues)."""
-    a = np.radians(deg)
-    k = axis / np.linalg.norm(axis)
-    K = np.array([[0, -k[2], k[1]], [k[2], 0, -k[0]], [-k[1], k[0], 0]])
-    return np.eye(3) + np.sin(a) * K + (1 - np.cos(a)) * (K @ K)
-
 
 def _nose_convention(ch, sub):
     """Move the subject's HEAD point from the rig's skull convention to the
