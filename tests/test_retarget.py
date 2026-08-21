@@ -353,6 +353,43 @@ def test_eyes_stand_in_when_an_ear_is_hidden():
     assert ch._head_basis(bare) is None
 
 
+def test_without_face_keypoints_the_nose_still_bends_the_neck():
+    """The legacy guarantee, re-asserted: projects saved before face
+    keypoints existed (and the manual detector) drive the neck by aiming at
+    the bias-corrected canonical HEAD. Regression guard — routing the neck to
+    the ear midpoint alone made this resolve to nothing, so the neck was
+    welded to the chest again on legacy data."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    neck = sub[int(Joint.NECK)]
+    torso = neck - sub[int(Joint.PELVIS)]
+    t_hat = torso / np.linalg.norm(torso)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+
+    # place the nose at the anatomical neutral, then nod it forward
+    d = sub[int(Joint.HEAD)] - neck
+    from pose3d.geometry.character import _NOSE_PITCH
+    cur = np.arccos(np.clip(np.dot(d / np.linalg.norm(d), t_hat), -1, 1))
+    cands = [_rot_about(right, s * np.degrees(_NOSE_PITCH - cur)) @ d
+             for s in (1.0, -1.0)]
+    neutral_d = max(cands, key=lambda c: np.arccos(np.clip(
+        np.dot(c / np.linalg.norm(c), t_hat), -1, 1)))
+    neutral = sub.copy(); neutral[int(Joint.HEAD)] = neck + neutral_d
+    nod_d = max([_rot_about(right, s * 25.0) @ neutral_d for s in (1.0, -1.0)],
+                key=lambda c: np.arccos(np.clip(
+                    np.dot(c / np.linalg.norm(c), t_hat), -1, 1)))
+    nod = sub.copy(); nod[int(Joint.HEAD)] = neck + nod_d
+
+    def neck_rot(pose):
+        skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1))
+        rel = skin[ch.role["neck"]][:3, :3] @ skin[ch.role["chest"]][:3, :3].T
+        return np.degrees(np.arccos(np.clip((np.trace(rel) - 1) / 2, -1, 1)))
+
+    assert neck_rot(nod) - neck_rot(neutral) > 15.0, (
+        "the neck ignored a 25 deg nose nod with no face keypoints")
+
+
 def test_no_face_keypoints_leaves_the_head_riding_the_neck():
     """Old projects and the manual detector supply none; behaviour must be
     exactly what it was before face keypoints existed."""

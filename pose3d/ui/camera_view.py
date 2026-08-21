@@ -14,7 +14,8 @@ from PySide6.QtWidgets import (
     QHBoxLayout, QLabel, QToolButton, QVBoxLayout, QWidget,
 )
 
-from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, rag_status
+from pose3d.core.skeleton import (
+    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS, rag_status)
 from pose3d.ui.panels import (
     COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_band, acc_label,
     accuracy_pct)
@@ -28,6 +29,16 @@ RAG_COLORS = {
     "corrected": COL_PURPLE,
 }
 
+# The face keypoints (eyes/ears) that orient the character's head. Drawn
+# smaller and in one fixed accent colour: they are not part of the skeleton,
+# carry no accuracy banding, and exist to be nudged when the head points the
+# wrong way. Their item ids are offset by NUM_JOINTS — the single convention
+# the model and the correction stack share. The NOSE face point is not drawn:
+# it is the same physical detection as the canonical HEAD dot, which stays
+# the one to drag.
+FACE_COLOR = QColor(94, 200, 245)
+FACE_KP_IDS = tuple(range(NUM_JOINTS + 1, NUM_JOINTS + NUM_HEAD_KP))
+
 
 class _JointSignals(QObject):
     moved = Signal(int, QPointF)     # joint id, new scene pos (live, during drag)
@@ -37,8 +48,9 @@ class _JointSignals(QObject):
 class JointItem(QGraphicsEllipseItem):
     R = 6.0
 
-    def __init__(self, joint_id: int):
-        super().__init__(-self.R, -self.R, 2 * self.R, 2 * self.R)
+    def __init__(self, joint_id: int, radius: float | None = None):
+        r = self.R if radius is None else radius
+        super().__init__(-r, -r, 2 * r, 2 * r)
         self.joint_id = joint_id
         self.signals = _JointSignals()
         self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
@@ -86,6 +98,7 @@ class CameraView(QGraphicsView):
         self.setCursor(Qt.CursorShape.OpenHandCursor)   # hint: draggable to pan
         self._pixmap_item = None
         self._joints: list[JointItem] = []
+        self._face: list[JointItem] = []       # eyes/ears, ids NUM_JOINTS+1..
         self._bones: list[QGraphicsLineItem] = []
         self._show_joints = True
         self._show_bones = True
@@ -109,6 +122,16 @@ class CameraView(QGraphicsView):
             item.signals.released.connect(self._on_released)      # commit
             self._scene.addItem(item)
             self._joints.append(item)
+        for jid in FACE_KP_IDS:
+            item = JointItem(jid, radius=4.0)
+            item.setBrush(QBrush(FACE_COLOR))
+            k = jid - NUM_JOINTS
+            item.setToolTip(f"<b>{HEAD_KP_NAMES[k].upper()}</b><br>"
+                            f"orients the character's head")
+            item.signals.released.connect(self._on_released)      # commit
+            item.setVisible(False)
+            self._scene.addItem(item)
+            self._face.append(item)
 
     def set_image(self, path: str):
         pm = QPixmap(path)
@@ -122,10 +145,25 @@ class CameraView(QGraphicsView):
             self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_pose(self, xy: np.ndarray, scores: np.ndarray,
-                 corrected: np.ndarray | None = None):
-        """Place joints from (NUM_JOINTS,2) pixel coords + scores."""
+                 corrected: np.ndarray | None = None,
+                 head_xy: np.ndarray | None = None):
+        """Place joints from (NUM_JOINTS,2) pixel coords + scores.
+
+        `head_xy` is the optional (NUM_HEAD_KP,2) face keypoints; eyes and
+        ears become small draggable dots (the nose stays the HEAD dot).
+        """
         self._scores = np.asarray(scores, float)
         self._corrected = corrected
+        for item in self._face:
+            k = item.joint_id - NUM_JOINTS
+            q = None if head_xy is None else head_xy[k]
+            if q is None or np.isnan(q).any():
+                item.setVisible(False)
+                continue
+            item.setVisible(self._show_joints)
+            item.signals.blockSignals(True)
+            item.setPos(float(q[0]), float(q[1]))
+            item.signals.blockSignals(False)
         for j, item in enumerate(self._joints):
             p = xy[j]
             if np.isnan(p).any():
@@ -200,7 +238,7 @@ class CameraView(QGraphicsView):
 
     def set_show_joints(self, on: bool):
         self._show_joints = on
-        for it in self._joints:
+        for it in self._joints + self._face:
             it.setVisible(on and not np.isnan(it.pos().x()))
         self._refresh_bones()
 

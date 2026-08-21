@@ -12,7 +12,9 @@ from PySide6.QtCore import QObject, Signal
 
 from pose3d.core.corrections import CorrectionStack
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
-from pose3d.core.skeleton import NUM_JOINTS
+from pose3d.core.skeleton import Joint, NUM_JOINTS
+
+HEAD_JOINT = int(Joint.HEAD)
 from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
 )
@@ -116,9 +118,35 @@ class ProjectModel(QObject):
 
     # --- geometry ---
     def _resolve_joint(self, joint: int) -> None:
+        """Re-triangulate one edited point. `joint >= NUM_JOINTS` addresses
+        face keypoint `joint - NUM_JOINTS` (the camera views and the
+        correction stack share this convention)."""
         if self.rig is None:
             return
         f = self.frame()
+        if joint >= NUM_JOINTS:
+            k = joint - NUM_JOINTS
+            f.head3d[k] = triangulate_one(
+                f.head2d[CAM_LEFT][k], f.head2d[CAM_RIGHT][k],
+                self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
+                self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+            # face points have no bones: no re-fit, just re-orient the head
+            self.pose3dChanged.emit(f.fitted3d, f.head3d)
+            self.accuracyChanged.emit(self._accuracy(self.current))
+            return
+        if joint == HEAD_JOINT:
+            # The canonical HEAD and the nose face point are the same physical
+            # detection, so a nose drag must move both — otherwise the head's
+            # orientation (built from nose + ears) ignores the drag entirely.
+            # Synced here rather than as a second stack edit, so one Ctrl+Z
+            # reverses the whole drag (undo re-resolves and re-syncs).
+            for cam in (CAM_LEFT, CAM_RIGHT):
+                if not np.isnan(f.head2d[cam]).all():   # cam has face points
+                    f.head2d[cam][0] = f.kp2d[cam][joint]
+            f.head3d[0] = triangulate_one(
+                f.head2d[CAM_LEFT][0], f.head2d[CAM_RIGHT][0],
+                self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
+                self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
         pl = f.kp2d[CAM_LEFT][joint]
         pr = f.kp2d[CAM_RIGHT][joint]
         xyz = triangulate_one(

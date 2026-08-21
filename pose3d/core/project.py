@@ -74,6 +74,13 @@ class Frame:
         self.scores[cam][joint] = score
         self.corrected[cam][joint] = corrected
 
+    def set_head_kp(self, cam: str, k: int, x: float, y: float,
+                    score: float = 1.0) -> None:
+        """Face keypoint k (nose/eyes/ears). No corrected flag: face points
+        are never auto-dropped, so there is nothing to protect them from."""
+        self.head2d[cam][k] = (x, y)
+        self.head_scores[cam][k] = score
+
 
 @dataclass
 class Correction:

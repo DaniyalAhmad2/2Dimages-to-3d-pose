@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from pose3d.core.project import Correction, Frame
+from pose3d.core.skeleton import NUM_JOINTS
 
 
 @dataclass
@@ -34,12 +35,23 @@ class CorrectionStack:
 
     def apply(self, frame_id: str, cam: str, joint: int,
               x: float, y: float, ts: str = "") -> Edit:
+        """`joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
+        (nose/eyes/ears) — the one index convention shared with the camera
+        views and the SQLite log, whose integer column simply extends."""
         f = self.frames_by_id[frame_id]
-        old = tuple(f.kp2d[cam][joint])
-        edit = Edit(frame_id, cam, joint, (float(old[0]), float(old[1])),
-                    (float(x), float(y)), float(f.scores[cam][joint]),
-                    bool(f.corrected[cam][joint]))
-        f.set_kp(cam, joint, x, y, score=1.0, corrected=True)
+        if joint >= NUM_JOINTS:
+            k = joint - NUM_JOINTS
+            old = tuple(f.head2d[cam][k])
+            edit = Edit(frame_id, cam, joint, (float(old[0]), float(old[1])),
+                        (float(x), float(y)), float(f.head_scores[cam][k]),
+                        False)
+            f.set_head_kp(cam, k, x, y, score=1.0)
+        else:
+            old = tuple(f.kp2d[cam][joint])
+            edit = Edit(frame_id, cam, joint, (float(old[0]), float(old[1])),
+                        (float(x), float(y)), float(f.scores[cam][joint]),
+                        bool(f.corrected[cam][joint]))
+            f.set_kp(cam, joint, x, y, score=1.0, corrected=True)
         self._undo.append(edit)
         self._redo.clear()
         self.log.append(Correction(frame_id, cam, joint,
@@ -57,9 +69,14 @@ class CorrectionStack:
             return None
         e = self._undo.pop()
         f = self.frames_by_id[e.frame_id]
-        f.kp2d[e.cam][e.joint] = e.old_xy
-        f.scores[e.cam][e.joint] = e.old_score
-        f.corrected[e.cam][e.joint] = e.old_corrected
+        if e.joint >= NUM_JOINTS:
+            k = e.joint - NUM_JOINTS
+            f.head2d[e.cam][k] = e.old_xy
+            f.head_scores[e.cam][k] = e.old_score
+        else:
+            f.kp2d[e.cam][e.joint] = e.old_xy
+            f.scores[e.cam][e.joint] = e.old_score
+            f.corrected[e.cam][e.joint] = e.old_corrected
         self._redo.append(e)
         return e
 
@@ -68,7 +85,11 @@ class CorrectionStack:
             return None
         e = self._redo.pop()
         f = self.frames_by_id[e.frame_id]
-        f.set_kp(e.cam, e.joint, e.new_xy[0], e.new_xy[1],
-                 score=1.0, corrected=True)
+        if e.joint >= NUM_JOINTS:
+            f.set_head_kp(e.cam, e.joint - NUM_JOINTS,
+                          e.new_xy[0], e.new_xy[1], score=1.0)
+        else:
+            f.set_kp(e.cam, e.joint, e.new_xy[0], e.new_xy[1],
+                     score=1.0, corrected=True)
         self._undo.append(e)
         return e

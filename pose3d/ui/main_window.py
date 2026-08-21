@@ -444,7 +444,10 @@ class MainWindow(QMainWindow):
     # --- refresh ---
     def _on_frame_changed(self, idx):
         self._refresh_views()
-        self.view3d.set_pose(self.model.frame().fitted3d)
+        f = self.model.frame()
+        # head3d must ride along or the character's head snaps back to riding
+        # the neck on every frame change
+        self.view3d.set_pose(f.fitted3d, f.head3d)
 
     def _refresh_views(self):
         """Full refresh: (re)load the frame images AND reposition overlays."""
@@ -466,7 +469,8 @@ class MainWindow(QMainWindow):
         """Reposition/recolour the joint overlays from the current model state."""
         f = self.model.frame()
         for cam, panel in ((CAM_LEFT, self.cam_left), (CAM_RIGHT, self.cam_right)):
-            panel.view.set_pose(f.kp2d[cam], f.scores[cam], f.corrected[cam])
+            panel.view.set_pose(f.kp2d[cam], f.scores[cam], f.corrected[cam],
+                                head_xy=f.head2d[cam])
 
     def _refresh_history(self):
         self.btn_undo.setEnabled(self.model.stack.can_undo())

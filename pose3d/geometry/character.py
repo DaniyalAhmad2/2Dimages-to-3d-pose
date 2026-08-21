@@ -29,6 +29,14 @@ _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 _MID = "MID"        # midpoint(pelvis, neck) — the torso split point
 _EAR_MID = "EAR_MID"  # midpoint of the ears — a real point on the skull axis
 
+# LEGACY fallback only — used when a frame has no face keypoints (projects
+# saved before they existed, or the manual detector). The canonical HEAD is
+# then the NOSE, which sits ~45 deg forward of the torso line on real
+# captures, so aiming the neck straight at it would pitch the head down
+# permanently; _head_aim_target rotates the target back by this anatomical
+# offset. Dies when face keypoints are universal.
+_NOSE_PITCH = np.radians(45.0)
+
 # Pipeline role -> candidate bone names, tried in order. Covers the legacy
 # Blender meta-rig (what we ship), Rigify, and Mixamo/UE naming so a replacement
 # rig usually needs no configuration at all. A rig can also carry an explicit
@@ -205,6 +213,20 @@ class Character:
         self._rest_torso = (d / n if n > 1e-9 and not np.isnan(d).any()
                             else self.tail[self.hips_idx] - self.head[self.hips_idx])
         self._rest_head = self._rest_head_basis()
+        # The neck BONE's rest angle off the torso line, for the legacy
+        # no-face-keypoints fallback: _bone_fk aims the bone axis at the
+        # target, so this is the angle that leaves the neck at rest for a
+        # subject holding the anatomical neutral (_NOSE_PITCH).
+        self._rest_head_pitch = 0.0
+        if "neck" in self.role:
+            nb = self.role["neck"]
+            axis = self.tail[nb] - self.head[nb]
+            td = rj[int(Joint.NECK)] - rj[int(Joint.PELVIS)]
+            an, tn = np.linalg.norm(axis), np.linalg.norm(td)
+            if an > 1e-9 and tn > 1e-9 and np.isfinite(axis).all() \
+                    and np.isfinite(td).all():
+                cosr = float(np.clip(np.dot(axis / an, td / tn), -1.0, 1.0))
+                self._rest_head_pitch = float(np.arccos(cosr))
         self._scale = None          # uniform scale, set by fit_to_subject
 
     # --- rig introspection -------------------------------------------------
@@ -335,6 +357,38 @@ class Character:
         self._scale = None
 
     # --- posing ------------------------------------------------------------
+    def _head_aim_target(self, J, pelvis):
+        """LEGACY neck target when a frame has no face keypoints.
+
+        The canonical HEAD is the nose; its direction off the torso line is
+        shifted so the anatomical neutral (_NOSE_PITCH) lands on the rig's own
+        rest head pitch, clamped at the torso line (with one head point,
+        "looking up" cannot be told apart from skull-convention data, so it
+        saturates at neutral). Computed in pose space — angles survive the
+        rigid + uniform-scale to_rig map. This is exactly the behaviour of the
+        last build before face keypoints existed, so old projects and the
+        manual detector are unchanged.
+        """
+        h, n = J(Joint.HEAD), J(Joint.NECK)
+        if h is None or n is None or pelvis is None \
+                or not np.isfinite(np.asarray(pelvis)).all():
+            return None                    # nothing to correct against: inherit
+        d = h - n
+        t = n - pelvis
+        dn, tn = float(np.linalg.norm(d)), float(np.linalg.norm(t))
+        if dn < 1e-9 or tn < 1e-9:
+            return None
+        t_hat = t / tn
+        cos_th = float(np.clip(np.dot(d / dn, t_hat), -1.0, 1.0))
+        theta = float(np.arccos(cos_th))
+        want = max(self._rest_head_pitch + theta - _NOSE_PITCH, 0.0)
+        perp = d / dn - cos_th * t_hat     # the plane the nod happens in
+        pn = float(np.linalg.norm(perp))
+        if pn < 1e-9:
+            return n + dn * t_hat          # collinear: corrected angle is 0
+        dir_c = np.cos(want) * t_hat + np.sin(want) * (perp / pn)
+        return n + dn * dir_c
+
     def _head_basis(self, head_rig):
         """3x3 orientation of the head from the face keypoints, or None.
 
@@ -541,7 +595,12 @@ class Character:
                 a = J(Joint.NECK)
                 return None if a is None else to_rig((a + pelvis) / 2.0)
             if spec == _EAR_MID:
-                return None if ear_mid is None else to_rig(ear_mid)
+                if ear_mid is not None:
+                    return to_rig(ear_mid)
+                # no face keypoints this frame: legacy bias-corrected aim at
+                # the canonical HEAD, so the neck still follows a nose drag
+                p = self._head_aim_target(J, pelvis)
+                return None if p is None else to_rig(p)
             p = J(spec)
             return None if p is None else to_rig(p)
 
