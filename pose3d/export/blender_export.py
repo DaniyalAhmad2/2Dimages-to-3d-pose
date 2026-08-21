@@ -33,7 +33,8 @@ class ExportResult:
         return self.returncode == 0 and "POSE3D_EXPORT_OK" in self.stdout
 
 
-def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
+def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
+                           head3d: np.ndarray | None = None):
     """Per-frame posed bone matrices, computed with the SAME skinning the live
     3D view uses, so the exported character matches the preview pose-for-pose.
 
@@ -75,12 +76,15 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int):
     ch.fit_to_subject(poses3d @ R)
 
     bone_frames = []
-    for pose in poses3d:
+    for i, pose in enumerate(poses3d):
         valid = ~np.isnan(pose).any(1)
         if not valid.any():
             bone_frames.append(None); continue
         up = pose @ R                       # upright; centring is irrelevant here
-        bone_frames.append(ch.pose_bone_matrices(up, valid))
+        # the face keypoints take the same rotation, so the exported head is
+        # oriented exactly as the preview shows it
+        hp = None if head3d is None else np.asarray(head3d[i], float) @ R
+        bone_frames.append(ch.pose_bone_matrices(up, valid, hp))
     if all(b is None for b in bone_frames):
         return None, None
     return bone_frames, ch.bone_names
@@ -113,6 +117,7 @@ def export_animation(
     timeout: int = 600,
     display_frame: int = 0,
     character: str | None = "__bundled__",
+    head3d: np.ndarray | None = None,
     on_line=None,
 ) -> ExportResult:
     if character == "__bundled__":
@@ -124,7 +129,8 @@ def export_animation(
     doc["display_frame"] = int(display_frame)   # which pose the turntable spins
     if character and Path(character).exists():
         # drive the rig with the exact skinning the live view uses
-        bone_frames, bone_names = _character_bone_frames(poses3d, display_frame)
+        bone_frames, bone_names = _character_bone_frames(
+            poses3d, display_frame, head3d)
         if bone_frames is not None:
             doc["bone_frames"] = bone_frames
             doc["bone_names"] = bone_names

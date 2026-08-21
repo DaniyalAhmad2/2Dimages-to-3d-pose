@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pose3d.core.skeleton import NUM_JOINTS, rag_status
+from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS, rag_status
 
 
 @dataclass
@@ -21,6 +21,11 @@ class Detection:
     """Per-view detection result in canonical Joint order."""
     xy: np.ndarray       # (NUM_JOINTS, 2) pixel coords (NaN if not found)
     scores: np.ndarray   # (NUM_JOINTS,) confidence in [0, 1]
+    # Face keypoints (nose/eyes/ears), carried alongside rather than inside the
+    # canonical set so NUM_JOINTS stays 15. None from detectors that have no
+    # notion of a face (e.g. the manual one). See skeleton.extract_head.
+    head_xy: np.ndarray | None = None       # (NUM_HEAD_KP, 2)
+    head_scores: np.ndarray | None = None   # (NUM_HEAD_KP,)
 
     def rag(self) -> list[str]:
         return [rag_status(float(s)) if not np.isnan(s) else "red"
@@ -29,6 +34,10 @@ class Detection:
     def __post_init__(self):
         assert self.xy.shape == (NUM_JOINTS, 2), self.xy.shape
         assert self.scores.shape == (NUM_JOINTS,), self.scores.shape
+        if self.head_xy is not None:
+            assert self.head_xy.shape == (NUM_HEAD_KP, 2), self.head_xy.shape
+            assert self.head_scores.shape == (NUM_HEAD_KP,), \
+                self.head_scores.shape
 
 
 class KeypointDetector(ABC):

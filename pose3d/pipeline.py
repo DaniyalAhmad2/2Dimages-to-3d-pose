@@ -41,6 +41,9 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             det = detector.detect(img)
             frame.kp2d[cam] = det.xy
             frame.scores[cam] = det.scores
+            if det.head_xy is not None:
+                frame.head2d[cam] = det.head_xy
+                frame.head_scores[cam] = det.head_scores
 
 
 # Epipolar tolerance as a fraction of the image DIAGONAL. A flat 30 px was
@@ -135,6 +138,12 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     for frame in project.frames:
         frame.pose3d = triangulate_points(
             frame.kp2d[CAM_LEFT], frame.kp2d[CAM_RIGHT],
+            rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+            rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+        # the face points ride the same geometry; they are not cross-view
+        # validated or bone-fitted, they only orient the head
+        frame.head3d = triangulate_points(
+            frame.head2d[CAM_LEFT], frame.head2d[CAM_RIGHT],
             rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
             rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
     return dropped

@@ -21,7 +21,7 @@ import numpy as np
 from pose3d.core.project import (
     CAMERAS, Correction, Frame, ProjectData,
 )
-from pose3d.core.skeleton import NUM_JOINTS
+from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS
 
 PROJECT_JSON = "project.json"
 CORRECTIONS_DB = "corrections.sqlite"
@@ -33,10 +33,10 @@ def _arr_to_json(a: np.ndarray) -> list:
             for row in np.atleast_2d(a)]
 
 
-def _json_to_arr(data: list, cols: int) -> np.ndarray:
-    out = np.full((NUM_JOINTS, cols), np.nan, dtype=float)
-    for i, row in enumerate(data):
-        if i >= NUM_JOINTS:      # tolerate files saved with more joints (e.g. feet)
+def _json_to_arr(data: list, cols: int, rows: int = NUM_JOINTS) -> np.ndarray:
+    out = np.full((rows, cols), np.nan, dtype=float)
+    for i, row in enumerate(data or []):
+        if i >= rows:            # tolerate files saved with more joints (e.g. feet)
             break
         for j, v in enumerate(row):
             out[i, j] = np.nan if v is None else float(v)
@@ -47,10 +47,10 @@ def _vec_to_json(a: np.ndarray) -> list:
     return [None if np.isnan(v) else float(v) for v in np.asarray(a).ravel()]
 
 
-def _json_to_vec(data: list) -> np.ndarray:
-    out = np.full((NUM_JOINTS,), np.nan, dtype=float)
-    for i, v in enumerate(data):
-        if i >= NUM_JOINTS:
+def _json_to_vec(data: list, rows: int = NUM_JOINTS) -> np.ndarray:
+    out = np.full((rows,), np.nan, dtype=float)
+    for i, v in enumerate(data or []):
+        if i >= rows:
             break
         out[i] = np.nan if v is None else float(v)
     return out
@@ -120,6 +120,9 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             "pose3d": _arr_to_json(f.pose3d),
             "fitted3d": _arr_to_json(f.fitted3d),
             "corrected": {c: [bool(v) for v in f.corrected[c]] for c in CAMERAS},
+            "head2d": {c: _arr_to_json(f.head2d[c]) for c in CAMERAS},
+            "head_scores": {c: _vec_to_json(f.head_scores[c]) for c in CAMERAS},
+            "head3d": _arr_to_json(f.head3d),
         })
 
     (folder / PROJECT_JSON).write_text(json.dumps(doc, indent=2))
@@ -136,12 +139,18 @@ def load_project(folder: str | Path) -> ProjectData:
         fr = Frame(frame_id=fd["frame_id"],
                    images={c: _resolve_image(p, folder)
                            for c, p in fd.get("images", {}).items()})
+        # .get for the head keys: projects written before head keypoints
+        # existed have none, and must still load.
+        head2d, head_sc = fd.get("head2d") or {}, fd.get("head_scores") or {}
         for c in CAMERAS:
             fr.kp2d[c] = _json_to_arr(fd["kp2d"][c], 2)
             fr.scores[c] = _json_to_vec(fd["scores"][c])
             fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
+            fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
+            fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)
         fr.pose3d = _json_to_arr(fd["pose3d"], 3)
         fr.fitted3d = _json_to_arr(fd["fitted3d"], 3)
+        fr.head3d = _json_to_arr(fd.get("head3d"), 3, NUM_HEAD_KP)
         frames.append(fr)
 
     project = ProjectData(

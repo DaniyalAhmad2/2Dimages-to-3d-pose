@@ -110,10 +110,9 @@ def test_end_effectors_land_close_when_in_range():
 def test_posed_joints_match_captured_when_proportions_match():
     """With a matching build, every joint lands within 1% of body height.
 
-    HEAD is exempted with a wider band: the read-back is the head-bone mid
-    (a skull point), the capture is nose-convention, and the neck's bias
-    clamp deliberately holds a skull-convention subject at rest — a ~1.2%
-    offset by construction, not a defect.
+    HEAD keeps a wider band: the read-back is the head-bone MID (a point
+    inside the skull) while the capture's HEAD joint is the nose, so the two
+    are offset by construction rather than by error.
     """
     ch = _ch()
     sub = _subject_from_rig(ch)
@@ -224,86 +223,147 @@ def test_ik_pole_degenerate_falls_back_to_rest_bend():
 
 # --- the neck --------------------------------------------------------------
 
-def _nose_convention(ch, sub):
-    """Move the subject's HEAD point from the rig's skull convention to the
-    nose convention real captures use: ~45 deg forward of the torso line."""
-    from pose3d.geometry.character import _NOSE_PITCH
-    p = sub.copy()
-    neck = p[int(Joint.NECK)]
-    torso = neck - p[int(Joint.PELVIS)]
-    right = p[int(Joint.RIGHT_SHOULDER)] - p[int(Joint.LEFT_SHOULDER)]
-    d = p[int(Joint.HEAD)] - neck
-    cur = np.arccos(np.clip(np.dot(d / np.linalg.norm(d),
-                                   torso / np.linalg.norm(torso)), -1, 1))
-    # rotate whichever way about the shoulder axis actually lands the nose at
-    # the anatomical angle — "forward" depends on which way the rig faces
-    t_hat = torso / np.linalg.norm(torso)
-    best = None
-    for sign in (1.0, -1.0):
-        cand = _rot_about(right, sign * np.degrees(_NOSE_PITCH - cur)) @ d
-        th = np.arccos(np.clip(np.dot(cand / np.linalg.norm(cand), t_hat), -1, 1))
-        if best is None or abs(th - _NOSE_PITCH) < best[0]:
-            best = (abs(th - _NOSE_PITCH), cand)
-    p[int(Joint.HEAD)] = neck + best[1]
-    return p
+def _head_pts(ch, sub, right=None, fwd=None, up=None, scale=0.12):
+    """Face keypoints (nose, eyes, ears) for a head with a given orientation.
+
+    Built around the captured NECK so the basis is the only variable: `right`
+    is the ear-to-ear axis, `fwd` where the face points.
+    """
+    neck = sub[int(Joint.NECK)]
+    torso = neck - sub[int(Joint.PELVIS)]
+    up = up if up is not None else torso / np.linalg.norm(torso)
+    right = right if right is not None else np.array([1.0, 0.0, 0.0])
+    fwd = fwd if fwd is not None else np.cross(up, right)
+    right = right / np.linalg.norm(right)
+    fwd = fwd / np.linalg.norm(fwd)
+    centre = neck + up * scale * 2.0
+    # COCO's left_* are the SUBJECT's left, and `right` points to their right,
+    # so the left ear/eye sit at -right.
+    return np.array([
+        centre + fwd * scale,                                # nose
+        centre + fwd * scale * 0.8 - right * scale * 0.3,    # left eye
+        centre + fwd * scale * 0.8 + right * scale * 0.3,    # right eye
+        centre - right * scale * 0.5,                        # left ear
+        centre + right * scale * 0.5,                        # right ear
+    ])
 
 
-def _neck_rotation_vs_chest(ch, pose):
-    skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1))
-    Rn = skin[ch.role["neck"]][:3, :3]
-    Rc = skin[ch.role["chest"]][:3, :3]
-    rel = Rn @ Rc.T
-    return np.degrees(np.arccos(np.clip((np.trace(rel) - 1) / 2, -1, 1)))
+def _head_dirs(ch, pose, head_pts):
+    """(right, forward) of the POSED head bone, in capture space."""
+    skin, pelvis, scale, Rz = ch._skin_matrices(
+        pose, ~np.isnan(pose).any(1), head_pts)
+    R = skin[ch.role["head"]][:3, :3]
+    rest = ch._rest_head_basis()
+    world = R @ rest                       # rest basis carried into the pose
+    return Rz.T @ world[:, 0], Rz.T @ world[:, 1]
 
 
-def test_neck_is_at_rest_for_a_neutral_nose():
-    """A nose held at the anatomical neutral must leave the neck at rest —
-    the bias correction exists so real captures do not stare at the floor."""
+def test_the_head_follows_the_face_keypoints():
+    """The headline fix: two ears carry an orientation a lone nose cannot.
+
+    Turning the head about the torso axis must turn the character's head — the
+    case the old single-point aim collapsed to almost nothing (the captured
+    nose direction moved ~20 deg across a take where the head visibly turned
+    far more).
+    """
     ch = _ch()
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
-    assert _neck_rotation_vs_chest(ch, _nose_convention(ch, sub)) < 6.0
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    axis = torso / np.linalg.norm(torso)
+
+    straight = _head_pts(ch, sub)
+    turned = _head_pts(ch, sub, right=_rot_about(axis, 40.0) @ np.array([1., 0, 0]))
+
+    _, f0 = _head_dirs(ch, sub, straight)
+    _, f1 = _head_dirs(ch, sub, turned)
+    turn = np.degrees(np.arccos(np.clip(np.dot(f0, f1), -1, 1)))
+    assert 30.0 < turn < 50.0, f"head turned {turn:.1f} deg for a 40 deg turn"
 
 
-def test_nodding_the_nose_bends_the_neck():
-    """Regression guard for the welded neck: neck/head were in no driving
-    table, so the head inherited the chest verbatim and dragging the nose did
-    nothing at all."""
+def test_the_head_is_not_flipped():
+    """Absolute orientation, not just relative.
+
+    Regression guard: `_head_basis` took the ear axis pointing to the
+    subject's LEFT while `_rest_head_basis` took the shoulder line pointing
+    RIGHT. Each basis was individually right-handed, so the composition was a
+    clean 180 deg flip — the head pointed DOWN into the neck and the read-back
+    HEAD joint collapsed onto NECK. Every angle-between-two-poses check passes
+    under a consistent flip, which is exactly why this one measures against
+    the capture instead.
+    """
     ch = _ch()
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
-    neutral = _nose_convention(ch, sub)
+    valid = ~np.isnan(sub).any(1)
+    pts = _head_pts(ch, sub)
 
-    nod = neutral.copy()
-    neck = nod[int(Joint.NECK)]
-    right = nod[int(Joint.RIGHT_SHOULDER)] - nod[int(Joint.LEFT_SHOULDER)]
-    torso = neck - nod[int(Joint.PELVIS)]
-    t_hat = torso / np.linalg.norm(torso)
-    d = nod[int(Joint.HEAD)] - neck
-    # nod FORWARD: chin toward chest, i.e. the angle off the torso line grows.
-    # Which rotation sign does that depends on the rig's facing, so pick it.
-    cands = [_rot_about(right, s * 25.0) @ d for s in (1.0, -1.0)]
-    nod[int(Joint.HEAD)] = neck + max(
-        cands, key=lambda c: np.arccos(np.clip(
-            np.dot(c / np.linalg.norm(c), t_hat), -1, 1)))
+    with_pts = ch.posed_joints(sub, valid, pts)
+    without = ch.posed_joints(sub, valid)
+    d_with = np.linalg.norm(with_pts[int(Joint.HEAD)] - with_pts[int(Joint.NECK)])
+    d_without = np.linalg.norm(without[int(Joint.HEAD)] - without[int(Joint.NECK)])
+    assert d_with > 0.5 * d_without, (
+        f"head collapsed toward the neck ({d_with:.4f} vs {d_without:.4f}) "
+        "— the head basis is probably flipped")
 
-    before = _neck_rotation_vs_chest(ch, neutral)
-    after = _neck_rotation_vs_chest(ch, nod)
-    assert after - before > 15.0, (
-        f"neck barely moved for a 25 deg nod ({before:.1f} -> {after:.1f} deg)")
+    # and the head bone still points broadly up the body, not back down it
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    up = torso / np.linalg.norm(torso)
+    head_axis = with_pts[int(Joint.HEAD)] - with_pts[int(Joint.NECK)]
+    assert np.dot(head_axis / np.linalg.norm(head_axis), up) > 0.3
 
-    # and the posed head PITCHES by a comparable angle — measured as the
-    # read-back head's angle off the torso line, since the read-back (a skull
-    # point) and the target (a nose) sit at different phase angles and their
-    # displacement chords legitimately differ in direction
-    def head_pitch(pose):
-        got = ch.posed_joints(pose, ~np.isnan(pose).any(1))
-        v = got[int(Joint.HEAD)] - got[int(Joint.NECK)]
-        return np.degrees(np.arccos(np.clip(
-            np.dot(v / np.linalg.norm(v), t_hat), -1, 1)))
 
-    dp = head_pitch(nod) - head_pitch(neutral)
-    assert 12.0 < dp < 40.0, f"posed head pitched {dp:.1f} deg for a 25 deg nod"
+def test_the_ear_axis_points_the_same_way_as_the_shoulders():
+    """The two bases must share a handedness convention; this pins it."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    right_shoulder = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    basis = ch._head_basis(_head_pts(ch, sub, right=right_shoulder))
+    assert basis is not None
+    cos = np.dot(basis[:, 0], right_shoulder / np.linalg.norm(right_shoulder))
+    assert cos > 0.9, f"ear axis opposes the shoulder line (cos={cos:.3f})"
+
+
+def test_the_head_follows_a_nod():
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    right = np.array([1.0, 0.0, 0.0])
+
+    level = _head_pts(ch, sub)
+    _, f0 = _head_dirs(ch, sub, level)
+    nodded = _head_pts(ch, sub, fwd=_rot_about(right, 25.0) @ f0)
+    _, f1 = _head_dirs(ch, sub, nodded)
+    nod = np.degrees(np.arccos(np.clip(np.dot(f0, f1), -1, 1)))
+    assert 15.0 < nod < 35.0, f"head pitched {nod:.1f} deg for a 25 deg nod"
+
+
+def test_eyes_stand_in_when_an_ear_is_hidden():
+    """A turned head hides one ear; the eyes carry the same lateral axis."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    full = _head_pts(ch, sub)
+    no_ears = full.copy()
+    no_ears[3:] = np.nan
+    assert ch._head_basis(full) is not None
+    assert ch._head_basis(no_ears) is not None, "eyes should substitute"
+    # and with neither pair there is nothing to orient from
+    bare = full.copy(); bare[1:] = np.nan
+    assert ch._head_basis(bare) is None
+
+
+def test_no_face_keypoints_leaves_the_head_riding_the_neck():
+    """Old projects and the manual detector supply none; behaviour must be
+    exactly what it was before face keypoints existed."""
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    valid = ~np.isnan(sub).any(1)
+    a, *_ = ch._skin_matrices(sub, valid)
+    b, *_ = ch._skin_matrices(sub, valid, None)
+    assert np.allclose(a, b)
+    assert np.allclose(a[ch.role["head"]], a[ch.role["neck"]])
 
 
 def test_missing_head_leaves_the_neck_inherited():

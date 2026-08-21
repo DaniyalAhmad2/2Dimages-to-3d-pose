@@ -22,21 +22,12 @@ from pathlib import Path
 
 import numpy as np
 
-from pose3d.core.skeleton import BONES, Joint, NUM_JOINTS
+from pose3d.core.skeleton import BONES, Joint, NUM_HEAD_KP, NUM_JOINTS
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
-_MID = "MID"   # midpoint(pelvis, neck) — the torso split point
-_HEAD_AIM = "HEAD_AIM"   # Joint.HEAD, corrected for the nose-vs-skull-axis bias
-
-# The HEAD joint is the NOSE in the default COCO-17 pipeline, and a nose is not
-# on the neck's axis: measured against the torso line (NECK->PELVIS), the nose
-# direction sits ~45 deg forward on real captures (demo take median 49.6 deg,
-# Test-motion take median 40.0 deg), while this rig's rest head direction is
-# ~4 deg. Aiming the neck bone straight at the nose would therefore pitch the
-# head down permanently, so the target is rotated back by this anatomical
-# offset before aiming (see the _HEAD_AIM branch in _skin_matrices).
-_NOSE_PITCH = np.radians(45.0)
+_MID = "MID"        # midpoint(pelvis, neck) — the torso split point
+_EAR_MID = "EAR_MID"  # midpoint of the ears — a real point on the skull axis
 
 # Pipeline role -> candidate bone names, tried in order. Covers the legacy
 # Blender meta-rig (what we ship), Rigify, and Mixamo/UE naming so a replacement
@@ -70,10 +61,10 @@ _ROLE_ALIASES = {
 _DIRECT = {
     "spine": (Joint.PELVIS, _MID),
     "chest": (_MID, Joint.NECK),
-    # the head is a passenger of the neck (one head point carries no roll), so
-    # aiming the neck at the bias-corrected HEAD is what makes nodding and
-    # turning follow the capture at all
-    "neck": (Joint.NECK, _HEAD_AIM),
+    # aimed at the EAR MIDPOINT, which sits on the skull axis — so unlike the
+    # nose it needs no anatomical fudge factor. The head bone on top of it gets
+    # a full rotation from the face keypoints (see _head_basis).
+    "neck": (Joint.NECK, _EAR_MID),
     # the clavicles carry the arms; drive them or the arm roots miss the
     # shoulders and a noisy shoulder swings the whole arm
     "clavicle.L": (Joint.NECK, Joint.LEFT_SHOULDER),
@@ -213,21 +204,7 @@ class Character:
         n = np.linalg.norm(d)
         self._rest_torso = (d / n if n > 1e-9 and not np.isnan(d).any()
                             else self.tail[self.hips_idx] - self.head[self.hips_idx])
-        # The neck BONE's rest angle off the torso line. _bone_fk aims the bone
-        # axis — not the joint read-back — at the target, so this is the angle
-        # that makes a subject holding the anatomical neutral (_NOSE_PITCH)
-        # leave the neck exactly at rest (residual ~1 deg, vs ~6 deg if the
-        # read-back direction were used as the reference).
-        self._rest_head_pitch = 0.0
-        if "neck" in self.role:
-            nb = self.role["neck"]
-            axis = self.tail[nb] - self.head[nb]
-            td = rj[int(Joint.NECK)] - rj[int(Joint.PELVIS)]
-            an, tn = np.linalg.norm(axis), np.linalg.norm(td)
-            if an > 1e-9 and tn > 1e-9 and np.isfinite(axis).all() \
-                    and np.isfinite(td).all():
-                cosr = float(np.clip(np.dot(axis / an, td / tn), -1.0, 1.0))
-                self._rest_head_pitch = float(np.arccos(cosr))
+        self._rest_head = self._rest_head_basis()
         self._scale = None          # uniform scale, set by fit_to_subject
 
     # --- rig introspection -------------------------------------------------
@@ -358,39 +335,87 @@ class Character:
         self._scale = None
 
     # --- posing ------------------------------------------------------------
-    def _head_aim_target(self, J, pelvis):
-        """Where the neck should aim, correcting the nose-vs-skull-axis bias.
+    def _head_basis(self, head_rig):
+        """3x3 orientation of the head from the face keypoints, or None.
 
-        Computed in pose space — angles survive the rigid + uniform-scale
-        to_rig map. The captured head direction is expressed as an angle off
-        the torso line (NECK->PELVIS), shifted so the anatomical neutral
-        (_NOSE_PITCH) lands on the rig's own rest head pitch, and clamped at
-        the torso line: with only one head point there is no way to tell
-        "looking up" apart from data that uses the skull-axis convention
-        (synthetic tests, the self-test pose), so looking up saturates at
-        neutral instead of bending those captures backward.
+        Columns are (right, forward, up) as unit vectors. A single nose point
+        cannot carry orientation — it only says which way the face is, not how
+        the head is turned about that — so the lateral axis comes from the
+        EARS (or the eyes when an ear is missing), which are detected at least
+        as reliably. `head_rig` is (NUM_HEAD_KP, 3) already in rig space.
         """
-        h, n = J(Joint.HEAD), J(Joint.NECK)
-        if h is None or n is None or pelvis is None \
-                or not np.isfinite(np.asarray(pelvis)).all():
-            return None                    # nothing to correct against: inherit
-        d = h - n
-        t = n - pelvis
-        dn, tn = float(np.linalg.norm(d)), float(np.linalg.norm(t))
-        if dn < 1e-9 or tn < 1e-9:
+        if head_rig is None:
             return None
-        t_hat = t / tn
-        cos_th = float(np.clip(np.dot(d / dn, t_hat), -1.0, 1.0))
-        theta = float(np.arccos(cos_th))
-        want = max(self._rest_head_pitch + theta - _NOSE_PITCH, 0.0)
-        perp = d / dn - cos_th * t_hat     # the plane the nod happens in
-        pn = float(np.linalg.norm(perp))
-        if pn < 1e-9:
-            # head direction collinear with the torso: no defined nod plane,
-            # and the corrected angle is 0 there anyway
-            return n + dn * t_hat
-        dir_c = np.cos(want) * t_hat + np.sin(want) * (perp / pn)
-        return n + dn * dir_c
+        pts = np.asarray(head_rig, float).reshape(-1, 3)
+        if len(pts) < NUM_HEAD_KP:
+            return None
+        nose, eye_l, eye_r, ear_l, ear_r = pts[:5]
+
+        # Lateral axis: ears preferred, eyes as the fallback pair. Points to
+        # the subject's RIGHT, matching _rest_head_basis's shoulder line — get
+        # this backwards and R becomes a 180 deg flip that buries the head in
+        # the neck.
+        for left, right_kp in ((ear_l, ear_r), (eye_l, eye_r)):
+            if not (np.isnan(left).any() or np.isnan(right_kp).any()):
+                right = right_kp - left
+                lateral_mid = (left + right_kp) / 2.0
+                break
+        else:
+            return None
+        n_r = np.linalg.norm(right)
+        if n_r < 1e-9 or np.isnan(nose).any():
+            return None
+        right = right / n_r
+
+        fwd = nose - lateral_mid                 # where the face points
+        fwd = fwd - np.dot(fwd, right) * right   # orthogonalise against it
+        n_f = np.linalg.norm(fwd)
+        if n_f < 1e-9:
+            return None                          # nose on the ear line: degenerate
+        fwd = fwd / n_f
+        up = np.cross(right, fwd)
+        n_u = np.linalg.norm(up)
+        if n_u < 1e-9:
+            return None
+        return np.column_stack([right, fwd, up / n_u])
+
+    def _rest_head_basis(self):
+        """The same (right, forward, up) basis, measured on the rig at rest.
+
+        The rig has no ears, so its axes come from geometry that means the same
+        thing: the shoulder line is `right`, the head bone's own axis is `up`.
+        """
+        rj = self.rest_joints()
+        b = self.role.get("head")
+        if b is None:
+            return None
+        up = self.tail[b] - self.head[b]
+        right = rj[int(Joint.RIGHT_SHOULDER)] - rj[int(Joint.LEFT_SHOULDER)]
+        if np.isnan(right).any():
+            return None
+        n_u, n_r = np.linalg.norm(up), np.linalg.norm(right)
+        if n_u < 1e-9 or n_r < 1e-9:
+            return None
+        up = up / n_u
+        right = right - np.dot(right / n_r, up) * up
+        n_r = np.linalg.norm(right)
+        if n_r < 1e-9:
+            return None
+        right = right / n_r
+        return np.column_stack([right, np.cross(up, right), up])
+
+    def _bone_rot(self, b, base, R):
+        """Skin matrix giving bone b the world orientation `R`.
+
+        Head pinned to the parent exactly as `_bone_fk` does, so the chain
+        cannot separate; only the rotation source differs — measured here,
+        aimed there.
+        """
+        head = base[:3, :3] @ self.head[b] + base[:3, 3]
+        M = np.eye(4)
+        M[:3, :3] = R
+        M[:3, 3] = head - R @ self.head[b]
+        return M
 
     def _bone_fk(self, b, base, end):
         """Skin matrix for bone b, hanging off its already-posed parent.
@@ -448,12 +473,16 @@ class Character:
         knee = root + L1 * (cos_a * u + sin_a * w)
         return knee, root + u * dc
 
-    def _skin_matrices(self, up_pose, valid):
+    def _skin_matrices(self, up_pose, valid, head_pts=None):
         """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
         Returns (skin (B,4,4), pelvis (3,), scale, Rz (3,3)) or (None,)*4 if the
         pose has no usable pelvis. Every skin matrix is a pure rotation plus a
         translation — no bone is ever scaled.
+
+        `head_pts` is the optional (NUM_HEAD_KP, 3) face keypoints in the same
+        space as `up_pose`; given them the head bone gets a real orientation
+        instead of riding the neck.
         """
         up_pose = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)
         j = Joint
@@ -490,6 +519,20 @@ class Character:
         def to_rig(p):
             return self.hips_world + (Rz @ (p - pelvis)) * scale
 
+        # Face keypoints, once: the ear midpoint aims the neck (it is on the
+        # skull axis, so no anatomical offset is needed) and the full basis
+        # orients the head bone.
+        head_rig = ear_mid = None
+        if head_pts is not None:
+            hp = np.asarray(head_pts, float).reshape(-1, 3)
+            if len(hp) >= NUM_HEAD_KP:
+                head_rig = np.array([to_rig(q) if not np.isnan(q).any()
+                                     else q for q in hp])
+                for a, b in ((3, 4), (1, 2)):          # ears, then eyes
+                    if not (np.isnan(hp[a]).any() or np.isnan(hp[b]).any()):
+                        ear_mid = (hp[a] + hp[b]) / 2.0
+                        break
+
         def resolve(spec):
             if spec == _MID:
                 # use the resolved pelvis, which may have come from the hips:
@@ -497,9 +540,8 @@ class Character:
                 # whenever the pelvis itself was missing
                 a = J(Joint.NECK)
                 return None if a is None else to_rig((a + pelvis) / 2.0)
-            if spec == _HEAD_AIM:
-                p = self._head_aim_target(J, pelvis)
-                return None if p is None else to_rig(p)
+            if spec == _EAR_MID:
+                return None if ear_mid is None else to_rig(ear_mid)
             p = J(spec)
             return None if p is None else to_rig(p)
 
@@ -518,6 +560,17 @@ class Character:
                 R_hips = _align(self._rest_torso, want)
         skin[self.hips_idx][:3, :3] = R_hips
         skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
+
+        # The head is the one bone whose ORIENTATION we can measure rather than
+        # infer from an aim: two ears give the lateral axis a single nose point
+        # cannot. Without face keypoints it falls through and rides the neck,
+        # exactly as before.
+        head_bone = self.role.get("head")
+        head_R = None
+        if head_rig is not None and self._rest_head is not None:
+            target = self._head_basis(head_rig)
+            if target is not None:
+                head_R = target @ self._rest_head.T
 
         solved: dict[int, np.ndarray] = {}     # bone -> target from an IK solve
         for b in self.order:
@@ -549,7 +602,10 @@ class Character:
                 # so every joint DIRECTION follows the capture
                 end = resolve(self._direct[b][1])
 
-            skin[b] = base if end is None else self._bone_fk(b, base, end)
+            if b == head_bone and head_R is not None:
+                skin[b] = self._bone_rot(b, base, head_R)
+            else:
+                skin[b] = base if end is None else self._bone_fk(b, base, end)
         return skin, pelvis, scale, Rz
 
     # --- outputs -----------------------------------------------------------
@@ -558,14 +614,14 @@ class Character:
         pts = np.atleast_2d(np.asarray(pts, float))
         return pelvis + (Rz.T @ (pts - self.hips_world).T).T / scale
 
-    def pose_and_joints(self, up_pose, valid):
+    def pose_and_joints(self, up_pose, valid, head_pts=None):
         """(verts, faces, joints) — mesh and canonical joints of the posed rig.
 
         Both are returned in the SAME space as `up_pose`, so the joints can be
         drawn straight over the mesh. `joints` is (NUM_JOINTS,3); entries the
         rig cannot supply are NaN.
         """
-        skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid)
+        skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid, head_pts)
         if skin is None:
             return None, None, None
 
@@ -579,16 +635,16 @@ class Character:
         joints = self._from_rig(self._joints_from_skin(skin), pelvis, scale, Rz)
         return verts, self.faces, joints
 
-    def pose(self, up_pose, valid):
+    def pose(self, up_pose, valid, head_pts=None):
         """Skinned vertices (V,3) in the same space as up_pose."""
-        verts, faces, _ = self.pose_and_joints(up_pose, valid)
+        verts, faces, _ = self.pose_and_joints(up_pose, valid, head_pts)
         return verts, faces
 
-    def posed_joints(self, up_pose, valid):
+    def posed_joints(self, up_pose, valid, head_pts=None):
         """Canonical joints of the posed rig, in the same space as up_pose."""
-        return self.pose_and_joints(up_pose, valid)[2]
+        return self.pose_and_joints(up_pose, valid, head_pts)[2]
 
-    def pose_bone_matrices(self, up_pose, valid):
+    def pose_bone_matrices(self, up_pose, valid, head_pts=None):
         """Posed bone world matrices in RIG space: {bone_name: (4,4) list}.
 
         M_posed[b] = skin[b] @ rest[b]. Blender's deform is
@@ -596,7 +652,7 @@ class Character:
         reproduces this class's skinning exactly — that is what keeps the
         export identical to the 3D view. Returns None for an unusable pose.
         """
-        skin, *_ = self._skin_matrices(up_pose, valid)
+        skin, *_ = self._skin_matrices(up_pose, valid, head_pts)
         if skin is None:
             return None
         return {name: (skin[b] @ self.rest[b]).tolist()

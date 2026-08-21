@@ -99,10 +99,12 @@ class View3D(gl.GLViewWidget):
         except Exception:
             pass
 
-    def _to_view(self, pose3d):
+    def _to_view(self, pts):
+        """World -> view rotation. Shape-agnostic: used for the canonical
+        joints and for the face keypoints alike."""
         if self._R is not None:
-            return pose3d @ self._R.T
-        return pose3d @ upright_matrix(self._vaxis, self._vsign).T
+            return pts @ self._R.T
+        return pts @ upright_matrix(self._vaxis, self._vsign).T
 
     # --- public API ---
     def set_show_body(self, on: bool):
@@ -124,7 +126,9 @@ class View3D(gl.GLViewWidget):
         self.opts["fov"] = 1.0 if mode.lower().startswith("ortho") else 60.0
         self.update()
 
-    def set_pose(self, pose3d: np.ndarray):
+    def set_pose(self, pose3d: np.ndarray, head3d: np.ndarray | None = None):
+        """`head3d` is the optional (NUM_HEAD_KP, 3) face keypoints; with them
+        the character's head is oriented rather than left riding the neck."""
         pose3d = np.asarray(pose3d, float).reshape(NUM_JOINTS, 3)
         valid = ~np.isnan(pose3d).any(1)
         if not valid.any():
@@ -144,7 +148,11 @@ class View3D(gl.GLViewWidget):
         # pose the character, then ground on ITS lowest vertex (the sole) so the
         # feet rest ON the plane instead of the ankle (feet would pierce it).
         vpose = np.where(valid[:, None], v, np.nan)
-        verts, faces, cj = self._skin(vpose)
+        # Same world->view rotation as the pose; the grounding translation is
+        # deliberately NOT applied, because only a direction basis is read off
+        # these and directions are translation-invariant.
+        vhead = self._to_view(head3d) if head3d is not None else None
+        verts, faces, cj = self._skin(vpose, vhead)
         if verts is not None and len(verts):
             dz = float(verts[:, 2].min())
             verts = verts.copy(); verts[:, 2] -= dz
@@ -186,14 +194,14 @@ class View3D(gl.GLViewWidget):
                 seg.append(pts[int(a)]); seg.append(pts[int(b)])
         lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
 
-    def _skin(self, vpose):
+    def _skin(self, vpose, vhead=None):
         """Pose the character -> (verts, faces, canonical joints)."""
         try:
             if self._character is None:
                 from pose3d.geometry.character import Character
                 self._character = Character()
             valid = ~np.isnan(vpose).any(1)
-            return self._character.pose_and_joints(vpose, valid)
+            return self._character.pose_and_joints(vpose, valid, vhead)
         except Exception:
             return None, None, None
 

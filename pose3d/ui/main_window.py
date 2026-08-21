@@ -21,9 +21,9 @@ class _ExportWorker(QThread):
     status = Signal(str)
     finished_res = Signal(object)          # ExportResult or Exception
 
-    def __init__(self, poses, out, name, fps, display_frame):
+    def __init__(self, poses, out, name, fps, display_frame, head3d=None):
         super().__init__()
-        self._a = (poses, out, name, fps, display_frame)
+        self._a = (poses, out, name, fps, display_frame, head3d)
 
     def _on_line(self, line: str):
         if "Fra:" in line:
@@ -41,12 +41,12 @@ class _ExportWorker(QThread):
 
     def run(self):
         from pose3d.export.blender_export import export_animation
-        poses, out, name, fps, df = self._a
+        poses, out, name, fps, df, head3d = self._a
         self.status.emit("Posing the character in Blender…")
         try:
             res = export_animation(poses, out, name=name, fps=fps,
                                    render_video=True, display_frame=df,
-                                   on_line=self._on_line)
+                                   head3d=head3d, on_line=self._on_line)
         except Exception as e:      # surface any failure to the UI thread
             res = e
         self.finished_res.emit(res)
@@ -364,8 +364,10 @@ class MainWindow(QMainWindow):
         prog.setCancelButton(None)         # a Blender render can't be safely killed
         prog.show()
 
+        heads = np.stack([f.head3d for f in frames])
         worker = _ExportWorker(poses, out, self.model.project.name,
-                               self.model.project.fps, self.model.current)
+                               self.model.project.fps, self.model.current,
+                               head3d=heads)
         self._export_worker = worker       # keep a reference
         worker.status.connect(prog.setLabelText)
 

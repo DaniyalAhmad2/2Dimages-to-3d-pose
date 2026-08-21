@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from pose3d.core.skeleton import NUM_JOINTS
+from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS
 
 # Canonical camera keys. Two-camera rig per the brief (left / right).
 CAM_LEFT = "left"
@@ -33,6 +33,18 @@ def _nan_xyz() -> np.ndarray:
     return np.full((NUM_JOINTS, 3), np.nan, dtype=float)
 
 
+def _nan_head_xy() -> np.ndarray:
+    return np.full((NUM_HEAD_KP, 2), np.nan, dtype=float)
+
+
+def _nan_head_scores() -> np.ndarray:
+    return np.full((NUM_HEAD_KP,), np.nan, dtype=float)
+
+
+def _nan_head_xyz() -> np.ndarray:
+    return np.full((NUM_HEAD_KP, 3), np.nan, dtype=float)
+
+
 @dataclass
 class Frame:
     """One matched pair of images and all derived pose data for it."""
@@ -47,6 +59,14 @@ class Frame:
     # per-(cam,joint) flag: True if the point was hand-corrected by the user.
     corrected: dict[str, np.ndarray] = field(
         default_factory=lambda: {c: np.zeros(NUM_JOINTS, bool) for c in CAMERAS})
+    # Face keypoints (nose/eyes/ears), kept PARALLEL to the canonical arrays so
+    # every `reshape(NUM_JOINTS, ...)` downstream stays true. They orient the
+    # head and nothing else: no bones, no bone-length fit, not hand-editable.
+    head2d: dict[str, np.ndarray] = field(
+        default_factory=lambda: {c: _nan_head_xy() for c in CAMERAS})
+    head_scores: dict[str, np.ndarray] = field(
+        default_factory=lambda: {c: _nan_head_scores() for c in CAMERAS})
+    head3d: np.ndarray = field(default_factory=_nan_head_xyz)
 
     def set_kp(self, cam: str, joint: int, x: float, y: float,
                score: float = 1.0, corrected: bool = False) -> None:

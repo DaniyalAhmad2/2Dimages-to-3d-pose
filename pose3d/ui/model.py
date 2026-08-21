@@ -23,7 +23,7 @@ from pose3d.pipeline import CalibratedRig
 class ProjectModel(QObject):
     frameChanged = Signal(int)                 # current frame index
     joint2dChanged = Signal(str, int)          # cam, joint (after edit)
-    pose3dChanged = Signal(object)             # (NUM_JOINTS,3) fitted pose
+    pose3dChanged = Signal(object, object)     # fitted pose, face keypoints
     accuracyChanged = Signal(object)           # (NUM_JOINTS,) reproj error px
     historyChanged = Signal()                  # undo/redo availability
 
@@ -85,7 +85,7 @@ class ProjectModel(QObject):
         self.current = idx
         self.frameChanged.emit(idx)
         f = self.frame()
-        self.pose3dChanged.emit(f.fitted3d)
+        self.pose3dChanged.emit(f.fitted3d, f.head3d)
         self.accuracyChanged.emit(self._accuracy(idx))
 
     def frame(self):
@@ -139,7 +139,7 @@ class ProjectModel(QObject):
             self.statusMessage.emit(
                 f"Bone fit failed on this frame ({type(e).__name__}); "
                 f"showing the raw triangulation")
-        self.pose3dChanged.emit(f.fitted3d)
+        self.pose3dChanged.emit(f.fitted3d, f.head3d)
         self.accuracyChanged.emit(self._accuracy(self.current))
 
     def _compute_bone_lengths(self):

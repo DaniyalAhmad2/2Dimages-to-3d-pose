@@ -15,7 +15,8 @@ from __future__ import annotations
 
 import numpy as np
 
-from pose3d.core.skeleton import NUM_JOINTS, derive_joints, map_halpe26
+from pose3d.core.skeleton import (
+    NUM_HEAD_KP, NUM_JOINTS, derive_joints, extract_head, map_halpe26)
 from pose3d.detect import models
 from pose3d.detect.base import Detection, KeypointDetector
 
@@ -52,21 +53,31 @@ class RTMPoseDetector(KeypointDetector):
             return _empty_detection()
         best = int(np.argmax(scores.mean(axis=1)))   # most confident person
         cxy, cscore = self._map(keypoints[best], scores[best])
+        hxy, hscore = extract_head(keypoints[best], scores[best])
 
         # Reject unreliable keypoints so they are not drawn as phantom points
         # or fed into triangulation: (a) below the confidence threshold, or
         # (b) extrapolated OUTSIDE the image (e.g. feet below a cropped frame).
         h, w = image_bgr.shape[:2]
-        bad = (
-            (cscore < self.kpt_thr)
-            | (cxy[:, 0] < 0) | (cxy[:, 0] >= w)
-            | (cxy[:, 1] < 0) | (cxy[:, 1] >= h)
-        )
-        cxy[bad] = np.nan                # missing -> not drawn, not triangulated
-        return Detection(xy=cxy, scores=cscore)
+
+        def reject(xy, sc):
+            bad = (
+                (sc < self.kpt_thr)
+                | (xy[:, 0] < 0) | (xy[:, 0] >= w)
+                | (xy[:, 1] < 0) | (xy[:, 1] >= h)
+            )
+            xy[bad] = np.nan             # missing -> not drawn, not triangulated
+
+        reject(cxy, cscore)
+        # the face points get the identical treatment, or an out-of-frame ear
+        # would reach triangulation and skew the head basis
+        reject(hxy, hscore)
+        return Detection(xy=cxy, scores=cscore, head_xy=hxy, head_scores=hscore)
 
 
 def _empty_detection() -> Detection:
     return Detection(
         xy=np.full((NUM_JOINTS, 2), np.nan),
-        scores=np.zeros(NUM_JOINTS))
+        scores=np.zeros(NUM_JOINTS),
+        head_xy=np.full((NUM_HEAD_KP, 2), np.nan),
+        head_scores=np.zeros(NUM_HEAD_KP))
