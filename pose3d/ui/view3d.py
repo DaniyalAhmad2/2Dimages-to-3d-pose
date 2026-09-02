@@ -23,6 +23,7 @@ class View3D(gl.GLViewWidget):
     JOINT_COLOR = (0.30, 0.85, 1.0, 1.0)
     BONE_COLOR = (0.95, 0.95, 0.98, 1.0)
     CAPTURE_COLOR = (1.0, 0.72, 0.25, 0.85)    # the measured skeleton
+    FILLED_COLOR = (1.0, 0.62, 0.10, 1.0)      # interpolated, not measured
 
     def __init__(self):
         super().__init__()
@@ -126,9 +127,15 @@ class View3D(gl.GLViewWidget):
         self.opts["fov"] = 1.0 if mode.lower().startswith("ortho") else 60.0
         self.update()
 
-    def set_pose(self, pose3d: np.ndarray, head3d: np.ndarray | None = None):
+    def set_pose(self, pose3d: np.ndarray, head3d: np.ndarray | None = None,
+                 filled: np.ndarray | None = None):
         """`head3d` is the optional (NUM_HEAD_KP, 3) face keypoints; with them
-        the character's head is oriented rather than left riding the neck."""
+        the character's head is oriented rather than left riding the neck.
+
+        `filled` is the optional (NUM_JOINTS,) flag array from
+        `pipeline.fill_gaps`: those joints were interpolated across a
+        one-frame dropout, and are drawn in a distinct amber so a fill is
+        never read as a measurement."""
         pose3d = np.asarray(pose3d, float).reshape(NUM_JOINTS, 3)
         valid = ~np.isnan(pose3d).any(1)
         if not valid.any():
@@ -169,12 +176,14 @@ class View3D(gl.GLViewWidget):
         # inside the mesh. Falls back to the captured points if there's no rig.
         if cj is not None:
             self._draw_skeleton(self._scatter, self._lines, cj,
-                                ~np.isnan(cj).any(1))
+                                ~np.isnan(cj).any(1), self.JOINT_COLOR, filled)
         else:
-            self._draw_skeleton(self._scatter, self._lines, v, valid)
+            self._draw_skeleton(self._scatter, self._lines, v, valid,
+                                self.JOINT_COLOR, filled)
 
         # reference overlay: what the cameras actually measured
-        self._draw_skeleton(self._cap_scatter, self._cap_lines, v, valid)
+        self._draw_skeleton(self._cap_scatter, self._cap_lines, v, valid,
+                            self.CAPTURE_COLOR, filled)
         self._set_body(verts, faces)
 
         if not self._framed:
@@ -185,9 +194,17 @@ class View3D(gl.GLViewWidget):
                                    distance=span * 1.9, elevation=12, azimuth=-70)
             self._framed = True
 
-    @staticmethod
-    def _draw_skeleton(scatter, lines, pts, valid):
-        scatter.setData(pos=pts[valid] if valid.any() else np.zeros((1, 3)))
+    @classmethod
+    def _draw_skeleton(cls, scatter, lines, pts, valid, base_color=None,
+                       filled=None):
+        idx = np.flatnonzero(valid)
+        if idx.size and base_color is not None:
+            colors = np.tile(np.asarray(base_color, float), (idx.size, 1))
+            if filled is not None:
+                colors[np.asarray(filled, bool)[idx]] = cls.FILLED_COLOR
+            scatter.setData(pos=pts[idx], color=colors)
+        else:
+            scatter.setData(pos=pts[idx] if idx.size else np.zeros((1, 3)))
         seg = []
         for a, b in BONES:
             if valid[int(a)] and valid[int(b)]:

@@ -21,9 +21,10 @@ class _ExportWorker(QThread):
     status = Signal(str)
     finished_res = Signal(object)          # ExportResult or Exception
 
-    def __init__(self, poses, out, name, fps, display_frame, head3d=None):
+    def __init__(self, poses, out, name, fps, display_frame, head3d=None,
+                 filled=None):
         super().__init__()
-        self._a = (poses, out, name, fps, display_frame, head3d)
+        self._a = (poses, out, name, fps, display_frame, head3d, filled)
 
     def _on_line(self, line: str):
         if "Fra:" in line:
@@ -41,12 +42,13 @@ class _ExportWorker(QThread):
 
     def run(self):
         from pose3d.export.blender_export import export_animation
-        poses, out, name, fps, df, head3d = self._a
+        poses, out, name, fps, df, head3d, filled = self._a
         self.status.emit("Posing the character in Blender…")
         try:
             res = export_animation(poses, out, name=name, fps=fps,
                                    render_video=True, display_frame=df,
-                                   head3d=head3d, on_line=self._on_line)
+                                   head3d=head3d, filled=filled,
+                                   on_line=self._on_line)
         except Exception as e:      # surface any failure to the UI thread
             res = e
         self.finished_res.emit(res)
@@ -365,9 +367,12 @@ class MainWindow(QMainWindow):
         prog.show()
 
         heads = np.stack([f.head3d for f in frames])
+        # the same flags the 3D view draws amber, so the export agrees with
+        # the preview about which joints were interpolated
+        filled = np.stack([f.filled for f in frames])
         worker = _ExportWorker(poses, out, self.model.project.name,
                                self.model.project.fps, self.model.current,
-                               head3d=heads)
+                               head3d=heads, filled=filled)
         self._export_worker = worker       # keep a reference
         worker.status.connect(prog.setLabelText)
 
@@ -447,7 +452,7 @@ class MainWindow(QMainWindow):
         f = self.model.frame()
         # head3d must ride along or the character's head snaps back to riding
         # the neck on every frame change
-        self.view3d.set_pose(f.fitted3d, f.head3d)
+        self.view3d.set_pose(f.fitted3d, f.head3d, f.filled)
 
     def _refresh_views(self):
         """Full refresh: (re)load the frame images AND reposition overlays."""
@@ -470,7 +475,7 @@ class MainWindow(QMainWindow):
         f = self.model.frame()
         for cam, panel in ((CAM_LEFT, self.cam_left), (CAM_RIGHT, self.cam_right)):
             panel.view.set_pose(f.kp2d[cam], f.scores[cam], f.corrected[cam],
-                                head_xy=f.head2d[cam])
+                                head_xy=f.head2d[cam], filled=f.filled)
 
     def _refresh_history(self):
         self.btn_undo.setEnabled(self.model.stack.can_undo())

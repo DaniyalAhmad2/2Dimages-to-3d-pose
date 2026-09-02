@@ -74,3 +74,21 @@ def test_correction_log(tmp_path):
     c = q.corrections[0]
     assert c.frame_id == "0001"
     assert c.new_xy == (55.0, 690.0)
+
+
+
+def test_filled_flags_round_trip(tmp_path):
+    p = _make_project()
+    p.frames[0].filled[Joint.LEFT_KNEE] = True
+    save_project(p, tmp_path)
+    q = load_project(tmp_path)
+    assert q.frames[0].filled[Joint.LEFT_KNEE]
+    assert q.frames[0].filled.sum() == 1
+    assert q.frames[0].filled.shape == (NUM_JOINTS,)
+
+
+def test_smoothing_choice_round_trips(tmp_path):
+    p = _make_project()
+    p.smoothing = "ema0.6"
+    save_project(p, tmp_path)
+    assert load_project(tmp_path).smoothing == "ema0.6"

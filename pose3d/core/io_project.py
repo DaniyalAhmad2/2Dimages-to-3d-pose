@@ -56,6 +56,17 @@ def _json_to_vec(data: list, rows: int = NUM_JOINTS) -> np.ndarray:
     return out
 
 
+def _json_to_flags(data, rows: int = NUM_JOINTS) -> np.ndarray:
+    """Bool vector from JSON; a file written before the key existed gives all
+    False, which is the truthful answer (nothing was flagged)."""
+    out = np.zeros((rows,), dtype=bool)
+    for i, v in enumerate(data or []):
+        if i >= rows:
+            break
+        out[i] = bool(v)
+    return out
+
+
 def _store_image(path: str, folder: Path) -> str:
     """Path to write into project.json.
 
@@ -109,6 +120,8 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
         "name": project.name,
         "fps": project.fps,
         "calibration_ref": project.calibration_ref,
+        "smoothing": project.smoothing,
+        "keypoint_model": project.keypoint_model,
         "frames": [],
     }
     for f in project.frames:
@@ -120,6 +133,7 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             "pose3d": _arr_to_json(f.pose3d),
             "fitted3d": _arr_to_json(f.fitted3d),
             "corrected": {c: [bool(v) for v in f.corrected[c]] for c in CAMERAS},
+            "filled": [bool(v) for v in f.filled],
             "head2d": {c: _arr_to_json(f.head2d[c]) for c in CAMERAS},
             "head_scores": {c: _vec_to_json(f.head_scores[c]) for c in CAMERAS},
             "head3d": _arr_to_json(f.head3d),
@@ -148,6 +162,7 @@ def load_project(folder: str | Path) -> ProjectData:
             fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
             fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
             fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)
+        fr.filled = _json_to_flags(fd.get("filled"))
         fr.pose3d = _json_to_arr(fd["pose3d"], 3)
         fr.fitted3d = _json_to_arr(fd["fitted3d"], 3)
         fr.head3d = _json_to_arr(fd.get("head3d"), 3, NUM_HEAD_KP)
@@ -156,6 +171,8 @@ def load_project(folder: str | Path) -> ProjectData:
     project = ProjectData(
         name=doc["name"], fps=doc["fps"],
         calibration_ref=doc.get("calibration_ref"), frames=frames,
+        smoothing=doc.get("smoothing") or "none",
+        keypoint_model=doc.get("keypoint_model") or "coco17",
     )
     project.corrections = _read_corrections(folder)
     return project

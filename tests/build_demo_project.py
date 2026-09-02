@@ -74,7 +74,7 @@ def main():
         print(f"frame {fi}: detected L={np.sum(~np.isnan(dl.xy).any(1))}/15")
 
     triangulate_project(project, rig)
-    fit_project(project, smooth=True)
+    fit_project(project)
     save_project(project, PROJ)
     print(f"Saved demo project ({len(project.frames)} frames) to {PROJ}")
 

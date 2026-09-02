@@ -83,3 +83,22 @@ def test_accuracy_then_pose_order_does_not_matter(qapp):
     xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
     p.view.set_pose(xy, np.full(NUM_JOINTS, 0.9))   # ...then the pose
     assert p.view._joints[0].brush().color() == RAG_COLORS["red"]
+
+
+def test_a_gap_filled_joint_is_drawn_as_a_hollow_ring(qapp):
+    """Its 3D was interpolated across a one-frame dropout, not measured — the
+    dot must not look like every other measured dot (frames 0012 and 0021 of
+    the client's take reported 15/15 reconstructed while two were inventions).
+    """
+    from PySide6.QtCore import Qt
+    p = _panel(qapp)
+    filled = np.zeros(NUM_JOINTS, bool)
+    filled[3] = True
+    p.view.set_pose(
+        np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5,
+        np.full(NUM_JOINTS, 0.9), filled=filled)
+
+    assert p.view._joints[3].brush().style() == Qt.BrushStyle.NoBrush
+    assert p.view._joints[3].pen().color() == RAG_COLORS["filled"]
+    assert p.view._joints[4].brush().style() != Qt.BrushStyle.NoBrush
+    assert "interpolated" in p.view._joints[3].toolTip()
