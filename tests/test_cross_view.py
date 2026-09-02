@@ -4,6 +4,10 @@ It NaNs observations out of `frame.kp2d`, so when it over-fires the result is
 indistinguishable from the detector failing: gaps in the 2D views and an empty
 3D preview. That is exactly what a flat 30 px tolerance did on 3072x4080 phone
 captures — 0.7% of image height, which threw away 38% of a real take.
+
+Everything that exercises the gate runs on both rigs: the wide symmetric one
+blown up to phone resolution, and the client's genuinely asymmetric close-range
+rig, whose two images differ 2:1 in pixel scale.
 """
 import numpy as np
 import pytest
@@ -13,43 +17,60 @@ from pose3d.core.skeleton import NUM_JOINTS, Joint
 from pose3d.pipeline import (
     CalibratedRig, epipolar_threshold, triangulate_project, validate_cross_view,
 )
-from tests.synth import default_two_cam, project as project_points, sample_skeleton_3d
+from tests.synth import (
+    cameras, close_range_two_cam, default_two_cam, project as project_points,
+)
 from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 
 
-def _rig_and_project(scale=1.0, n_frames=2):
-    """A consistent two-view capture; `scale` blows the image up to phone size."""
+def _upscaled_symmetric(scale=4.0):
+    """The 720p synthetic rig blown up to phone-sized images."""
     geo = default_two_cam()
     K = geo["K"].copy() * scale
     K[2, 2] = 1.0
     size = (int(geo["size"][0] * scale), int(geo["size"][1] * scale))
-    intr = Intrinsics(K=K, dist=geo["dist"], image_size=size)
-    rig = CalibratedRig(intr, intr, Extrinsics(*geo["left"]), Extrinsics(*geo["right"]))
+    return {**geo, "K": K, "size": size}
 
-    gt = sample_skeleton_3d()
+
+@pytest.fixture(params=["wide symmetric at phone resolution",
+                        "close asymmetric (client rig)"])
+def geo(request):
+    return (_upscaled_symmetric() if request.param.startswith("wide")
+            else close_range_two_cam())
+
+
+def _rig_and_project(geo, n_frames=2):
+    """A consistent two-view capture of `geo`'s subject."""
+    cams = cameras(geo)
+    intr = {c: Intrinsics(K=cams[c][0], dist=cams[c][1], image_size=cams[c][2])
+            for c in (CAM_LEFT, CAM_RIGHT)}
+    rig = CalibratedRig(intr[CAM_LEFT], intr[CAM_RIGHT],
+                        Extrinsics(*geo["left"]), Extrinsics(*geo["right"]))
+
+    gt = geo["subject"]
     data = ProjectData(name="cv")
     for i in range(n_frames):
         f = Frame(frame_id=f"{i:04d}")
-        for cam, ext in ((CAM_LEFT, geo["left"]), (CAM_RIGHT, geo["right"])):
-            f.kp2d[cam] = project_points(gt, K, geo["dist"], *ext)
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam] = project_points(gt, cams[cam][0], cams[cam][1], *geo[cam])
             f.scores[cam] = np.full(NUM_JOINTS, 0.9)
         data.frames.append(f)
     return rig, data, gt
 
 
-def test_consistent_observations_survive_at_phone_resolution():
+def test_consistent_observations_survive_at_phone_resolution(geo):
     """Regression guard: with a flat 30 px tolerance this dropped a third of a
     real take, which read to the user as 'half the keypoints not detected'."""
-    rig, data, _ = _rig_and_project(scale=4.0)      # ~4x bigger images
+    rig, data, _ = _rig_and_project(geo)
     dropped = validate_cross_view(data, rig)
     assert dropped == 0, f"{dropped} good observations rejected"
     assert not np.isnan(data.frames[0].kp2d[CAM_LEFT]).any()
 
 
 def test_the_tolerance_scales_with_the_image():
-    small, _, _ = _rig_and_project(scale=1.0)
-    big, _, _ = _rig_and_project(scale=4.0)
+    small, _, _ = _rig_and_project(default_two_cam())
+    big, _, _ = _rig_and_project(_upscaled_symmetric(4.0))
     assert epipolar_threshold(big) > 3.0 * epipolar_threshold(small)
     # and still reproduces roughly the historical 30 px at ~1080p
     hd = Intrinsics(K=np.eye(3), dist=np.zeros((1, 5)), image_size=(1920, 1080))
@@ -57,9 +78,9 @@ def test_the_tolerance_scales_with_the_image():
         R=np.eye(3), t=np.zeros(3))] * 2)) < 40.0
 
 
-def test_a_hallucinated_joint_is_still_dropped():
+def test_a_hallucinated_joint_is_still_dropped(geo):
     """The gate's actual job: one view putting the ankle on the knee."""
-    rig, data, _ = _rig_and_project(scale=4.0)
+    rig, data, _ = _rig_and_project(geo)
     f = data.frames[0]
     f.kp2d[CAM_LEFT][int(Joint.LEFT_ANKLE)] = f.kp2d[CAM_LEFT][int(Joint.LEFT_KNEE)]
     f.scores[CAM_LEFT][int(Joint.LEFT_ANKLE)] = 0.3      # the weaker view
@@ -70,10 +91,10 @@ def test_a_hallucinated_joint_is_still_dropped():
     assert not np.isnan(f.kp2d[CAM_RIGHT][int(Joint.LEFT_ANKLE)]).any()
 
 
-def test_triangulate_reports_what_it_threw_away():
+def test_triangulate_reports_what_it_threw_away(geo):
     """The count has to reach the UI, or a calibration problem masquerades as
     a detection problem with nothing to tell them apart."""
-    rig, data, _ = _rig_and_project(scale=4.0)
+    rig, data, _ = _rig_and_project(geo)
     f = data.frames[0]
     f.kp2d[CAM_LEFT][int(Joint.LEFT_ANKLE)] = f.kp2d[CAM_LEFT][int(Joint.LEFT_KNEE)]
     f.scores[CAM_LEFT][int(Joint.LEFT_ANKLE)] = 0.3

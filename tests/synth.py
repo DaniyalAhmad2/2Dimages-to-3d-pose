@@ -45,7 +45,12 @@ def project(P3d, K, dist, R, t):
 
 
 def default_two_cam(baseline_deg=80.0, radius=3.0, height=1.0):
-    """A left/right camera pair ~baseline_deg apart looking at the origin."""
+    """A left/right camera pair ~baseline_deg apart looking at the origin.
+
+    A SYMMETRIC rig: one K, one image size, 3 m away from a standing adult.
+    Keep it — it is the controlled baseline the dataset validation compares
+    against — but never test only on it: see `close_range_two_cam`.
+    """
     half = np.radians(baseline_deg / 2.0)
     left_eye = (-radius * np.sin(half), -radius * np.cos(half), height)
     right_eye = (radius * np.sin(half), -radius * np.cos(half), height)
@@ -55,15 +60,60 @@ def default_two_cam(baseline_deg=80.0, radius=3.0, height=1.0):
     return {
         "K": K, "dist": dist, "size": size,
         "left": (Rl, tl), "right": (Rr, tr),
+        "subject": sample_skeleton_3d(),
     }
 
 
-def sample_skeleton_3d():
+def close_range_two_cam(baseline=0.56, dist=0.53, f_left=4080,
+                        size_left=(3072, 4080), f_right=2048,
+                        size_right=(1536, 2048), subject_height=0.12):
+    """The client's rig: two phones either side of a hand-sized mannequin.
+
+    ASYMMETRIC by exactly 2:1 — different sensor, different focal length,
+    different pixel scale in each view. Every geometry test used to pass one
+    `Intrinsics` for both cameras at a 3.9 m baseline and 3 m range, so a bug
+    that assumes a single K, or that sizes a pixel tolerance from one image and
+    applies it to the other, was structurally invisible.
+
+    Defaults are the measured client take: 0.56 m baseline, 0.53 m range,
+    3072x4080 at f=4080 left and 1536x2048 at f=2048 right.
+    """
+    half = baseline / 2.0
+    depth = float(np.sqrt(max(dist ** 2 - half ** 2, 1e-9)))
+    centre = subject_height / 2.0
+    Kl, dist_l, sl = make_intrinsics(size_left[0], size_left[1], f_left)
+    Kr, dist_r, sr = make_intrinsics(size_right[0], size_right[1], f_right)
+    Rl, tl = look_at((-half, -depth, centre), (0, 0, centre))
+    Rr, tr = look_at((half, -depth, centre), (0, 0, centre))
+    return {
+        "K_left": Kl, "dist_left": dist_l, "size_left": sl,
+        "K_right": Kr, "dist_right": dist_r, "size_right": sr,
+        "left": (Rl, tl), "right": (Rr, tr),
+        "subject": sample_skeleton_3d(height=subject_height),
+    }
+
+
+def cameras(geo) -> dict[str, tuple]:
+    """{cam: (K, dist, image_size)} for either rig shape.
+
+    A symmetric rig reports the same triple twice, so a test can be written
+    once and parametrised over both without caring which it got.
+    """
+    if "K" in geo:
+        return {"left": (geo["K"], geo["dist"], geo["size"]),
+                "right": (geo["K"], geo["dist"], geo["size"])}
+    return {"left": (geo["K_left"], geo["dist_left"], geo["size_left"]),
+            "right": (geo["K_right"], geo["dist_right"], geo["size_right"])}
+
+
+def sample_skeleton_3d(height=1.7):
     """A plausible standing pose in canonical Joint order (15 joints), metres.
 
-    Order matches pose3d.core.skeleton.Joint.
+    Order matches pose3d.core.skeleton.Joint. `height` scales the whole figure
+    about the ground plane, so the same pose serves both the 1.7 m human of
+    the synthetic rig and the client's 12 cm mannequin.
     """
-    return np.array([
+    pose = np.array([
         [0.00, 0.00, 1.70],   # HEAD
         [0.00, 0.00, 1.50],   # NECK
         [-0.18, 0.00, 1.48],  # LEFT_SHOULDER
@@ -80,6 +130,7 @@ def sample_skeleton_3d():
         [-0.12, 0.03, 0.08],  # LEFT_ANKLE
         [0.12, 0.03, 0.08],   # RIGHT_ANKLE
     ], dtype=float)
+    return pose * (height / 1.7)
 
 
 def rot_about(axis, deg):
