@@ -219,28 +219,15 @@ def bone_length_stats(poses: np.ndarray) -> dict:
 def _point_line_px(pt_left, pt_right, F) -> tuple[float, float]:
     """Per-image point-to-epipolar-line distances (d_L, d_R) in px.
 
-    Sampson is one number for the pair; these two say how far the observation
-    sits from its partner's epipolar line IN EACH IMAGE, which is the only form
-    comparable across an asymmetric rig once each is divided by its own
-    image diagonal.
-
-    `F` is the rig's fundamental matrix, passed in: it is a constant of the
-    rig, and rebuilding it per (joint, frame) pair — 388 times on the client
-    take — is work this will not afford if it ever runs behind the UI.
+    `pipeline.point_line_distances`, under the name this module has always
+    used it by. It was a verbatim copy of it — same body, same guards, same
+    epsilons — on the theory that importing the pipeline from here would
+    invert the layering; this module already imports the pipeline
+    (`from pose3d import pipeline as pl`, at the top of this file), so it
+    never did. The metric that reports on the gate now cannot drift
+    from the gate, because there is only one of it.
     """
-    pt_left = np.asarray(pt_left, float).reshape(2)
-    pt_right = np.asarray(pt_right, float).reshape(2)
-    if np.isnan(pt_left).any() or np.isnan(pt_right).any():
-        return float("nan"), float("nan")
-    xl = np.array([pt_left[0], pt_left[1], 1.0])
-    xr = np.array([pt_right[0], pt_right[1], 1.0])
-    num = abs(float(xr @ F @ xl))
-    lr = F @ xl                      # epipolar line of xl, in the RIGHT image
-    ll = F.T @ xr                    # epipolar line of xr, in the LEFT image
-    nl = math.hypot(ll[0], ll[1])
-    nr = math.hypot(lr[0], lr[1])
-    return (num / nl if nl > 1e-12 else float("nan"),
-            num / nr if nr > 1e-12 else float("nan"))
+    return pl.point_line_distances(pt_left, pt_right, F)
 
 
 def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
@@ -289,10 +276,14 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
         }
     # The gate this take is ACTUALLY judged by, from this take's own
     # distribution (pipeline.epipolar_gate is the one implementation of the
-    # formula). Reporting `epipolar_threshold(rig)` here would print the
-    # ceiling — the widest the gate may ever be — as though it were the
-    # threshold the pairs below were counted against.
-    thr = pl.epipolar_gate(_nanstat(allv, np.median), min(diag.values()))
+    # formula). The ceiling is 1.4 % of the smaller image's diagonal — the
+    # per-image ALLOWANCE, 35.8 px on the client rig — and not the raw
+    # diagonal, which is 2560 px and caps nothing: with that in place a rig
+    # 12 deg out reported `threshold_px = 555.77` and
+    # `frac_over_threshold = 0.0` on a take the gate had just emptied, which
+    # is the exact diagnosis this row exists to give.
+    thr = pl.epipolar_gate(_nanstat(allv, np.median),
+                           min(pl.per_image_allowances(rig).values()))
     return {
         "per_joint": per,
         "per_image": per_image,

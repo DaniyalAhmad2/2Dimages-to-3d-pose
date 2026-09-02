@@ -510,7 +510,8 @@ class Sidebar(QWidget):
             "and capped at 1.4 % of the smaller image's diagonal. The fixed "
             "1.4 %-of-the-left-image rule it replaces was 71.5 px here — 14.6x "
             "the median, wide enough to pass a rig seven degrees out and to "
-            "miss an ankle detected on the knee in 11 of 26 frames.")
+            "miss an ankle detected on the knee in 10 of the 25 frames where "
+            "that test could be run.")
         lay.addWidget(self.row_gate)
         self.row_symmetry = _InfoRow("L/R symmetry", "—")
         lay.addWidget(self.row_symmetry)

@@ -396,5 +396,73 @@ def test_the_narrower_gate_catches_the_hallucination_it_names():
             hit += bool(f.rejected[CAM_LEFT][int(bad)])
         caught[name] = (hit, n)
 
-    assert caught["ankle"][0] >= 20, caught["ankle"]     # today 21 of 25
-    assert caught["wrist"][0] >= 23, caught["wrist"]     # today 25 of 26
+    # floors with the project's 10-15 % margin under today's measurement, so
+    # a change that moves one or two frames reports a number instead of a
+    # failure; the OLD rule is the thing they have to stay clear of (15/25).
+    assert caught["ankle"][0] >= 18, caught["ankle"]     # today 21 of 25
+    assert caught["wrist"][0] >= 22, caught["wrist"]     # today 25 of 26
+    assert caught["ankle"][0] > 15, "no better than the 71.5 px rule"
+
+
+def test_the_sidebar_quotes_the_gate_that_was_applied():
+    """`quality.body_epipolar`'s `threshold_px` IS `epipolar_threshold`.
+
+    The sidebar's "Cross-view gate" row and `frac_over_threshold` come from
+    the quality block, and it computed the same formula with the wrong
+    ceiling: the smaller image's RAW diagonal (2560 px) instead of 1.4 % of it
+    (35.84 px). It agreed on a clean take, where the cap does not bind, and
+    lied exactly when it mattered — on the 12 deg rig below it reported a
+    threshold of 555.77 px and "0 % over threshold" for a take whose every
+    pair the gate had just rejected, which is the one diagnosis the row
+    exists to give.
+    """
+    from pose3d.core.io_project import load_project
+    from pose3d.quality import load_rig, take_quality
+
+    rig = load_rig(FIXTURE / "calibration")
+    for label, r in (("good", rig), ("12 deg out", _damaged_left(rig))):
+        data = load_project(FIXTURE)
+        dropped = triangulate_project(data, r)
+        q = take_quality(data, r)
+        assert q.epipolar["threshold_px"] == pytest.approx(
+            epipolar_threshold(r, data)), label
+        # and the two agree about what they have just done to the take
+        n_pairs = q.epipolar["n_pairs"]
+        assert (q.epipolar["frac_over_threshold"] > 0.5) == (
+            dropped > 0.5 * n_pairs), (label, dropped, q.epipolar)
+
+
+def test_losing_a_joint_narrows_the_gate_onto_the_takes_own_tail():
+    """The gate is sized from the take it is judging, and this take's tail is
+    0.06 px inside it.
+
+    `clip(6 x median, 25 px, ceiling)` on the fixture is 29.449 px against a
+    measured Sampson maximum of 29.384 — the margin is 0.2 %. Black out one
+    joint in one view for the whole take and those 26 pairs leave the
+    distribution, the median falls, and the gate closes to 28.439 px, which
+    rejects two pairs of the take's own tail that nothing is wrong with.
+
+    Recorded, not gated: k = 6 is the plan's constant and the take still drops
+    0 of 388 undamaged. This is the number to look at when a change to the
+    detector or the rig moves the median, and it is the reason
+    `test_fallback_lengths_scale_to_the_subject` measures the fallback table
+    with the gate held fixed.
+    """
+    from pose3d.core.io_project import load_project
+    from pose3d.quality import load_rig
+
+    rig = load_rig(FIXTURE / "calibration")
+    clean = load_project(FIXTURE)
+    thr_clean = epipolar_threshold(rig, clean)
+    assert validate_cross_view(clean, rig) == 0
+
+    damaged = load_project(FIXTURE)
+    for f in damaged.frames:
+        f.kp2d[CAM_LEFT][int(Joint.RIGHT_HIP)] = np.nan
+        f.scores[CAM_LEFT][int(Joint.RIGHT_HIP)] = 0.0
+    thr_damaged = epipolar_threshold(rig, damaged)
+
+    assert thr_damaged < thr_clean                  # 28.439 vs 29.449 px
+    assert thr_clean - thr_damaged < 2.0, (thr_clean, thr_damaged)   # 1.01 px
+    # ...and that alone rejects a few pairs the clean gate is happy with
+    assert validate_cross_view(damaged, rig) <= 6   # today 2

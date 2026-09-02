@@ -142,7 +142,10 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             # what the app showed, and so no step downstream is ever holding
             # the only copy of what the cameras saw. Costs roughly a doubling
             # of project.json (200 KB -> ~400 KB on the client take) and buys
-            # never destroying detector output again.
+            # never destroying detector output again. NOTHING IN THE APP READS
+            # kp2d_raw/scores_raw YET — they are the record, not a code path,
+            # so whoever finds the file doubled in size and greps for a reader
+            # is not looking at dead weight by mistake.
             "kp2d_raw": {c: _arr_to_json(f.kp2d_raw[c]) for c in CAMERAS},
             "scores_raw": {c: _vec_to_json(f.scores_raw[c]) for c in CAMERAS},
             "rejected": {c: [bool(v) for v in f.rejected[c]] for c in CAMERAS},
