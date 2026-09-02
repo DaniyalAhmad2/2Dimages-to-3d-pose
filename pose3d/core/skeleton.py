@@ -3,16 +3,17 @@
 This is the single source of truth for joint identity in the whole app. Two
 detector layouts reach it, and each has its own mapping:
 
-* COCO-17 (`derive_joints`) is what the app detects with today. It has no
-  neck / pelvis / head-top at all, so those are derived by the standard
+* Halpe-26 (`map_halpe26`) is what the app detects with today
+  (`detect.rtmpose.USE_HALPE26`). It carries a native head point — the skull
+  vertex — which is taken as `Joint.HEAD`, while NECK and PELVIS stay 2D
+  midpoints; see `map_halpe26` for why the three are not decided together.
+* COCO-17 (`derive_joints`) is the other layout the detector can run, and what
+  every project imported before that switch was flipped was detected with. It
+  has no neck / pelvis / head-top at all, so those are derived by the standard
   midpoint convention (same as OpenPose BODY_25 neck/mid-hip):
       head   = nose
       neck   = midpoint(left_shoulder, right_shoulder)
       pelvis = midpoint(left_hip, right_hip)
-* Halpe-26 (`map_halpe26`) is the other layout the detector can run
-  (`detect.rtmpose.USE_HALPE26`). It carries a native head point — the skull
-  vertex — which is taken as `Joint.HEAD`, while NECK and PELVIS stay 2D
-  midpoints; see `map_halpe26` for why the three are not decided together.
 
 Derived-joint confidence = min(parent confidences) (conservative).
 
@@ -153,8 +154,9 @@ def derive_joints(
     """Map COCO-17 keypoints to the canonical joint set.
 
     COCO-17 has no head-top, neck or pelvis, so HEAD is the nose and the other
-    two are midpoints. This is the layout the app detects through today;
-    `map_halpe26` is the alternative (see `detect.rtmpose.USE_HALPE26`).
+    two are midpoints. `map_halpe26` is the layout the app detects through
+    today (see `detect.rtmpose.USE_HALPE26`); this one still runs every project
+    imported before that switch was flipped, and is the one-line rollback.
 
     Parameters
     ----------

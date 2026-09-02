@@ -5,7 +5,7 @@ where the user is already looking, on the dot they are about to drag.
 
 Every residual here is NORMALISED by that camera's figure height
 (`pose3d.quality.figure_height_px`), because a pixel is not a unit anyone can
-compare: the client's subject stands 776 px tall in the left image and 407 px
+compare: the client's subject stands 863 px tall in the left image and 446 px
 in the right, so the same error read 1.9x worse on the right, and the old
 `100*exp(-err_px/6)` map needed under 1 px on a 3072x4080 frame to call
 anything green — which is how a perfectly ordinary take came out 70.6 % red
@@ -59,8 +59,8 @@ def test_the_bands_are_fractions_of_figure_height():
     assert accuracy_pct(ACC_GREEN_FRAC) == pytest.approx(85.0)
     assert accuracy_pct(ACC_AMBER_FRAC) == pytest.approx(70.0)
     assert accuracy_pct(0.030) == pytest.approx(0.0)
-    # and the px form: 5 px on a 776 px figure is the same number as 0.00644
-    assert accuracy_pct(5.0, 776.0) == pytest.approx(accuracy_pct(5.0 / 776.0))
+    # and the px form: 5 px on an 863 px figure is the same number as 0.00579
+    assert accuracy_pct(5.0, 863.0) == pytest.approx(accuracy_pct(5.0 / 863.0))
     assert np.isnan(accuracy_pct(np.nan))
 
 

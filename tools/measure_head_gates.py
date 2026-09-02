@@ -35,6 +35,15 @@ import numpy as np
 # The gate table, fixed BEFORE the run (PLAN.md Phase 5), as
 # {metric key: the rule it must satisfy}. The COCO-17 "today" column is
 # re-measured here rather than assumed.
+#
+# This is the PRE-REGISTERED table and it stays that way, so re-running this
+# script still prints "6/7 — STAYS OFF". That is not the shipping decision:
+# neck-Lshoulder was restated to <= 6.5 % on review and the switch ships ON.
+# The restatement is `RESTATED_GATE` below; it is written into both evidence
+# files, and tests/test_head_source.py asserts them against each other, against
+# this module and against USE_HALPE26. Do not "fix" the disagreement by
+# loosening the table below or by re-scoring phase5_metrics.json against the
+# restated bar: what was fixed in advance has to keep saying what it said.
 GATES: dict[str, str] = {
     "head_retarget_no_face_pct": "<= 4.0 % of body height",
     "head_retarget_with_face_pct": "<= 3.0 % of body height",
@@ -44,6 +53,56 @@ GATES: dict[str, str] = {
     "head_aim_error_deg": "< 5 deg with the nose path disabled",
     "epipolar_median_px": "no regression on the COCO-17 baseline",
 }
+
+# The ONE gate that was restated after the measurement, on review, and the only
+# bar in the shipping table that is not the one fixed above. It lives here, in
+# code, so the two evidence files and the tests all quote the same words:
+# `phase5_metrics.json` (the pre-registered run, whose `gates` and 6-of-7
+# verdict below stay exactly as measured) carries it as `restated_gate`, and
+# `phase5_gates.json` (the shipping table, re-derived from the committed
+# fixture) carries it as the rule its neck-Lshoulder row actually ships under.
+RESTATED_GATE: dict[str, str] = {
+    "key": "neck_lshoulder_bone_cv_pct",
+    "pre_registered_rule": "<= 5.15 % (the COCO-17 baseline)",
+    "rule": "<= 6.5 %",
+    "decided_by": "controller ruling, 2026-09-03, after the measurement",
+    "reason": ("The 5.15 % bar was the COCO-17 measurement itself, not a "
+               "tolerance anybody had derived: it made the rule 'no worse "
+               "than today, at all, on this one bone'. The 0.83 pp it "
+               "moves is about 0.13 mm on a 16 mm bone and roughly one "
+               "standard error of a coefficient of variation at n=26, set "
+               "against an ~11 pp improvement (12.73 -> 1.54 % of body "
+               "height) on the most visible joint in the take. Restated "
+               "to 6.5 %, which leaves the measured 5.98 % a real margin "
+               "to regress into before the gate is silent."),
+    "cost_if_wrong": ("The neck-shoulder bone length wobbles 0.8 pp more "
+                      "frame to frame than it did under COCO-17. It is a "
+                      "RAW-measurement statistic: the bone fit holds that "
+                      "length rigid, so the delivered pose and the "
+                      "exported file do not inherit the wobble; what it "
+                      "can cost is a slightly noisier quality readout on "
+                      "that bone."),
+    "what_would_reopen_it": ("neck-Lshoulder CV above 6.5 % on the "
+                             "fixture, or the derived NECK showing the "
+                             "same spread in the DELIVERED pose rather "
+                             "than the raw one."),
+    "recorded_in": "docs/audit-2026-09/phase5_gates.json (the shipping "
+                   "table), pose3d.detect.rtmpose.USE_HALPE26, and "
+                   "tests/test_head_source.py",
+}
+
+#: What `switch.ships_on` in the pre-registered file does NOT say. That flag is
+#: this table's own arithmetic (7 of 7 or nothing), so it reads False forever;
+#: the app ships the switch ON under `RESTATED_GATE`. Written into the file so
+#: a reader who opens only the evidence is not misled by it.
+SHIPS_ON_NOTE = (
+    "This flag is the PRE-REGISTERED table's own arithmetic and it stays "
+    "False: 6 of the 7 gates fixed in advance passed. It is not the shipping "
+    "state. The seventh was restated on review (see `restated_gate` below, "
+    "and docs/audit-2026-09/phase5_gates.json for the same seven gates "
+    "re-measured on the committed fixture), and the app ships with "
+    "pose3d.detect.rtmpose.USE_HALPE26 = True."
+)
 
 # HEAD is the change itself, so it cannot also be a no-regression gate. NECK
 # and PELVIS are NOT excluded even though the plan's wording ("any directly-
@@ -335,9 +394,15 @@ def main(argv=None) -> int:
               f"{r['measured']:7.2f} {r['unit']:<12} {r['rule']:<34} "
               f"{'PASS' if r['pass'] else 'FAIL'}")
     passed = sum(r["pass"] for r in rows)
-    print(f"\n{passed}/{len(rows)} gates pass — the switch "
-          f"({'SHIPS' if passed == len(rows) else 'STAYS OFF'}: "
-          "detect.rtmpose.USE_HALPE26)")
+    print(f"\n{passed}/{len(rows)} gates pass — against the table as it was "
+          f"FIXED IN ADVANCE, that is "
+          f"{'SHIPS' if passed == len(rows) else 'STAYS OFF'} "
+          "(detect.rtmpose.USE_HALPE26)")
+    failed = [r["key"] for r in rows if not r["pass"]]
+    if failed == [RESTATED_GATE["key"]]:
+        print(f"  ...but that one gate was RESTATED on review to "
+              f"{RESTATED_GATE['rule']} and the switch ships ON; see "
+              f"{RESTATED_GATE['recorded_in']}")
 
     out = {
         "generated_by": "tools/measure_head_gates.py",
@@ -345,7 +410,12 @@ def main(argv=None) -> int:
                       "--cache <dir> --variants --out <this file>"),
         "take": args.project.name, "frames": base["n_frames"],
         "switch": {"constant": "pose3d.detect.rtmpose.USE_HALPE26",
-                   "ships_on": passed == len(rows)},
+                   "ships_on": passed == len(rows),
+                   "ships_on_note": SHIPS_ON_NOTE},
+        "restated_gate": dict(
+            RESTATED_GATE,
+            measured=next(r["measured"] for r in rows
+                          if r["key"] == RESTATED_GATE["key"])),
         "gates": rows, "passed": passed, "of": len(rows),
         "runs": {"coco": base, "halpe": cand},
     }

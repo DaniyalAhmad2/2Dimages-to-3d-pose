@@ -17,6 +17,13 @@ It writes
     client_take/aruco_corners.json    the DICT_6X6_250 tags detected in each
                                       real image, so calibration work needs
                                       neither the photographs nor a detector
+    client_take/as_delivered.json     the SOURCE project's own `fitted3d` —
+                                      the pose the client was actually sent by
+                                      the August build. Copied from the source
+                                      untouched whether or not --redetect ran,
+                                      because a re-detected project.json holds
+                                      today's pose and the lag defect would
+                                      otherwise stop being pinned by anything
 
 Nothing here runs at test time: the ArUco detection happens once, now.
 
@@ -24,9 +31,9 @@ With `--redetect` the take is re-detected and re-reconstructed with the
 CURRENT detector and pipeline before being trimmed. That is how the fixture is
 re-baselined when either changes, and it is not optional when the DETECTOR
 changes: switching to the Halpe-26 layout (detect.rtmpose.USE_HALPE26) moves
-the reconstructed body height 0.1195 -> 0.1302 m, and every "% of body height"
-threshold in tests/test_client_regression.py with it. The source project is
-only read; the new poses exist in memory and land in the fixture.
+the reconstructed body height, and every "% of body height" threshold in
+tests/test_client_regression.py with it. The source project is only read; the
+new poses exist in memory and land in the fixture.
 """
 from __future__ import annotations
 
@@ -106,6 +113,25 @@ def trim_project(doc: dict) -> dict:
             trimmed["filled"] = [bool(v) for v in f["filled"]]
         out["frames"].append(trimmed)
     return out
+
+
+def as_delivered(doc: dict) -> dict:
+    """The pose the client was SENT, lifted out of the source project.
+
+    `project.json` in the fixture holds whatever this build reconstructs (see
+    `redetect`), so once the fixture has been regenerated on a fixed build,
+    nothing in it remembers the smoothed, lagging pose that was delivered in
+    August. This file does, and it is what
+    `test_the_fixture_still_carries_the_pose_the_client_was_sent` measures
+    against — the defect stays pinned across every re-baseline.
+    """
+    return {
+        "note": "fitted3d exactly as the source project.json carries it: the "
+                "pose the client received, NOT what this build computes",
+        "source_pipeline_version": doc.get("pipeline_version"),
+        "source_head_source": doc.get("head_source", "nose"),
+        "frames": {f["frame_id"]: f["fitted3d"] for f in doc["frames"]},
+    }
 
 
 def redetect(source: Path, doc: dict) -> dict:
@@ -191,6 +217,7 @@ def main(argv=None) -> int:
 
     source = Path(args.source)
     doc = json.loads((source / "project.json").read_text())
+    delivered = as_delivered(doc)            # BEFORE any re-detection
     if args.redetect:
         doc = redetect(source, doc)
 
@@ -207,6 +234,7 @@ def main(argv=None) -> int:
 
     print(f"regenerating {FIXTURE.relative_to(REPO)} from {source}")
     write(FIXTURE / "project.json", trim_project(doc))
+    write(FIXTURE / "as_delivered.json", delivered)
     write(FIXTURE / "aruco_corners.json", detect_aruco(source, doc))
     total = sum(p.stat().st_size for p in FIXTURE.rglob("*") if p.is_file())
     print(f"  total {total / 1024:.0f} KB")

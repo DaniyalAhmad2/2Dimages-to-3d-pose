@@ -22,7 +22,7 @@ if ! ls "$VENDOR"/blender-*-linux-x64.tar.xz >/dev/null 2>&1; then
 fi
 # Same staging step the Windows release runs, so both deliveries carry exactly
 # the checkpoints rtmlib asks for rather than a hand-copied guess — BOTH pose
-# models (the COCO-17 one the app detects with today and the Halpe-26 one) and
+# models (the Halpe-26 one the app detects with today and the COCO-17 one) and
 # the shared YOLOX detector, whichever way detect.rtmpose's USE_HALPE26 stands,
 # so flipping that constant needs no build change. The image bakes the whole
 # folder in, so nothing downloads at the client's run time; docker/smoketest.py

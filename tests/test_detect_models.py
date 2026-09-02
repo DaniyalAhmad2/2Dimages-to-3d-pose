@@ -85,7 +85,13 @@ def test_detector_reports_which_path_it_took(tmp_path, monkeypatch):
         def __call__(self, image):
             return np.zeros((0, 17, 2)), np.zeros((0, 17))
 
-    monkeypatch.setenv("POSE3D_MODELS", str(_stage(tmp_path / "staged")))
+    # staged for the layout the app actually detects with, or the pose model
+    # resolves out of the developer's rtmlib cache and the assertion below is
+    # about the wrong file
+    from pose3d.detect.rtmpose import USE_HALPE26
+
+    monkeypatch.setenv(
+        "POSE3D_MODELS", str(_stage(tmp_path / "staged", feet=USE_HALPE26)))
     monkeypatch.setattr(models, "TwoStageDetector", FakeTwoStage)
     det = RTMPoseDetector(mode="balanced", device="cpu")
     assert det.bundled
