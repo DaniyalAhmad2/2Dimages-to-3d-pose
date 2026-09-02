@@ -12,7 +12,7 @@ from pose3d.calib.intrinsics import Intrinsics, focal_from_exif
 from pose3d.calib.quality import check_rig, looks_assumed
 
 
-def _jpeg_with_f35(path, size, f35, ifd0=False):
+def _jpeg_with_f35(path, size, f35, ifd0=False, zoom=None):
     """A JPEG carrying FocalLengthIn35mmFilm where a real camera puts it.
 
     Phones write it to the Exif sub-IFD (0x8769); only the top-level IFD0 is
@@ -27,6 +27,8 @@ def _jpeg_with_f35(path, size, f35, ifd0=False):
             exif[41989] = f35
         else:
             exif.get_ifd(0x8769)[41989] = f35
+    if zoom is not None:
+        exif.get_ifd(0x8769)[41988] = zoom
     im.save(path, "JPEG", exif=exif)
     return path
 
@@ -62,27 +64,52 @@ def test_zero_focal_is_rejected(tmp_path):
     assert focal_from_exif(_jpeg_with_f35(tmp_path / "z.jpg", (640, 480), 0)) is None
 
 
-def test_the_default_focal_is_the_size_guess_not_exif(tmp_path):
-    """EXIF is physically the right focal and empirically the wrong one here.
+def test_digital_zoom_is_applied(tmp_path):
+    """A phone's 35mm-equivalent describes its LENS, not the frame it wrote.
 
-    On the client's captures f=2833 (EXIF) made the two views disagree —
-    median epipolar 26.6 px, 38% of keypoints rejected by validate_cross_view,
-    which emptied the 3D view — while the baseless f=max(w,h)=4080 gave 4.9 px
-    and rejected nothing. With extrinsics solved from a single planar marker
-    using the same K, the guess is self-consistent and the true focal is not.
-    focal_from_exif stays tested as the input to a future focal *selection*
-    step scored on tags not used for the extrinsics.
+    The client's left camera records 24 mm with DigitalZoomRatio 1.26, so the
+    frame's real focal is ~3570 px. Ignoring the zoom gave 2833 px — 21 %
+    short, and THAT is the number the EXIF focal was judged and reverted on.
+    """
+    p = _jpeg_with_f35(tmp_path / "zoom.jpg", (3072, 4080), 24, zoom=1.26)
+    assert focal_from_exif(p) == pytest.approx(3569.5, abs=5.0)
+
+    # no zoom tag, or a zoom of 1: the plain 35mm-equivalent
+    q = _jpeg_with_f35(tmp_path / "plain.jpg", (3072, 4080), 24)
+    assert focal_from_exif(q) == pytest.approx(2833.0, abs=5.0)
+    r = _jpeg_with_f35(tmp_path / "one.jpg", (3072, 4080), 24, zoom=1)
+    assert focal_from_exif(r) == pytest.approx(focal_from_exif(q))
+
+
+def test_the_default_focal_is_the_size_guess_not_exif(tmp_path):
+    """Inverted on purpose: EXIF is now computed RIGHT and still not used.
+
+    The original version of this test justified the size guess with "EXIF says
+    2833 px and that emptied the 3D view". That number was wrong — it dropped
+    DigitalZoomRatio — so the justification would not have survived anyone
+    recomputing it, and the revert of the EXIF focal (f4c92f9) would get
+    re-litigated as "the approach was wrong" when what was wrong was the
+    arithmetic.
+
+    So: EXIF here is 3570 px, 12 % from the guess rather than 31 %, and the
+    guess is STILL what the app uses, because it is what measures best on the
+    client's rig — 4.91 px of body epipolar error for f=max(w,h) against 5.37
+    for the best focal pair a sweep could find and 10.9 for the EXIF pair.
+    Body keypoints play no part in the calibration, so that comparison is
+    independent of the tags that produced the extrinsics.
     """
     from pose3d.calib.resolve import _approx_intrinsics
 
     img = np.zeros((4080, 3072, 3), np.uint8)
-    p = _jpeg_with_f35(tmp_path / "shot.jpg", (3072, 4080), 24)
+    p = _jpeg_with_f35(tmp_path / "shot.jpg", (3072, 4080), 24, zoom=1.26)
 
-    assert focal_from_exif(p) is not None      # EXIF is readable...
-    got = _approx_intrinsics(img)              # ...and deliberately not used
+    f_exif = focal_from_exif(p)
+    assert f_exif == pytest.approx(3569.5, abs=5.0)   # readable and correct...
+    got = _approx_intrinsics(img)                     # ...and deliberately unused
     assert got.source == "assumed"
     assert got.K[0, 0] == 4080.0
     assert looks_assumed(got)
+    assert abs(f_exif - 4080.0) / 4080.0 < 0.15
 
 
 def test_source_survives_a_save_load_round_trip(tmp_path):
@@ -122,3 +149,20 @@ def test_keyless_file_does_not_become_measured(tmp_path):
                    image_size=(3072, 4080), source="measured")
     k.save(tmp_path / "m.json")
     assert Intrinsics.load(tmp_path / "m.json").source == "measured"
+
+
+def test_a_checkerboard_never_overwrites_a_measured_calibration():
+    """The one-time override is gated on provenance: a guess is replaced, a
+    real calibration is not, so re-running the import cannot quietly demote a
+    camera that was properly calibrated."""
+    from pose3d.calib.intrinsics import checkerboard_override
+
+    measured = Intrinsics(K=np.eye(3), dist=np.zeros((1, 5)),
+                          image_size=(640, 480), rms=0.4, source="measured")
+    # no images are even looked at: the gate short-circuits
+    assert checkerboard_override(measured, [], (9, 6)) is measured
+
+    guessed = Intrinsics(K=np.eye(3), dist=np.zeros((1, 5)),
+                         image_size=(640, 480), source="assumed")
+    with pytest.raises(ValueError):        # ...and a guess does go to calibrate
+        checkerboard_override(guessed, [], (9, 6))

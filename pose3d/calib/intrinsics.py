@@ -87,12 +87,22 @@ def focal_from_exif(image_path) -> float | None:
 
     Phones record `FocalLengthIn35mmFilm`: the focal a 35mm camera would need
     for the same diagonal field of view. Rescaling it by this image's diagonal
-    recovers the pixel focal length, which is a far better starting point than
-    guessing f = max(width, height) — for a Pixel 10 Pro (24mm-equivalent,
-    3072x4080) the guess is ~45% too long, and an over-long focal warps
-    triangulated depth.
+    recovers the pixel focal length.
+
+    `DigitalZoomRatio` MUST be applied on top. A phone reports the
+    35mm-equivalent of its lens, not of the cropped-and-upscaled frame it
+    actually wrote: the client's left camera records 24 mm with a 1.26x digital
+    zoom, so the honest number is 3570 px and the naive one 2833 px — 21 %
+    short. That 2833 is the number commit f4c92f9 reverted; the revert was
+    right, but for the record the value being reverted was computed WRONG, and
+    the EXIF focal is not itself a bad idea (see resolve._approx_intrinsics for
+    why the size guess still wins on this rig).
+
+    Returns None when the file has no EXIF at all — the client's right camera
+    has none, and inventing a focal for one camera of a pair is worse than
+    guessing consistently for both.
     """
-    _F35, _EXIF_IFD = 41989, 0x8769
+    _F35, _ZOOM, _EXIF_IFD = 41989, 41988, 0x8769
     try:
         from PIL import Image
 
@@ -104,9 +114,13 @@ def focal_from_exif(image_path) -> float | None:
             # make/model/orientation. Check both: PIL writes it to IFD0 when
             # round-tripping, so files produced by other tools can have it
             # there too.
-            f35 = exif.get(_F35) if exif else None
-            if f35 is None and exif:
-                f35 = exif.get_ifd(_EXIF_IFD).get(_F35)
+            sub = exif.get_ifd(_EXIF_IFD) if exif else {}
+            f35 = (exif.get(_F35) if exif else None)
+            if f35 is None:
+                f35 = sub.get(_F35)
+            zoom = (exif.get(_ZOOM) if exif else None)
+            if zoom is None:
+                zoom = sub.get(_ZOOM)
     except Exception:
         return None                                # unreadable/no EXIF: caller falls back
     try:
@@ -115,7 +129,13 @@ def focal_from_exif(image_path) -> float | None:
         return None
     if not (f35 > 0) or not (w > 0 and h > 0):
         return None
-    return f35 * float(np.hypot(w, h)) / _FRAME35_DIAG_MM
+    try:
+        zoom = float(zoom)
+    except (TypeError, ValueError):
+        zoom = 1.0
+    if not (zoom > 0):                             # 0 means "no digital zoom"
+        zoom = 1.0
+    return f35 * zoom * float(np.hypot(w, h)) / _FRAME35_DIAG_MM
 
 
 def calibrate_checkerboard(
@@ -166,3 +186,30 @@ def calibrate_checkerboard(
         objpoints, imgpoints, image_size, None, None)
     return Intrinsics(K=K, dist=dist, image_size=image_size, rms=float(rms),
                       source="measured")
+
+
+def checkerboard_override(current: Intrinsics, images: list[np.ndarray],
+                          pattern_size: tuple[int, int],
+                          square_size: float = 1.0) -> Intrinsics:
+    """Replace guessed intrinsics with a one-time checkerboard calibration.
+
+    Gated on `current.source`: an already-measured calibration is kept, so a
+    stray capture cannot quietly overwrite the good one. Everything else
+    ("assumed", "exif", "unknown") is a guess and is replaced.
+
+    This is the ONLY way distortion or a non-central principal point can ever
+    enter the app: the scene tags cannot fit either (k1 = 0.03 moves a tag
+    corner 10.9 px but the subject 0.27 px, and a principal point 200 px off
+    centre costs 19 px of epipolar error while the tags stay happy). The
+    checkerboard capture also has to match the shot: lock autofocus, or the
+    focal it measures is not the focal that took the images.
+    """
+    if current is not None and current.source == "measured":
+        return current
+    got = calibrate_checkerboard(images, pattern_size, square_size)
+    if current is not None and tuple(got.image_size) != tuple(current.image_size):
+        raise ValueError(
+            f"checkerboard images are {got.image_size[0]}x{got.image_size[1]} "
+            f"but this camera shot {current.image_size[0]}x"
+            f"{current.image_size[1]} — calibrate at the capture resolution")
+    return got
