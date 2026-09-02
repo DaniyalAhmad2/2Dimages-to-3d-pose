@@ -598,12 +598,18 @@ def test_rig_proportions_are_human():
 # lines for the torso. The defect is purely angular — every positional metric
 # in this file is blind to it — so these tests are the only net it has.
 
-def _roll_gauge(ch, pose, role, gauge=None):
+def _roll_gauge(ch, pose, role, gauge=None, tgt=None):
     """(roll error vs the captured bend plane, roll angle off `gauge`), in deg.
 
     Both are measured the way the audit did: project the bone's carried rest
     reference and the target perpendicular to the POSED bone axis and take the
     signed angle between them about that axis.
+
+    `tgt` overrides the captured bend normal with one the caller worked out for
+    itself, in pose space. Without it this helper reads `_BEND_REF` and calls
+    `Character._hemisphere`, so it shares the joint table and the sign
+    convention with the code under test and cannot catch either being wrong —
+    which is why the headline 40/60 case supplies its own.
     """
     from pose3d.geometry.character import _BEND_REF, Character, _proj_perp
     valid = ~np.isnan(pose).any(1)
@@ -618,10 +624,14 @@ def _roll_gauge(ch, pose, role, gauge=None):
         return np.degrees(np.arctan2(float(np.dot(np.cross(x, cur), ax)),
                                      float(np.dot(x, cur))))
 
-    ja, jm, jb, line = _BEND_REF[role]
-    tgt = Character._hemisphere(
-        Rz @ np.cross(pose[int(jm)] - pose[int(ja)], pose[int(jb)] - pose[int(jm)]),
-        Rz @ (pose[int(line[1])] - pose[int(line[0])]))
+    if tgt is None:
+        ja, jm, jb, line = _BEND_REF[role]
+        tgt = Character._hemisphere(
+            Rz @ np.cross(pose[int(jm)] - pose[int(ja)],
+                          pose[int(jb)] - pose[int(jm)]),
+            Rz @ (pose[int(line[1])] - pose[int(line[0])]))
+    else:
+        tgt = Rz @ np.asarray(tgt, float)
     tgt = None if tgt is None else _proj_perp(tgt, ax)
     err = None if tgt is None else -signed(tgt)
     return err, (None if gauge is None else signed(_proj_perp(gauge, ax)))
@@ -643,6 +653,15 @@ def _bent_left_arm(ch, bend_deg, twist_deg):
     return sub
 
 
+# The bend-plane normal of `_bent_left_arm(ch, 40, 60)` on the bundled rig,
+# worked out ONCE from the synthetic construction and written down here so the
+# test does not re-derive its own answer through `_BEND_REF` and
+# `Character._hemisphere`: unit(cross(elbow - shoulder, wrist - elbow)), signed
+# onto the shoulder line's side. Swap the rig and this must be re-derived,
+# which is the point of hard-coding it.
+_BEND_NORMAL_40_60 = np.array([-0.385651, 0.891343, -0.238289])
+
+
 def test_limb_roll_matches_the_captured_bend_plane():
     """The upper arm's spin is a MEASUREMENT: the elbow is a hinge, so the
     plane the arm bends in fixes it. Bend the synthetic elbow 40 deg in a plane
@@ -650,8 +669,20 @@ def test_limb_roll_matches_the_captured_bend_plane():
     bend reference onto that plane."""
     ch = _ch()
     sub = _bent_left_arm(ch, 40.0, 60.0)
+
+    # the literal really is this pose's bend normal: perpendicular to both limb
+    # segments and on the shoulder line's side. Arithmetic only — no character
+    # code, so a wrong joint table or a flipped hemisphere in the production
+    # helpers cannot hide inside it.
+    up = sub[int(Joint.LEFT_ELBOW)] - sub[int(Joint.LEFT_SHOULDER)]
+    fore = sub[int(Joint.LEFT_WRIST)] - sub[int(Joint.LEFT_ELBOW)]
+    line = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    assert abs(np.dot(_BEND_NORMAL_40_60, up / np.linalg.norm(up))) < 1e-5
+    assert abs(np.dot(_BEND_NORMAL_40_60, fore / np.linalg.norm(fore))) < 1e-5
+    assert np.dot(_BEND_NORMAL_40_60, line) > 0
+
     ch.fit_to_subject(sub[None])
-    err, _ = _roll_gauge(ch, sub, "upper_arm.L")
+    err, _ = _roll_gauge(ch, sub, "upper_arm.L", tgt=_BEND_NORMAL_40_60)
     assert abs(err) < 2.0, f"roll is {err:.1f} deg off the captured bend plane"
 
 
@@ -685,7 +716,15 @@ def test_roll_does_not_move_the_canonical_joints(monkeypatch):
 
 def test_roll_weight_zero_restores_the_minimal_rotation(monkeypatch):
     """The documented rollback: setting the weight to 0 must reproduce the
-    pre-roll matrices exactly, not approximately."""
+    pre-roll matrices exactly, not approximately.
+
+    "Bit for bit" carries ONE documented exception, asserted at the bottom of
+    this test: `_align`'s antipodal branch keeps the rest reference whatever
+    the weight is, because there the pre-roll answer was an arbitrary pick that
+    flipped a bone's roll by 163.8 deg for a 1 deg wobble (F43). No synthetic
+    pose here puts a bone at c < -0.999999, so the loop above would pass either
+    way — hence the explicit `_align` check.
+    """
     import pose3d.geometry.character as C
     monkeypatch.setattr(C, "_ROLL_WEIGHT", 0.0)
     off = _ch()
@@ -696,6 +735,13 @@ def test_roll_weight_zero_restores_the_minimal_rotation(monkeypatch):
         valid = ~np.isnan(p).any(1)
         assert np.abs(off._skin_matrices(p, valid)[0]
                       - bare._skin_matrices(p, valid)[0]).max() == 0.0
+
+    # the exception, stated as a fact rather than left in a comment
+    a = np.array([0.0, 0.0, 1.0])
+    ref = np.array([1.0, 1.0, 0.0]) / np.sqrt(2.0)
+    delta = np.abs(C._align(a, -a, ref=ref) - C._align(a, -a)).max()
+    assert delta > 0.5, ("the antipodal branch no longer depends on the rest "
+                         "reference — update the _ROLL_WEIGHT rollback note")
 
 
 def test_hip_line_follows_capture(monkeypatch):
@@ -742,12 +788,154 @@ def test_align_is_deterministic_near_180():
     assert step.max() < 5.0, f"roll flips {step.max():.1f} deg across 180"
 
 
+def _roll_error_undirected(ch, pose, role):
+    """|roll error| for one bone on one frame, in deg, as an UNDIRECTED angle.
+
+    The bend plane is a PLANE, so a normal and its negative describe the same
+    one: taking |dot| makes this measurement independent of the hemisphere rule
+    the production code uses to sign it, which is what keeps this a check of
+    the roll rather than a restatement of the convention. Returns (bend, err),
+    or None when the frame cannot supply the plane.
+    """
+    from pose3d.geometry.character import _BEND_REF, _proj_perp, _unit
+    valid = ~np.isnan(pose).any(1)
+    ja, jm, jb, _ = _BEND_REF[role]
+    if not all(valid[int(x)] for x in (ja, jm, jb)):
+        return None
+    v1 = _unit(pose[int(jm)] - pose[int(ja)])
+    v2 = _unit(pose[int(jb)] - pose[int(jm)])
+    if v1 is None or v2 is None:
+        return None
+    bend = np.degrees(np.arccos(np.clip(float(np.dot(v1, v2)), -1.0, 1.0)))
+    skin, _, _, Rz = ch._skin_matrices(pose, valid)
+    b = ch.role[role]
+    R = skin[b][:3, :3]
+    ax = _unit(R @ (ch.tail[b] - ch.head[b]))
+    cur = _proj_perp(R @ ch._rest_ref[b], ax)
+    tgt = _proj_perp(Rz @ np.cross(pose[int(jm)] - pose[int(ja)],
+                                   pose[int(jb)] - pose[int(jm)]), ax)
+    if cur is None or tgt is None:
+        return None
+    # atan2, not arccos: near zero arccos(1 - eps) loses half its digits and
+    # would read 1e-6 deg where the roll is exact to 1e-14.
+    return bend, float(np.degrees(np.arctan2(
+        float(np.linalg.norm(np.cross(cur, tgt))),
+        abs(float(np.dot(cur, tgt))))))
+
+
+def test_roll_error_is_zero_where_the_bend_plane_exists():
+    """The RESTATED ship gate for the roll (controller ruling 1/2a).
+
+    The brief asked for <= 5 deg median / <= 15 deg max roll error over every
+    frame, together with a 20/40 deg ramp that withholds the roll on nearly
+    straight limbs — two requirements that cannot both hold on a take whose
+    knees are often straight. The gate as restated applies where the bend plane
+    actually exists (bend >= 40 deg, full weight), and there the error must be
+    ZERO, not merely small: the bone is rotated onto the captured plane
+    exactly. The residual on the ramped frames is recorded in
+    docs/audit-2026-09/phase2_metrics.json (`roll_error_ramped_frames_deg`,
+    up to 50.8 deg on upper_arm.L at 22.7 deg of elbow bend) and deliberately
+    not gated. Continuity is covered by the straightening sweep above; the
+    brief's max consecutive-frame change is a metric, not a gate, because the
+    CAPTURED bend normal itself moves up to 55.7 deg between these discrete
+    stop-motion poses.
+    """
+    from pose3d.geometry.character import _BEND_REF, _ROLL_BEND_FULL_DEG
+    poses = fixture_poses()
+    if poses is None:
+        pytest.skip("the client take is gitignored; not checked out here")
+    ch = _ch()
+    ch.fit_to_subject(poses)
+    worst = 0.0
+    for role in _BEND_REF:
+        measured = [_roll_error_undirected(ch, p, role) for p in poses]
+        errs = [err for m in measured if m is not None
+                for bend, err in [m] if bend >= _ROLL_BEND_FULL_DEG]
+        assert errs, f"{role}: the take never bends this limb past full weight"
+        # measured: worst median 7.1e-15 deg, worst max 2.6e-14 deg
+        # over the eight bones — zero to floating point, not merely small
+        assert float(np.median(errs)) <= 1e-6, f"{role} median"
+        assert float(np.max(errs)) <= 1e-6, f"{role} max"
+        worst = max(worst, float(np.max(errs)))
+    assert worst <= 1e-6
+
+
+def test_a_missing_wrist_falls_back_to_weight_zero():
+    """A limb's bend plane needs all three of its joints, so a NaN wrist takes
+    the roll away for that frame and the bone snaps back to the minimal
+    rotation. That discontinuity is ACCEPTED and stateless (controller ruling
+    3): fading it in would need caller-owned temporal state, which desyncs the
+    scrubbed 3D view from the once-through Blender export. This pins the
+    fallback — the matrices are exactly the reference-free ones, nothing
+    raises, and the view and the export still agree — and the size of the pop.
+    """
+    import pose3d.geometry.character as C
+    ch = _ch()
+    sub = _bent_left_arm(ch, 60.0, 60.0)          # well past the 40 deg ramp
+    ch.fit_to_subject(sub[None])
+    gone = sub.copy()
+    gone[int(Joint.LEFT_WRIST)] = np.nan
+    valid = ~np.isnan(gone).any(1)
+    b = ch.role["upper_arm.L"]
+
+    got = ch._skin_matrices(gone, valid)[0]       # must not raise
+    assert not np.isnan(got[b]).any()
+
+    # the roll this frame keeps and the roll it loses, both measured before
+    # anything is monkeypatched
+    gauge = np.array([0.0, 0.0, 1.0])
+    _, held = _roll_gauge(ch, sub, "upper_arm.L", gauge)
+
+    # the fallback, stated exactly: the upper arm's matrix on the gappy frame
+    # IS its reference-free matrix on the intact one, bit for bit. (The wrist
+    # is downstream of this bone, so nothing else about it can differ.)
+    saved = C._BEND_REF
+    try:
+        C._BEND_REF = {}
+        bare = _ch()
+        bare.fit_to_subject(sub[None])
+        want = bare._skin_matrices(sub, ~np.isnan(sub).any(1))[0]
+    finally:
+        C._BEND_REF = saved
+    assert np.abs(got[b] - want[b]).max() == 0.0
+
+    # the pop it costs, measured against the same frame with the wrist present
+    from pose3d.geometry.character import _proj_perp, _unit
+    R = got[b][:3, :3]
+    ax = _unit(R @ (ch.tail[b] - ch.head[b]))
+    cur = _proj_perp(R @ ch._rest_ref[b], ax)
+    g = _proj_perp(gauge, ax)
+    lost = np.degrees(np.arctan2(float(np.dot(np.cross(g, cur), ax)),
+                                 float(np.dot(g, cur))))
+    pop = abs((held - lost + 180.0) % 360.0 - 180.0)
+    # measured 70.8 deg here, ~50 deg worst case on the client take. Bounded,
+    # not banned: this test exists so the discontinuity is a decision on the
+    # record rather than a surprise.
+    assert pop <= 80.0, f"the validity gate now pops {pop:.1f} deg"
+
+    # and the export still matches the view on that frame
+    mats = ch.pose_bone_matrices(gone, valid)
+    skin = np.array([np.array(mats[n]) @ np.linalg.inv(ch.rest[i])
+                     for i, n in enumerate(ch.bone_names)])
+    _, pelvis, scale, Rz = ch._skin_matrices(gone, valid)
+    assert np.allclose(ch._from_rig(ch._joints_from_skin(skin), pelvis, scale, Rz),
+                       ch.posed_joints(gone, valid), atol=1e-9, equal_nan=True)
+
+
 # --- one skinning for the view and the export ------------------------------
 
 def test_view_and_export_share_one_skinning():
     """`pose_bone_matrices` is what Blender is driven with; run it back through
     Blender's own deform (matrix @ rest^-1) and it must reproduce the joints the
-    3D view draws. Anything else and the export stops matching the preview."""
+    3D view draws. Anything else and the export stops matching the preview.
+
+    What this pins is the DOCUMENTED BLENDER DEFORM FORMULA — that
+    `pose_bone_matrices` returns `skin @ rest`, so setting `pose_bone.matrix`
+    to it reproduces the view's skinning. It is not a cross-check of two
+    independent code paths: nothing here runs `pose3d/export/*`, and the
+    round-trip is an identity for any implementation with that property. The
+    export path itself is covered by tests/test_export_smoke.py.
+    """
     ch = _ch()
     fx = fixture_poses()
     for p in list(_poses()) + ([] if fx is None else list(fx)):

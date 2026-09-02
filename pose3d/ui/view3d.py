@@ -185,10 +185,9 @@ class View3D(gl.GLViewWidget):
         # deliberately NOT applied, because only a direction basis is read off
         # these and directions are translation-invariant.
         vhead = self._to_view(head3d) if head3d is not None else None
-        verts, faces, cj = self._skin(vpose, vhead)
+        verts, faces, cj, drop = self._skin(vpose, vhead)
         if verts is not None and len(verts):
-            dz = ground_datum(verts, cj,
-                              self._character.ground_drop(vpose, valid))
+            dz = ground_datum(verts, cj, drop)
             verts = verts.copy(); verts[:, 2] -= dz
             v[:, 2] -= dz
             if cj is not None:
@@ -242,15 +241,23 @@ class View3D(gl.GLViewWidget):
         lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
 
     def _skin(self, vpose, vhead=None):
-        """Pose the character -> (verts, faces, canonical joints)."""
+        """Pose the character -> (verts, faces, canonical joints, ground drop).
+
+        The ground drop is computed HERE, inside the blanket guard, rather than
+        at the call site: it is a `Character` call like the skinning itself, so
+        a character failure must land in the same place instead of escaping
+        `set_pose` into the Qt slot.
+        """
         try:
             if self._character is None:
                 from pose3d.geometry.character import Character
                 self._character = Character()
             valid = ~np.isnan(vpose).any(1)
-            return self._character.pose_and_joints(vpose, valid, vhead)
+            verts, faces, cj = self._character.pose_and_joints(
+                vpose, valid, vhead)
+            return verts, faces, cj, self._character.ground_drop(vpose, valid)
         except Exception:
-            return None, None, None
+            return None, None, None, 0.0
 
     def _set_body(self, verts, faces):
         active = verts is not None and len(verts) > 0

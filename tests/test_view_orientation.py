@@ -67,7 +67,7 @@ def test_grounding_is_ankle_based():
     ch.fit_to_subject(poses)
     height = float(np.median([_z_extent(p) for p in poses]))
 
-    over_grid = []
+    over_grid, below_grid = [], []
     for p in poses:
         valid = ~np.isnan(p).any(1)
         # what View3D.set_pose does before it grounds
@@ -81,11 +81,29 @@ def test_grounding_is_ankle_based():
         ankle = min(joints[int(Joint.LEFT_ANKLE), 2],
                     joints[int(Joint.RIGHT_ANKLE), 2])
         over_grid.append((ankle - dz) / height * 100.0)
+        below_grid.append((dz - float(verts[:, 2].min())) / height * 100.0)
 
+    # The cheap guard. Note it is arithmetic, not behaviour: with the ankle
+    # branch in place this expression reduces to drop/height, a constant. It
+    # still bites the one regression it was written for — delete the branch and
+    # the datum falls back to verts.min() and this reads 9.2 % again.
     # measured 0.0000 % (9.2 % grounding on the lowest mesh vertex)
     assert np.ptp(over_grid) <= 0.5, "the ground datum still slides"
     # and it stands at the rig's own rest ankle height, 4.94 % of rig height,
     # which is 5.32 % of this subject's: a drop left in RIG units instead of
     # pose units would put the figure hundreds of percent off the grid.
     assert 3.0 <= np.median(over_grid) <= 8.0
+
+    # What a viewer actually sees, which the two assertions above cannot show.
+    # The datum no longer tracks whichever vertex happens to be lowest: under
+    # the old rule the mesh minimum sat exactly ON the grid every frame, and
+    # under this one a tilted sole dips below it (measured 3.62 % median).
+    assert max(below_grid) > 1.0, \
+        "the datum is back on the lowest mesh vertex"
+    # ...but the dip is the accepted cost of an ankle datum with an unlevelled
+    # sole, not a licence to sink: measured 9.57 % of body height worst case.
+    # A drop mistakenly left in RIG units, or read off a fingertip on a rig
+    # whose arms hang below its feet, buries the figure far deeper than this.
+    assert max(below_grid) <= 11.0, \
+        f"the figure sinks {max(below_grid):.1f} % of body height below the grid"
 
