@@ -14,8 +14,10 @@ from __future__ import annotations
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph import Vector
+from PySide6.QtCore import Signal
 
 from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
+from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import detect_vertical, upright_matrix
 
 
@@ -44,6 +46,12 @@ def ground_datum(verts, joints, drop):
 
 
 class View3D(gl.GLViewWidget):
+    # Anything that stops the character being posed for a reason OTHER than
+    # "this frame has no hips". A missing rig asset, a corrupt .npz, a bad
+    # head convention: all of it used to land in a blanket `except Exception`
+    # and leave an empty 3D card with no explanation anywhere in the app.
+    characterError = Signal(str)
+
     GHOST_COLOR = (0.72, 0.72, 0.77, 0.85)     # low-poly character skin
     JOINT_COLOR = (0.30, 0.85, 1.0, 1.0)
     BONE_COLOR = (0.95, 0.95, 0.98, 1.0)
@@ -96,6 +104,8 @@ class View3D(gl.GLViewWidget):
         self._vaxis = None
         self._vsign = 1.0
         self._R = None                  # world->view rotation (sequence de-tilt)
+        self._char_error = ""           # last message sent to characterError
+        self._char_error_source = ""    # which stage put it there
 
     # --- orientation / framing ---
     def _detect_vertical(self, pose3d, valid):
@@ -121,9 +131,24 @@ class View3D(gl.GLViewWidget):
             poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
             if self._R is not None:
                 poses = poses @ self._R.T
-            self._character.fit_to_subject(poses)
-        except Exception:
-            pass
+            scale = self._character.fit_to_subject(poses)
+        except Exception as e:
+            self._report(f"The character could not be prepared for this take "
+                         f"({type(e).__name__}: {e}) — the 3D view is showing "
+                         f"the captured skeleton only.", "fit")
+            return
+        if scale is None:
+            # No bone in the take was long enough to size the rig against, so
+            # `_frame_scale` falls back to a PER-FRAME height ratio — which
+            # pulses the figure over a 37.9 % range on the client's take.
+            # Silence here is what made that look like the reconstruction
+            # breathing rather than the fit never having happened.
+            self._report(
+                "The character could not be sized to this subject (no bone "
+                "was reconstructed well enough to fit against), so its size "
+                "is re-guessed every frame and the figure will pulse.", "fit")
+        else:
+            self._report("")
 
     def _to_view(self, pts):
         """World -> view rotation. Shape-agnostic: used for the canonical
@@ -240,13 +265,34 @@ class View3D(gl.GLViewWidget):
                 seg.append(pts[int(a)]); seg.append(pts[int(b)])
         lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
 
+    def _report(self, message: str, source: str = "") -> None:
+        """Say a character problem out loud, once per distinct message.
+
+        `source` says which stage put it there. It matters because the two
+        stages report at different rates: `fit_subject` speaks once for the
+        whole take ("the rig could not be sized, so the figure will pulse"),
+        while `_skin` speaks per frame — and a per-frame stage must only
+        withdraw its OWN message, or the next good frame would quietly delete
+        a take-wide warning that is still true.
+        """
+        if message == self._char_error:
+            return
+        self._char_error = message
+        self._char_error_source = source if message else ""
+        self.characterError.emit(message)
+
     def _skin(self, vpose, vhead=None):
         """Pose the character -> (verts, faces, canonical joints, ground drop).
 
-        The ground drop is computed HERE, inside the blanket guard, rather than
-        at the call site: it is a `Character` call like the skinning itself, so
-        a character failure must land in the same place instead of escaping
-        `set_pose` into the Qt slot.
+        The ground drop is computed HERE rather than at the call site: it is a
+        `Character` call like the skinning itself, so a character failure must
+        land in the same place instead of escaping `set_pose` into the Qt slot
+        (where Qt swallows it and the view silently empties).
+
+        Only `PoseUnavailable` — this frame has no usable pelvis — is normal
+        and quiet. Everything else is a real fault and is reported, because
+        the blanket catch that used to be here turned a missing character
+        asset into an empty 3D card with no message anywhere in the app.
         """
         try:
             if self._character is None:
@@ -255,9 +301,26 @@ class View3D(gl.GLViewWidget):
             valid = ~np.isnan(vpose).any(1)
             verts, faces, cj = self._character.pose_and_joints(
                 vpose, valid, vhead)
-            return verts, faces, cj, self._character.ground_drop(vpose, valid)
-        except Exception:
+            drop = self._character.ground_drop(vpose, valid)
+        except PoseUnavailable:
             return None, None, None, 0.0
+        except Exception as e:
+            self._report(f"The character could not be posed "
+                         f"({type(e).__name__}: {e}) — the 3D view is showing "
+                         f"the captured skeleton only.", "skin")
+            return None, None, None, 0.0
+        # The character IS posed, so a message saying it could not be is now
+        # false. `_report` de-duplicates on the last message and only
+        # `fit_subject` ever sent an empty one, so without this a single bad
+        # frame — one LinAlgError on a degenerate pose — pinned "the 3D view
+        # is showing the captured skeleton only" in the 3D card header for
+        # every good frame after it. Only THIS stage's message is withdrawn:
+        # `fit_subject`'s take-wide "the figure will pulse" stays true while
+        # every frame skins perfectly, which is exactly the case it warns
+        # about.
+        if self._char_error_source == "skin":
+            self._report("", "skin")
+        return verts, faces, cj, drop
 
     def _set_body(self, verts, faces):
         active = verts is not None and len(verts) > 0

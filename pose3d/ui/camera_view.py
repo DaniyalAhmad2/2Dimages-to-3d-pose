@@ -15,10 +15,14 @@ from PySide6.QtWidgets import (
 )
 
 from pose3d.core.skeleton import (
-    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS, rag_status)
+    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS)
+from pose3d.ui.model import (
+    STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED)
 from pose3d.ui.panels import (
     COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_band, acc_label,
     accuracy_pct)
+
+COL_GREY = QColor(140, 148, 166)
 
 # Shared with the accuracy panels so a joint's dot, its tooltip and the
 # JOINT ACCURACY list can never disagree about what "amber" means.
@@ -30,7 +34,24 @@ RAG_COLORS = {
     # drawn as a hollow ring, never a filled dot: this joint's 3D was
     # interpolated across a one-frame dropout, not measured here.
     "filled": COL_AMBER,
+    # this keypoint exists in THIS view but produced no 3D at all — the other
+    # camera has nothing to pair it with. A filled dot here used to be banded
+    # off the detector's confidence, so a joint with no reconstruction
+    # whatsoever was drawn green.
+    "unmeasured": COL_GREY,
+    # both views have a point but they disagree about where the joint is by
+    # more than the geometry allows, so the pair was not triangulated.
+    "rejected": COL_RED,
 }
+
+# States drawn as a hollow ring rather than a filled dot: none of them is a
+# measurement of this frame, and none may look like one.
+HOLLOW_STATES = ("filled", "unmeasured", "rejected")
+
+# The per-joint states are imported from `pose3d.ui.model`, which produces
+# them, rather than restated here: two independent copies of three string
+# constants desync on a typo with nothing to catch it — the dots would simply
+# stop being drawn as "rejected" and no test would notice.
 
 # The face keypoints (eyes/ears) that orient the character's head. Drawn
 # smaller and in one fixed accent colour: they are not part of the skeleton,
@@ -66,9 +87,9 @@ class JointItem(QGraphicsEllipseItem):
         self.set_status("green")
 
     def set_status(self, status: str):
-        if status == "filled":
+        if status in HOLLOW_STATES:
             self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
-            self.setPen(QPen(RAG_COLORS["filled"], 2))
+            self.setPen(QPen(RAG_COLORS[status], 2))
             return
         self.setBrush(QBrush(RAG_COLORS.get(status, RAG_COLORS["red"])))
         self.setPen(QPen(QColor(20, 20, 20), 1))
@@ -112,7 +133,9 @@ class CameraView(QGraphicsView):
         self._show_bones = True
         self._panning = False
         self._pan_start = None
-        self._accuracy = None       # per-joint reprojection error (px)
+        self._accuracy = None       # per-joint MEASURED residual, normalised
+        self._delivered = None      # per-joint DELIVERED residual, normalised
+        self._states = None         # per-joint state (see STATE_* above)
         self._scores = None         # per-joint detector confidence
         self._corrected = None      # per-joint hand-corrected flags
         self._filled = None         # per-joint gap-filled (3D interpolated)
@@ -191,19 +214,31 @@ class CameraView(QGraphicsView):
         self._apply_status()
         self._refresh_bones()
 
-    def set_accuracy(self, errors) -> None:
-        """Per-joint reprojection error (px), or None when not triangulated."""
-        self._accuracy = None if errors is None else np.asarray(errors, float)
+    def set_accuracy(self, errors, delivered=None, states=None) -> None:
+        """Per-joint residuals for THIS view, normalised by figure height.
+
+        `errors` is the MEASURED residual (the raw triangulation reprojected
+        into this view) — the one a drag of this very keypoint can drive to
+        zero, which is why it is what the dot is coloured by. `delivered` is
+        the same for the pose actually shown in 3D, reported in the tooltip so
+        the gap the bone fit costs is visible at the joint that pays it.
+        `states` is the per-joint state array from `ProjectModel.joint_states`.
+        """
+        def arr(v):
+            return None if v is None else np.asarray(v, float)
+        self._accuracy = arr(errors)
+        self._delivered = arr(delivered)
+        self._states = None if states is None else list(states)
         self._apply_status()
 
     def _apply_status(self) -> None:
         """Colour each joint and set its hover tooltip.
 
-        Accuracy (reprojection error) is what the user is actually judging
-        when correcting a pose, so it drives the colour whenever it exists;
-        detector confidence is the fallback before triangulation. Hovering
-        names the joint and gives the number, replacing the old SELECTED JOINT
-        panel — the info appears where the user is already looking.
+        Accuracy (reprojection error, as a fraction of the subject's height in
+        THIS image) is what the user is actually judging when correcting a
+        pose, so it drives the colour. Hovering names the joint and gives the
+        number, replacing the old SELECTED JOINT panel — the info appears
+        where the user is already looking.
         """
         for j, item in enumerate(self._joints):
             status, tip = self._joint_status(j)
@@ -211,20 +246,43 @@ class CameraView(QGraphicsView):
             item.setToolTip(tip)
 
     def _joint_status(self, j: int) -> tuple[str, str]:
-        """(band key, tooltip html) for one joint."""
+        """(band key, tooltip html) for one joint.
+
+        A joint that produced no 3D is NOT banded: it is painted as its own
+        state, because "no reconstruction" is a different fact from "a poor
+        one" and the two used to be drawn identically — the detector's
+        confidence stood in for an accuracy that did not exist, so a joint
+        with no 3D at all could show a green dot at 90 % confidence.
+        """
         name = JOINT_NAMES[j]
+        state = (self._states[j] if self._states is not None
+                 and j < len(self._states) else STATE_OK)
         err = float(self._accuracy[j]) if self._accuracy is not None else np.nan
-        if np.isfinite(err):
+
+        if state == STATE_REJECTED:
+            status = "rejected"
+            detail = ("rejected by the cross-view check — the two views "
+                      "disagree about where this joint is by more than the "
+                      "calibration allows, so it was not triangulated")
+        elif state == STATE_NOT_MEASURED or not np.isfinite(err):
+            status = "unmeasured"
+            detail = ("not measured — no 3D was reconstructed for this joint, "
+                      "so there is no accuracy to report")
+        else:
             pct = accuracy_pct(err)
             status = acc_band(pct)
-            detail = f"accuracy {pct:.0f}% ({acc_label(pct)})"
-        else:
-            s = float(self._scores[j]) if self._scores is not None else np.nan
-            status = "red" if np.isnan(s) else rag_status(s)
-            shown = "--" if np.isnan(s) else f"{100.0 * s:.0f}%"
-            detail = f"detection confidence {shown}"
+            detail = (f"accuracy {pct:.0f}% ({acc_label(pct)}) — "
+                      f"{100.0 * err:.2f}% of the figure's height in this view")
+
         tip = (f"<b>{name}</b><br>"
                f"<span style='color:{RAG_COLORS[status].name()};'>{detail}</span>")
+        if self._delivered is not None and np.isfinite(self._delivered[j]):
+            tip += (f"<br><span style='color:#8a91a3;'>pose shown: "
+                    f"{100.0 * float(self._delivered[j]):.2f}% of height"
+                    f"</span>")
+        if self._scores is not None and np.isfinite(self._scores[j]):
+            tip += (f"<br><span style='color:#8a91a3;'>detector confidence "
+                    f"{100.0 * float(self._scores[j]):.0f}%</span>")
         if self._filled is not None and self._filled[j]:
             status = "filled"
             tip += (f"<br><span style='color:{RAG_COLORS['filled'].name()};'>"
@@ -350,5 +408,5 @@ class CameraPanel(QWidget):
     def set_filename(self, name: str):
         self.filename.setText(name)
 
-    def set_accuracy(self, errors) -> None:
-        self.view.set_accuracy(errors)
+    def set_accuracy(self, errors, delivered=None, states=None) -> None:
+        self.view.set_accuracy(errors, delivered, states)

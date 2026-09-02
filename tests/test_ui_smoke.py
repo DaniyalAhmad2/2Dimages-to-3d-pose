@@ -286,3 +286,402 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
     win._on_export()
     assert "read-only" in warned.get("msg", "").lower(), warned
     assert started["n"] == 0, "export ran despite an unwritable destination"
+
+
+# --- Phase 4: no diagnostic may be swallowed -------------------------------
+
+def _write_calibration(folder, rig, mangle=None):
+    """Write a calibration folder in the format `app._load_rig` reads."""
+    import json
+    calib = Path(folder) / "calibration"
+    calib.mkdir(parents=True, exist_ok=True)
+    rig.intr[CAM_LEFT].save(calib / "left_intrinsics.json")
+    rig.intr[CAM_RIGHT].save(calib / "right_intrinsics.json")
+    doc = {c: {"R": rig.ext[c].R.tolist(), "t": rig.ext[c].t.tolist()}
+           for c in (CAM_LEFT, CAM_RIGHT)}
+    if mangle is not None:
+        mangle(doc)
+    (calib / "extrinsics.json").write_text(json.dumps(doc))
+    return calib
+
+
+def test_missing_rig_reports_a_reason(qapp, tmp_path):
+    """A calibration that is present but unusable must not be reported the
+    same way as no calibration at all.
+
+    One blanket `except Exception: return None` covered both, so a 2x2 R — a
+    hand-edited or externally produced file, which is a thing clients send —
+    built a perfectly happy CalibratedRig and only exploded inside
+    triangulation frames later. The 3D view was empty and nothing anywhere in
+    the app said why.
+    """
+    from pose3d.app import load_rig_with_reason
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+
+    # 1. no folder at all: quiet. Being uncalibrated is a normal state.
+    assert load_rig_with_reason(tmp_path / "nothing") == (None, "")
+
+    # 2. a good folder loads
+    good = tmp_path / "good"
+    loaded, reason = load_rig_with_reason(_write_calibration(good, rig))
+    assert loaded is not None and reason == ""
+
+    # 3. a 2x2 R is refused, by name, before anything downstream sees it
+    bad = tmp_path / "bad_shape"
+
+    def flatten(doc):
+        doc["right"]["R"] = [[1.0, 0.0], [0.0, 1.0]]
+
+    loaded, reason = load_rig_with_reason(
+        _write_calibration(bad, rig, flatten))
+    assert loaded is None
+    assert "right" in reason and "3x3" in reason
+
+    # 4. so is an R that is not a rotation (a skew nothing else would catch)
+    skew = tmp_path / "bad_rotation"
+
+    def shear(doc):
+        R = np.asarray(doc["left"]["R"], float)
+        R[0] *= 1.4
+        doc["left"]["R"] = R.tolist()
+
+    loaded, reason = load_rig_with_reason(
+        _write_calibration(skew, rig, shear))
+    assert loaded is None
+    assert "not a rotation" in reason
+
+    # 5. and unreadable JSON says so rather than looking uncalibrated
+    broken = tmp_path / "broken"
+    calib = _write_calibration(broken, rig)
+    (calib / "extrinsics.json").write_text("{ this is not json")
+    loaded, reason = load_rig_with_reason(calib)
+    assert loaded is None and "not valid JSON" in reason
+
+    # 6. and the reason reaches the sidebar, not just a return value
+    model = ProjectModel(data, None)
+    model.rig_error = "This project's calibration is not usable — left camera."
+    win = MainWindow(model)
+    assert model.rig_error in win.sidebar.calib_warn.text()
+    assert win.sidebar.calib_warn.isVisibleTo(win.sidebar)
+
+
+def test_a_character_failure_reaches_the_3d_card(qapp):
+    """`View3D._skin` used to swallow everything. A frame with no hips is
+    normal and stays quiet; anything else is a fault and must be said."""
+    from pose3d.geometry.character import PoseUnavailable
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+
+    class NoPelvis:
+        def pose_and_joints(self, *a, **k):
+            raise PoseUnavailable("no usable pelvis")
+
+        def ground_drop(self, *a, **k):
+            return 0.0
+
+    win.view3d._character = NoPelvis()
+    win.view3d._char_error = ""
+    win.view3d._skin(np.zeros((15, 3)))
+    assert not win.view3d_error.isVisibleTo(win._view3d_card)
+
+    class Broken(NoPelvis):
+        def pose_and_joints(self, *a, **k):
+            raise RuntimeError("character.npz is truncated")
+
+    win.view3d._character = Broken()
+    win.view3d._skin(np.zeros((15, 3)))
+    assert win.view3d_error.isVisibleTo(win._view3d_card)
+    assert "truncated" in win.view3d_error.text()
+
+    # ...and it goes away again when the next frame poses. A per-frame fault
+    # (a degenerate pose, a transient LinAlgError) used to pin the banner for
+    # the rest of the session: `_report` de-duplicates on the last message and
+    # only `fit_subject` ever cleared it, so the 3D card went on saying it was
+    # "showing the captured skeleton only" over a perfectly good character.
+    class Fine(NoPelvis):
+        def pose_and_joints(self, *a, **k):
+            return np.zeros((4, 3)), np.zeros((1, 3), int), np.zeros((15, 3))
+
+    win.view3d._character = Fine()
+    verts, faces, cj, drop = win.view3d._skin(np.zeros((15, 3)))
+    assert verts is not None
+    assert not win.view3d_error.isVisibleTo(win._view3d_card)
+    assert win.view3d_error.text() == ""
+
+
+def test_a_good_frame_does_not_withdraw_the_take_wide_warning(qapp):
+    """A frame that skins perfectly withdraws only the message about THIS
+    frame not skinning.
+
+    `fit_subject`'s warning is about the whole take — the rig was never sized,
+    so every frame is scaled by its own height ratio and the figure pulses —
+    and every one of those frames skins fine. A per-frame "all clear" that
+    cleared it would delete the warning on the very next repaint, on exactly
+    the take it is about."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+
+    class Unsizable:
+        def fit_to_subject(self, poses):
+            return None                      # the case that pulses
+
+        def pose_and_joints(self, *a, **k):  # ...but posing works fine
+            return np.zeros((4, 3)), np.zeros((1, 3), int), np.zeros((15, 3))
+
+        def ground_drop(self, *a, **k):
+            return 0.0
+
+    win.view3d._character = Unsizable()
+    win.view3d._char_error = ""
+    win.view3d.fit_subject(np.stack([gt, gt]))
+    assert "pulse" in win.view3d_error.text()
+
+    win.view3d._skin(np.zeros((15, 3)))
+    assert "pulse" in win.view3d_error.text(), (
+        "a good frame deleted the take-wide sizing warning")
+    assert win.view3d_error.isVisibleTo(win._view3d_card)
+
+
+def test_an_unfittable_character_says_so_instead_of_pulsing(qapp):
+    """`fit_to_subject` returning None drops the rig back on a PER-FRAME
+    height ratio, which pulses the figure over a 37.9 % range on the client's
+    take. It used to return silently."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+
+    class Unfittable:
+        def fit_to_subject(self, poses):
+            return None
+
+    win.view3d._character = Unfittable()
+    win.view3d._char_error = ""
+    win.view3d.fit_subject(np.stack([gt, gt]))
+    assert win.view3d_error.isVisibleTo(win._view3d_card)
+    assert "pulse" in win.view3d_error.text()
+
+
+# --- Phase 4: set the scale from a measured distance ------------------------
+
+def test_setting_the_scale_from_a_measured_height_rescales_the_rig(qapp,
+                                                                   tmp_path):
+    """The reconstruction is only as correctly SIZED as the marker length
+    typed in at import, and nothing in the pipeline can detect that being
+    wrong — a similarity leaves every reprojection, every epipolar distance
+    and every bone-length spread identical. The one fix is a distance the
+    client measures.
+    """
+    import json
+
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    calib = _write_calibration(tmp_path, rig)
+    (calib / "report.json").write_text(json.dumps(
+        {"marker_length_m": 0.05, "world_tag_id": 15,
+         "world_frame_id": "0007"}))
+
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    before_t = {c: np.asarray(rig.ext[c].t, float).copy()
+                for c in (CAM_LEFT, CAM_RIGHT)}
+    before_h = model.measured_subject_height()
+    assert np.isfinite(before_h) and before_h > 0
+
+    target = before_h * 1.75
+    factor = model.set_scale_from_height(target)
+    assert factor == pytest.approx(1.75, rel=1e-6)
+
+    # 1. the subject now reconstructs at the height that was measured
+    assert model.measured_subject_height() == pytest.approx(target, rel=1e-3)
+
+    # 2. it was done by scaling the translations, so no IMAGE measurement moved
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        assert np.allclose(rig.ext[cam].t, before_t[cam] * factor)
+    errs = model._accuracy(0)
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        assert np.nanmax(errs[cam]["measured"]) < 1e-6, (
+            "rescaling moved the reprojection: it is not a similarity")
+
+    # 3. the calibration on disk was rewritten, marker length and all, so the
+    #    next open and the next recalibration agree with this session
+    saved = json.loads((calib / "extrinsics.json").read_text())
+    assert np.allclose(saved["left"]["t"], before_t[CAM_LEFT] * factor)
+    report = json.loads((calib / "report.json").read_text())
+    assert report["marker_length_m"] == pytest.approx(0.05 * factor)
+    assert report["world_tag_id"] == 15, "the provenance was thrown away"
+
+
+def test_setting_the_scale_keeps_a_recorded_vertical(qapp, tmp_path):
+    """The recorded vertical is a DIRECTION; a scale cannot touch it, and
+    re-saving the rig must not quietly drop it — the 3D view and the export
+    both level on it."""
+    import json
+
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    calib = _write_calibration(tmp_path, rig)
+    doc = json.loads((calib / "extrinsics.json").read_text())
+    doc |= {"world_up": [0.0, 0.0, 1.0], "world_up_source": "tag layout",
+            "world_up_spread_deg": 3.0}
+    (calib / "extrinsics.json").write_text(json.dumps(doc))
+
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    model.set_scale_from_height(model.measured_subject_height() * 2.0)
+
+    after = json.loads((calib / "extrinsics.json").read_text())
+    assert after["world_up"] == [0.0, 0.0, 1.0]
+    assert after["world_up_source"] == "tag layout"
+    assert after["world_up_spread_deg"] == 3.0
+
+
+def test_the_scale_button_is_wired_to_the_model(qapp, tmp_path):
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    _write_calibration(tmp_path, rig)
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    win = MainWindow(model)
+
+    win.sidebar.scale_value.setValue(50.0)          # 50 cm
+    win.sidebar.btn_scale.click()
+    assert model.measured_subject_height() == pytest.approx(0.50, rel=1e-3)
+
+
+# --- Phase 4: the sidebar states what it measured ---------------------------
+
+def test_the_sidebar_states_the_facts_a_ruler_can_check(qapp, tmp_path):
+    import json
+
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    calib = _write_calibration(tmp_path, rig)
+    (calib / "report.json").write_text(json.dumps(
+        {"marker_length_m": 0.05, "world_tag_id": 15,
+         "world_frame_id": "0007"}))
+
+    win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
+    centres = [rig.ext[c].camera_center for c in (CAM_LEFT, CAM_RIGHT)]
+    baseline_cm = 100.0 * float(np.linalg.norm(centres[0] - centres[1]))
+
+    assert win.sidebar.row_baseline._v.text() == f"{baseline_cm:.1f} cm"
+    assert "cm" in win.sidebar.row_height._v.text()
+    marker = win.sidebar.row_marker._v.text()
+    assert "50 mm" in marker and "tag 15" in marker and "0007" in marker
+
+    # and the three rows reprojection cannot see
+    for row in (win.sidebar.row_bone_cv, win.sidebar.row_epipolar,
+                win.sidebar.row_symmetry):
+        assert row._v.text() != "—", "a quality row was left blank"
+    assert "%" in win.sidebar.row_bone_cv._v.text()
+    assert "px" in win.sidebar.row_epipolar._v.text()
+
+
+def test_a_project_calibrated_before_the_report_says_so_rather_than_guessing(
+        qapp, tmp_path):
+    """No report.json — every take calibrated before Phase 6 — must show "—"
+    for the marker, not invent a tag id."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    _write_calibration(tmp_path, rig)
+    win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
+    assert win.sidebar.row_marker._v.text() == "—"
+    assert "cm" in win.sidebar.row_baseline._v.text()
+
+
+def test_a_typed_scale_survives_a_recompute(qapp, tmp_path):
+    """The "Set scale" box is pre-filled with the height the app measured, but
+    once the user has typed the height they MEASURED, that number is theirs.
+
+    Every sidebar refresh — project load, Recalculate 3D, any qualityChanged —
+    ran the pre-fill, so a user who typed 178.0 and then pressed "Recalculate
+    3D" before "Set scale" watched their measurement silently revert to the
+    app's own guess and rescaled the calibration to a number it had invented.
+    """
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    _write_calibration(tmp_path, rig)
+    win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
+
+    prefilled = win.sidebar.scale_value.value()
+    assert prefilled > 0, "the box should start at the measured height"
+
+    # a refresh with nothing typed may still track the measurement
+    win._refresh_quality()
+    assert win.sidebar.scale_value.value() == prefilled
+
+    win.sidebar.scale_value.setValue(178.0)     # the tape measure says so
+    win._refresh_quality()
+    assert win.sidebar.scale_value.value() == pytest.approx(178.0), (
+        "a refresh overwrote a height the user typed")
+
+
+def test_an_unreadable_calibration_report_says_so(qapp, tmp_path):
+    """"No report.json" (a project older than Phase 6) and "report.json is
+    corrupt" are different facts. Both used to show "—", so a take whose
+    provenance WAS recorded but is unreadable looked like a take that never
+    had any."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    calib = _write_calibration(tmp_path, rig)
+    (calib / "report.json").write_text("{not json at all")
+
+    win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
+    text = win.sidebar.row_marker._v.text()
+    assert text != "—", "an unreadable report read as 'nothing was recorded'"
+    assert "report.json" in text and "could not be read" in text
+
+
+def test_a_take_that_cannot_be_measured_is_measured_once(qapp, tmp_path):
+    """`take_quality` walks every frame twice. When it raises, the failure is
+    cached like a success: otherwise the one take the measurement cannot
+    handle re-runs it — and re-emits the same status message — on every
+    sidebar refresh, which is every frame change."""
+    import pose3d.quality as quality
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    calls = {"n": 0}
+    messages = []
+    model.statusMessage.connect(messages.append)
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("this take cannot be measured")
+
+    original = quality.take_quality
+    quality.take_quality = boom
+    try:
+        assert model.quality() is None
+        assert model.quality() is None
+        assert model.quality() is None
+    finally:
+        quality.take_quality = original
+
+    assert calls["n"] == 1, "the failed measurement re-ran on every refresh"
+    assert len(messages) == 1 and "cannot be measured" in messages[0]
+
+    # ...and invalidating the readouts lets it be tried again
+    model.invalidate_readouts()
+    assert model.quality() is not None

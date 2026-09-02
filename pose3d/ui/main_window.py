@@ -57,7 +57,7 @@ class _ExportWorker(QThread):
 
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
 from pose3d.ui.camera_view import CameraPanel
-from pose3d.ui.model import ProjectModel
+from pose3d.ui.model import ProjectModel, frame_stat, worst_per_joint
 from pose3d.ui.panels import (
     JointAccuracyList, PoseAccuracyPanel, Sidebar,
 )
@@ -199,6 +199,13 @@ class MainWindow(QMainWindow):
         self.btn_full.setToolTip("Toggle full-window 3D view (Esc to exit)")
         head.addWidget(self.btn_full)
         cl.addLayout(head)
+        # Where a character failure surfaces. Everything the 3D view could not
+        # do used to be swallowed, so an empty card was the only symptom.
+        self.view3d_error = QLabel("")
+        self.view3d_error.setWordWrap(True)
+        self.view3d_error.setStyleSheet("color:#e0a33a; font-size:11px;")
+        self.view3d_error.hide()
+        cl.addWidget(self.view3d_error)
         self.view3d = View3D()
         self.view3d.setMinimumHeight(220)
         cl.addWidget(self.view3d, 1)
@@ -241,6 +248,9 @@ class MainWindow(QMainWindow):
         self.btn_export.clicked.connect(self._on_export)
         self.sidebar.runDetection.connect(self._on_run_detection)
         self.sidebar.recalibrate.connect(self._on_recalibrate)
+        self.sidebar.setScale.connect(self._on_set_scale)
+        self.view3d.characterError.connect(self._on_character_error)
+        self.model.qualityChanged.connect(self._refresh_quality)
         self.sidebar.showJointsToggled.connect(self.cam_left.view.set_show_joints)
         self.sidebar.showJointsToggled.connect(self.cam_right.view.set_show_joints)
         self.sidebar.showBonesToggled.connect(self.cam_left.view.set_show_bones)
@@ -254,12 +264,53 @@ class MainWindow(QMainWindow):
         self._mark_unsaved()
 
     def _on_accuracy(self, errors):
-        overall = self.accuracy.update_errors(errors)
-        self.pose_acc.set_overall(overall)
+        """`errors` is `{cam: {"measured"|"delivered": (NUM_JOINTS,)}}`.
+
+        The residuals arrive normalised by each camera's own figure height, so
+        the two views are directly comparable and neither is averaged into the
+        other — averaging them is what used to hide the case that matters,
+        one view agreeing and the other not.
+
+        The gauge reads the DELIVERED pose, because that is the pose on screen
+        and in the export. The per-joint dots and the JOINT ACCURACY list read
+        the MEASURED one, because that is the residual a drag of the keypoint
+        can actually drive to zero: banding a draggable point on a number the
+        bone fit controls would make correcting it feel broken.
+        """
+        states = self.model.joint_states(self.model.current)
+        worst = worst_per_joint(errors, "measured")
+        self.accuracy.update_errors(worst)
+        self.pose_acc.set_accuracy(
+            {c: frame_stat(errors[c]["delivered"]) for c in errors},
+            {c: frame_stat(errors[c]["measured"]) for c in errors})
         # the keypoints themselves are colour-banded by the same numbers, and
         # hovering one shows the figure — replaces the old SELECTED JOINT card
-        self.cam_left.set_accuracy(errors)
-        self.cam_right.set_accuracy(errors)
+        for cam, panel in ((CAM_LEFT, self.cam_left),
+                           (CAM_RIGHT, self.cam_right)):
+            per = errors.get(cam, {})
+            panel.set_accuracy(per.get("measured"), per.get("delivered"),
+                               states.get(cam))
+
+    def _on_character_error(self, message: str):
+        self.view3d_error.setText(message)
+        self.view3d_error.setToolTip(message)
+        self.view3d_error.setVisible(bool(message))
+        if message:
+            self.statusBar().showMessage(message, 10000)
+
+    def _on_set_scale(self, real_height_m: float):
+        from PySide6.QtWidgets import QApplication
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            applied = self.model.set_scale_from_height(real_height_m)
+        finally:
+            QApplication.restoreOverrideCursor()
+        if applied is None:
+            return
+        self._apply_view_orientation()   # the character is sized to the take
+        self._refresh_views(); self._refresh_timeline_status()
+        self._refresh_calibration_status()
+        self._mark_unsaved()
 
     def _on_auto_toggled(self, on):
         self.model.auto_recalc = on
@@ -362,9 +413,59 @@ class MainWindow(QMainWindow):
 
     def _refresh_calibration_status(self):
         from pose3d.calib.quality import check_rig
-        self.sidebar.set_calibrated(self.model.rig is not None,
-                                    check_rig(self.model.rig,
-                                              self._recorded_vertical()))
+        warnings = list(check_rig(self.model.rig, self._recorded_vertical()))
+        if self.model.rig_error:
+            warnings.insert(0, self.model.rig_error)
+        self.sidebar.set_calibrated(self.model.rig is not None, warnings)
+        self._refresh_quality()
+
+    def _calibration_report(self):
+        """(this project's calibration/report.json or None, why not).
+
+        A take calibrated before the report existed simply has none, and the
+        marker row says "—" rather than inventing a tag id for it. A report
+        that is THERE and unreadable is a different fact and gets a sentence:
+        showing the same "—" for both is exactly the swallowing this phase is
+        about, and the row would be quietly saying "no provenance recorded"
+        about a file that records it.
+        """
+        import json
+        from pathlib import Path
+        if not self.model.project_dir:
+            return None, ""
+        path = (Path(self.model.project_dir) / "calibration" / "report.json")
+        try:
+            return json.loads(path.read_text()), ""
+        except FileNotFoundError:
+            return None, ""
+        except Exception as e:
+            return None, (f"calibration/report.json could not be read "
+                          f"({type(e).__name__}) — the marker size and tag "
+                          f"this calibration used cannot be shown")
+
+    def _refresh_quality(self):
+        """The sidebar rows that reprojection cannot see.
+
+        Bone-length spread is ~7x more responsive than the gauge to a wrong
+        camera pose but blind to a focal length shared by both cameras;
+        epipolar disagreement moves on exactly that focal. Neither is a
+        reprojection, which is weak by construction for a freshly triangulated
+        point. They are here because between them they cover the gauge's
+        blind spots.
+        """
+        from pose3d.quality import symmetry_notes
+        q = self.model.quality()
+        self.sidebar.set_quality(q, symmetry_notes(q) if q else ())
+        report, report_error = self._calibration_report()
+        baseline = None
+        if self.model.rig is not None:
+            centres = [self.model.rig.ext[c].camera_center
+                       for c in (CAM_LEFT, CAM_RIGHT)]
+            baseline = float(np.linalg.norm(centres[0] - centres[1]))
+        self.sidebar.set_metric_facts(
+            baseline_m=baseline,
+            subject_height_m=None if q is None else q.subject_height_m,
+            marker=report, marker_error=report_error)
 
     def _on_import(self):
         from PySide6.QtWidgets import QMessageBox
@@ -566,11 +667,26 @@ class MainWindow(QMainWindow):
         self.btn_redo.setEnabled(self.model.stack.can_redo())
 
     def _refresh_timeline_status(self):
+        """Band each frame on its MEDIAN joint residual, in figure heights.
+
+        The cuts are the same two the dots and the gauge use (0.4 % and 1.0 %
+        of the subject's height in the image), not the old literal 5 px and
+        12 px — which on a 3072x4080 frame demanded the whole take reconstruct
+        to under a thousandth of the figure, and painted 21 of the client
+        take's 26 frames red with not one green. It now reads 2 green, 22
+        amber, 2 red.
+
+        It reads the MEASURED residual: the timeline is a navigation aid, and
+        what it should point at is the frames whose two views disagree, which
+        are the frames a keypoint correction can actually fix.
+        """
+        from pose3d.ui.panels import ACC_AMBER_FRAC, ACC_GREEN_FRAC
         for i in range(len(self.model.project.frames)):
             errs = self.model._accuracy(i)
-            worst = float(np.nanmax(errs)) if not np.all(np.isnan(errs)) else None
-            status = ("red" if worst is None else
-                      "green" if worst < 5 else "amber" if worst < 12 else "red")
+            frac = frame_stat(worst_per_joint(errs, "measured"))
+            status = ("red" if not np.isfinite(frac) else
+                      "green" if frac < ACC_GREEN_FRAC else
+                      "amber" if frac < ACC_AMBER_FRAC else "red")
             self.timeline.set_status(i, status)
 
     def _apply_view_orientation(self):

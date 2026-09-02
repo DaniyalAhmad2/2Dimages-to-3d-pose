@@ -36,6 +36,7 @@ from pose3d.calib.rigio import load_rig            # noqa: F401  (re-export)
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
 from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, Joint
 from pose3d.geometry.bonefit import measure_bone_lengths
+from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import de_tilt_matrix, sequence_up
 from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, reprojection_error,
@@ -413,8 +414,11 @@ def retarget_error(character, up: np.ndarray, height: float, scale: float,
         if head3d_up is not None:
             h = np.asarray(head3d_up[t], float)
             hp = None if np.isnan(h).all() else h
-        J = character.posed_joints(p, valid, hp)
-        if J is None:
+        try:
+            J = character.posed_joints(p, valid, hp)
+        except PoseUnavailable:
+            # no hips in this frame: the rig has no root, so there is no
+            # retarget error to measure here. Not an error, just no sample.
             continue
         n_posed += 1
         J = np.asarray(J, float)
@@ -697,3 +701,58 @@ def take_quality(project: ProjectData, rig, character=None) -> TakeQuality:
     q.sole_tilt_deg = limbs["sole_tilt_deg"]
     q.ground_datum_pct = limbs["ground_datum_pct"]
     return q
+
+
+# ---------------------------------------------------------------------------
+# sidebar wording
+# ---------------------------------------------------------------------------
+# A left/right limb-length difference this size is worth naming. NOT 3 %:
+# a Monte-Carlo over this take's own keypoint noise puts the p99 of a
+# perfectly symmetric subject at 4.24 %, so 3 % would flag a rigid mannequin
+# most of the time. On the Panoptic ground-truth reference RTMPose alone
+# produces 6.5 % thigh asymmetry where the ground truth has 1.4 %, which is
+# why the wording below blames a KEYPOINT and never the calibration.
+SYMMETRY_FLAG_PCT = 5.0
+
+
+def symmetry_notes(q: "TakeQuality",
+                   threshold_pct: float = SYMMETRY_FLAG_PCT) -> list[str]:
+    """One sentence per limb whose two sides measure differently (F34).
+
+    The same moulded limb on both sides of one rigid mannequin must measure
+    the same, so a difference is reconstruction error. It is NOT evidence
+    about the calibration: a shared rig error moves both sides together, and
+    the detector's own left/right confusion produces this exact signature on
+    ground-truth data. So the sentence names the endpoint the two views place
+    least consistently, gives both endpoints' epipolar residuals so the claim
+    can be checked, and asks the user to look at that keypoint in both images.
+    """
+    notes: list[str] = []
+    per_joint = (q.epipolar or {}).get("per_joint", {})
+
+    def residual(joint: int) -> float:
+        v = (per_joint.get(JOINT_NAMES[int(joint)]) or {}).get("median_px")
+        return float("nan") if v is None else float(v)
+
+    for label, lkey, rkey in SYMMETRY_PAIRS:
+        asym = (q.symmetry.get(label) or {}).get("asym_pct")
+        asym = float("nan") if asym is None else float(asym)
+        if not np.isfinite(asym) or asym < threshold_pct:
+            continue
+        # the DISTAL end of each bone is the keypoint that actually moved
+        ends = {"L": int(lkey[1]), "R": int(rkey[1])}
+        res = {k: residual(j) for k, j in ends.items()}
+        if all(np.isfinite(v) for v in res.values()):
+            worse, better = ("L", "R") if res["L"] >= res["R"] else ("R", "L")
+            detail = (f"the two views place {JOINT_NAMES[ends[worse]]} less "
+                      f"consistently than {JOINT_NAMES[ends[better]]} "
+                      f"({res[worse]:.1f} px vs {res[better]:.1f} px off the "
+                      f"epipolar line)")
+        else:
+            detail = (f"check {JOINT_NAMES[ends['L']]} and "
+                      f"{JOINT_NAMES[ends['R']]}")
+        notes.append(
+            f"L/R {label} lengths differ by {asym:.1f} % on a subject whose "
+            f"two sides are identical — {detail}. Check that keypoint in "
+            f"both images.")
+    return notes
