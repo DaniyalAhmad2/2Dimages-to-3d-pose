@@ -261,10 +261,6 @@ class PoseAccuracyPanel(QWidget):
             lay.addLayout(row)
         lay.addStretch(1)
 
-    def set_overall(self, pct: float):
-        """One number for both cameras (no per-camera split available)."""
-        self.gauge.set_value(pct)
-
     def set_accuracy(self, delivered: dict, measured: dict | None = None):
         """`delivered`/`measured` are {cam: normalised residual} scalars.
 
