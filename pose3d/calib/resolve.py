@@ -62,6 +62,10 @@ MOTION_WARN_MM = 30.0
 
 
 def _to_jsonable(o):
+    # bool before int: True is an int subclass, and "moved": 1 in a provenance
+    # file reads as a count
+    if isinstance(o, (bool, np.bool_)):
+        return bool(o)
     if isinstance(o, dict):
         return {str(k): _to_jsonable(v) for k, v in o.items()}
     if isinstance(o, (list, tuple)):
@@ -405,7 +409,7 @@ def camera_motion_check(observations, frames, tag_id, intr, marker_length,
     out = {}
     for cam in CAMERAS:
         ref = reference[cam]
-        Rs, Cs, ids = [], [], []
+        Rs, Cs = [], []
         for frame_id in frames:
             s = _solves(observations, frame_id, cam, tag_id, intr[cam],
                         marker_length)
@@ -414,7 +418,6 @@ def camera_motion_check(observations, frames, tag_id, intr, marker_length,
             pick = min(s, key=lambda x: _rot_angle(x.R, ref.R))
             Rs.append(pick.R)
             Cs.append((-pick.R.T @ pick.t.reshape(3, 1)).ravel())
-            ids.append(frame_id)
         if not Rs:
             out[cam] = {"n_frames": 0, "max_rotation_deg": None,
                         "max_centre_mm": None, "moved": None}
@@ -468,20 +471,20 @@ def solve_rig_from_observations(
         per_cam = observations.get(frame_id)
         if not per_cam:
             continue
-        for tag_id in sorted(set(per_cam[CAM_LEFT]) & set(per_cam[CAM_RIGHT])):
+        for tag_id in sorted(set(per_cam.get(CAM_LEFT, {}))
+                             & set(per_cam.get(CAM_RIGHT, {}))):
             common.setdefault(tag_id, []).append(frame_id)
 
     usable = [t for t in admitted if t in common]
     if not usable:
         blocked = sorted(set(common) - set(usable))
-        msg = failure_message(observations)
         if blocked:
-            msg = (msg[:-1] if msg.endswith(".") else msg)
-            msg = (f"Calibration was not successful: the only tags both "
-                   f"cameras saw ({', '.join(str(t) for t in blocked)}) were "
-                   f"rejected — "
+            msg = ("Calibration was not successful: the only tags both cameras "
+                   f"saw ({', '.join(str(t) for t in blocked)}) were rejected — "
                    + "; ".join(rejected[t] for t in blocked if t in rejected)
                    + ".")
+        else:
+            msg = failure_message(observations)
         return RigSolution(False, {}, {
             "dictionary": dictionary,
             "marker_length_m": float(marker_length),

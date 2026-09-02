@@ -93,6 +93,21 @@ def test_the_report_says_what_was_rejected_and_why():
                                             CAM_RIGHT: "assumed"}
 
 
+def test_the_written_report_keeps_its_types(tmp_path):
+    """A provenance file is read by people: "moved": 1 reads as a count, so a
+    bool has to survive serialisation as a bool."""
+    _d, _obs, intr, sol = _solve()
+    rig = CalibratedRig(intr[CAM_LEFT], intr[CAM_RIGHT],
+                        sol.ext[CAM_LEFT], sol.ext[CAM_RIGHT])
+    save_rig(rig, tmp_path / "calibration", sol.report)
+    written = json.loads(
+        (tmp_path / "calibration" / "report.json").read_text())
+
+    assert written["camera_motion_check"][CAM_LEFT]["moved"] is False
+    assert written["branch_pair_scores"]["L0R0"]["admissible"] is True
+    assert written["world_tag_id"] == 14
+
+
 def test_the_report_notices_a_camera_that_held_still():
     """Nothing in the app detects a camera that moved mid-take, so the check
     goes in the report while the tags are being solved anyway. On this take

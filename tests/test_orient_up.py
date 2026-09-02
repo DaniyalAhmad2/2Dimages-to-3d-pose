@@ -6,6 +6,7 @@ and 89 degrees apart on the client's rig). So sequence_up levels on the
 subject's own body line instead, and the UI says that is what it did.
 """
 import numpy as np
+import pytest
 
 from pose3d.core.skeleton import Joint
 from pose3d.geometry.orient import (
@@ -247,3 +248,26 @@ def test_the_export_levels_on_the_recorded_vertical_too():
     legacy, _ = _character_bone_frames(seq, 0, None, None)
     assert any(not np.allclose(got[0][b], legacy[0][b], atol=1e-6)
                for b in expected)
+
+
+def test_the_sidebar_states_the_vertical_and_its_uncertainty():
+    """The number is the deliverable: "±14°" is something the client can
+    weigh against what they see, "levelled" is not."""
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from PySide6.QtWidgets import QApplication
+    from pose3d.ui.panels import Sidebar
+
+    QApplication.instance() or QApplication([])
+    bar = Sidebar()
+
+    bar.show_levelling_note(True, "camera pair + tag row", 9.2)
+    assert bar.vertical_ref.text() == (
+        "Vertical: recorded at calibration from the camera pair + tag row, "
+        "±9° between those estimates. The 3D view and the export both use it, "
+        "so a lean held all take stays a lean.")
+
+    bar.show_levelling_note(True)                     # legacy project
+    assert "estimated from the subject" in bar.vertical_ref.text()

@@ -176,9 +176,10 @@ class JointAccuracyList(QWidget):
 
 
 _SUBJECT_VERTICAL = (
-    "Vertical: estimated from the subject, because this project was "
-    "calibrated before the vertical was recorded. A lean held through the "
-    "whole take reads as upright.")
+    "Vertical: estimated from the subject, because this project has no "
+    "recorded vertical (calibrated before it was recorded, or the estimates "
+    "disagreed too much to use). A lean held through the whole take reads as "
+    "upright.")
 
 
 class Sidebar(QWidget):
