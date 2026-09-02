@@ -43,6 +43,12 @@ ACC_ANCHORS: tuple[tuple[float, float], ...] = (
 # legend cannot drift from `acc_band`.
 ACC_GREEN_FRAC = ACC_ANCHORS[1][0]
 ACC_AMBER_FRAC = ACC_ANCHORS[2][0]
+# ...and the same two cuts as PERCENTAGES, which is the side `acc_band` works
+# in. Derived from the anchors (never typed twice), computed once at import:
+# `acc_band` runs per joint per repaint, and it was rebuilding two numpy
+# interpolations on every one of those calls.
+ACC_GREEN_PCT = ACC_ANCHORS[1][1]
+ACC_AMBER_PCT = ACC_ANCHORS[2][1]
 
 COL_GREEN = QColor(78, 214, 122)
 COL_AMBER = QColor(240, 190, 74)
@@ -83,8 +89,8 @@ def acc_band(pct: float) -> str:
     """
     if np.isnan(pct):
         return "red"
-    green, amber = accuracy_pct(ACC_GREEN_FRAC), accuracy_pct(ACC_AMBER_FRAC)
-    return "green" if pct >= green else ("amber" if pct >= amber else "red")
+    return ("green" if pct >= ACC_GREEN_PCT
+            else ("amber" if pct >= ACC_AMBER_PCT else "red"))
 
 
 _BAND_COLORS = {"green": COL_GREEN, "amber": COL_AMBER, "red": COL_RED}
@@ -158,10 +164,6 @@ class PoseAccuracyGauge(QWidget):
         super().__init__()
         self.setMinimumHeight(150)
         self._pct: dict[str, float] = {}
-
-    def set_value(self, pct: float):
-        """One number for both cameras (used where only one exists)."""
-        self.set_cameras({cam: pct for cam, _ in self.ARCS})
 
     def set_cameras(self, pct: dict):
         self._pct = {k: float(v) for k, v in dict(pct).items()}
@@ -320,12 +322,17 @@ class JointAccuracyList(QWidget):
         self.list.setObjectName("accuracyList")
         lay.addWidget(self.list)
 
-    def update_errors(self, errors: np.ndarray) -> float:
+    def update_errors(self, errors: np.ndarray) -> None:
         """`errors` are NORMALISED residuals (fraction of figure height).
 
         `ProjectModel._accuracy` divides by each camera's own figure height
         before it gets here, so a joint's number means the same thing in both
         views and in every take.
+
+        Returns nothing: it used to return the mean accuracy for the gauge,
+        and the gauge stopped taking one number for both cameras — a mean over
+        joints and then over cameras is exactly the statistic that hid the
+        client's problem.
         """
         errors = np.asarray(errors, float).reshape(NUM_JOINTS)
         pcts = np.asarray(accuracy_pct(errors), float)
@@ -337,8 +344,11 @@ class JointAccuracyList(QWidget):
             item = QListWidgetItem(f"  ●  {JOINT_NAMES[j]:<15}{shown:>6}")
             item.setForeground(acc_color(pct))
             self.list.addItem(item)
-        valid = pcts[~np.isnan(pcts)]
-        return float(valid.mean()) if valid.size else float("nan")
+
+
+_MARKER_TIP = (
+    "The tag the world frame was built on, its printed edge length, and the "
+    "frame it was solved in.")
 
 
 _SUBJECT_VERTICAL = (
@@ -432,9 +442,7 @@ class Sidebar(QWidget):
             "denominator every '% of height' in this app is measured against.")
         lay.addWidget(self.row_height)
         self.row_marker = _StackedRow("Marker", "—")
-        self.row_marker.setToolTip(
-            "The tag the world frame was built on, its printed edge length, "
-            "and the frame it was solved in.")
+        self.row_marker.setToolTip(_MARKER_TIP)
         lay.addWidget(self.row_marker)
 
         # --- set the scale from something actually measured ---------------
@@ -449,6 +457,11 @@ class Sidebar(QWidget):
         self.scale_value.setDecimals(1)
         self.scale_value.setSuffix(" cm")
         self.scale_value.setValue(11.8)
+        # The last height this widget PRE-FILLED (from the reconstruction).
+        # While the spinbox still holds it, a refresh may replace it; once the
+        # user types their own measurement it is theirs, and pressing
+        # "Recalculate 3D" before "Set scale" must not silently take it back.
+        self._scale_prefill = self.scale_value.value()
         self.scale_value.setMaximumWidth(96)
         self.scale_value.setToolTip(
             "The subject's real height, measured. Applying it rescales the "
@@ -586,18 +599,23 @@ class Sidebar(QWidget):
 
     # --- ruler-checkable facts ------------------------------------------
     def set_metric_facts(self, baseline_m=None, subject_height_m=None,
-                         marker=None):
+                         marker=None, marker_error: str = ""):
         """Baseline, reconstructed subject height, and the marker provenance.
 
         `marker` is the calibration report's dict (or None for a project
         calibrated before the report existed — those simply say "—" rather
-        than inventing a tag id).
+        than inventing a tag id). `marker_error` is the sentence for a report
+        that exists and could not be read, which is not the same fact and must
+        not read as "no marker was recorded".
         """
         self.row_baseline.set_value(_cm(baseline_m))
         self.row_height.set_value(_cm(subject_height_m))
-        if subject_height_m is not None and np.isfinite(subject_height_m):
+        if (subject_height_m is not None and np.isfinite(subject_height_m)
+                and self.scale_value.value() == self._scale_prefill):
             self.scale_value.setValue(round(100.0 * subject_height_m, 1))
-        self.row_marker.set_value(_marker_text(marker))
+            self._scale_prefill = self.scale_value.value()
+        self.row_marker.set_value(marker_error or _marker_text(marker))
+        self.row_marker.setToolTip(marker_error or _MARKER_TIP)
 
     # --- what the reconstruction says about itself -----------------------
     def set_quality(self, q, notes=()):

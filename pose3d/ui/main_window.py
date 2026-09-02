@@ -57,7 +57,7 @@ class _ExportWorker(QThread):
 
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
 from pose3d.ui.camera_view import CameraPanel
-from pose3d.ui.model import ProjectModel
+from pose3d.ui.model import ProjectModel, frame_stat, worst_per_joint
 from pose3d.ui.panels import (
     JointAccuracyList, PoseAccuracyPanel, Sidebar,
 )
@@ -278,11 +278,11 @@ class MainWindow(QMainWindow):
         bone fit controls would make correcting it feel broken.
         """
         states = self.model.joint_states(self.model.current)
-        worst = self._worst_per_joint(errors, "measured")
+        worst = worst_per_joint(errors, "measured")
         self.accuracy.update_errors(worst)
         self.pose_acc.set_accuracy(
-            {c: self._frame_stat(errors[c]["delivered"]) for c in errors},
-            {c: self._frame_stat(errors[c]["measured"]) for c in errors})
+            {c: frame_stat(errors[c]["delivered"]) for c in errors},
+            {c: frame_stat(errors[c]["measured"]) for c in errors})
         # the keypoints themselves are colour-banded by the same numbers, and
         # hovering one shows the figure — replaces the old SELECTED JOINT card
         for cam, panel in ((CAM_LEFT, self.cam_left),
@@ -290,32 +290,6 @@ class MainWindow(QMainWindow):
             per = errors.get(cam, {})
             panel.set_accuracy(per.get("measured"), per.get("delivered"),
                                states.get(cam))
-
-    @staticmethod
-    def _worst_per_joint(errors, stage):
-        """The worse of the two cameras, per joint — never their mean.
-
-        A joint the left camera places well and the right does not is a joint
-        with a problem, and the mean of the two says it is half a problem.
-        """
-        stack = [np.asarray(errors[c][stage], float) for c in errors]
-        if not stack:
-            return np.full(0, np.nan)
-        # fmax, not nanmax: NaN-tolerant, and all-NaN gives NaN without the
-        # "all-NaN slice" warning nanmax raises on a joint neither view saw.
-        return np.fmax.reduce(np.stack(stack), axis=0)
-
-    @staticmethod
-    def _frame_stat(per_joint):
-        """One number for a frame: the MEDIAN joint, not the worst.
-
-        The worst of 15 joints is a max over 15 samples; on a good take it
-        is red almost every frame, which is how the old timeline managed to be
-        red 21 times out of 26 (and green never) and tell the user nothing.
-        """
-        a = np.asarray(per_joint, float)
-        a = a[np.isfinite(a)]
-        return float(np.median(a)) if a.size else float("nan")
 
     def _on_character_error(self, message: str):
         self.view3d_error.setText(message)
@@ -446,21 +420,28 @@ class MainWindow(QMainWindow):
         self._refresh_quality()
 
     def _calibration_report(self):
-        """This project's calibration/report.json, or None.
+        """(this project's calibration/report.json or None, why not).
 
         A take calibrated before the report existed simply has none, and the
-        marker row says "—" rather than inventing a tag id for it.
+        marker row says "—" rather than inventing a tag id for it. A report
+        that is THERE and unreadable is a different fact and gets a sentence:
+        showing the same "—" for both is exactly the swallowing this phase is
+        about, and the row would be quietly saying "no provenance recorded"
+        about a file that records it.
         """
         import json
         from pathlib import Path
         if not self.model.project_dir:
-            return None
+            return None, ""
+        path = (Path(self.model.project_dir) / "calibration" / "report.json")
         try:
-            return json.loads(
-                (Path(self.model.project_dir) / "calibration"
-                 / "report.json").read_text())
-        except Exception:
-            return None
+            return json.loads(path.read_text()), ""
+        except FileNotFoundError:
+            return None, ""
+        except Exception as e:
+            return None, (f"calibration/report.json could not be read "
+                          f"({type(e).__name__}) — the marker size and tag "
+                          f"this calibration used cannot be shown")
 
     def _refresh_quality(self):
         """The sidebar rows that reprojection cannot see.
@@ -475,7 +456,7 @@ class MainWindow(QMainWindow):
         from pose3d.quality import symmetry_notes
         q = self.model.quality()
         self.sidebar.set_quality(q, symmetry_notes(q) if q else ())
-        report = self._calibration_report()
+        report, report_error = self._calibration_report()
         baseline = None
         if self.model.rig is not None:
             centres = [self.model.rig.ext[c].camera_center
@@ -484,7 +465,7 @@ class MainWindow(QMainWindow):
         self.sidebar.set_metric_facts(
             baseline_m=baseline,
             subject_height_m=None if q is None else q.subject_height_m,
-            marker=report)
+            marker=report, marker_error=report_error)
 
     def _on_import(self):
         from PySide6.QtWidgets import QMessageBox
@@ -696,7 +677,7 @@ class MainWindow(QMainWindow):
         from pose3d.ui.panels import ACC_AMBER_FRAC, ACC_GREEN_FRAC
         for i in range(len(self.model.project.frames)):
             errs = self.model._accuracy(i)
-            frac = self._frame_stat(self._worst_per_joint(errs, "measured"))
+            frac = frame_stat(worst_per_joint(errs, "measured"))
             status = ("red" if not np.isfinite(frac) else
                       "green" if frac < ACC_GREEN_FRAC else
                       "amber" if frac < ACC_AMBER_FRAC else "red")

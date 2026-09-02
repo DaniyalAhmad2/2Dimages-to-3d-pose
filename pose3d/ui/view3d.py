@@ -105,6 +105,7 @@ class View3D(gl.GLViewWidget):
         self._vsign = 1.0
         self._R = None                  # world->view rotation (sequence de-tilt)
         self._char_error = ""           # last message sent to characterError
+        self._char_error_source = ""    # which stage put it there
 
     # --- orientation / framing ---
     def _detect_vertical(self, pose3d, valid):
@@ -134,7 +135,7 @@ class View3D(gl.GLViewWidget):
         except Exception as e:
             self._report(f"The character could not be prepared for this take "
                          f"({type(e).__name__}: {e}) — the 3D view is showing "
-                         f"the captured skeleton only.")
+                         f"the captured skeleton only.", "fit")
             return
         if scale is None:
             # No bone in the take was long enough to size the rig against, so
@@ -145,7 +146,7 @@ class View3D(gl.GLViewWidget):
             self._report(
                 "The character could not be sized to this subject (no bone "
                 "was reconstructed well enough to fit against), so its size "
-                "is re-guessed every frame and the figure will pulse.")
+                "is re-guessed every frame and the figure will pulse.", "fit")
         else:
             self._report("")
 
@@ -264,11 +265,20 @@ class View3D(gl.GLViewWidget):
                 seg.append(pts[int(a)]); seg.append(pts[int(b)])
         lines.setData(pos=np.array(seg) if seg else np.zeros((2, 3)))
 
-    def _report(self, message: str) -> None:
-        """Say a character problem out loud, once per distinct message."""
+    def _report(self, message: str, source: str = "") -> None:
+        """Say a character problem out loud, once per distinct message.
+
+        `source` says which stage put it there. It matters because the two
+        stages report at different rates: `fit_subject` speaks once for the
+        whole take ("the rig could not be sized, so the figure will pulse"),
+        while `_skin` speaks per frame — and a per-frame stage must only
+        withdraw its OWN message, or the next good frame would quietly delete
+        a take-wide warning that is still true.
+        """
         if message == self._char_error:
             return
         self._char_error = message
+        self._char_error_source = source if message else ""
         self.characterError.emit(message)
 
     def _skin(self, vpose, vhead=None):
@@ -297,8 +307,19 @@ class View3D(gl.GLViewWidget):
         except Exception as e:
             self._report(f"The character could not be posed "
                          f"({type(e).__name__}: {e}) — the 3D view is showing "
-                         f"the captured skeleton only.")
+                         f"the captured skeleton only.", "skin")
             return None, None, None, 0.0
+        # The character IS posed, so a message saying it could not be is now
+        # false. `_report` de-duplicates on the last message and only
+        # `fit_subject` ever sent an empty one, so without this a single bad
+        # frame — one LinAlgError on a degenerate pose — pinned "the 3D view
+        # is showing the captured skeleton only" in the 3D card header for
+        # every good frame after it. Only THIS stage's message is withdrawn:
+        # `fit_subject`'s take-wide "the figure will pulse" stays true while
+        # every frame skins perfectly, which is exactly the case it warns
+        # about.
+        if self._char_error_source == "skin":
+            self._report("", "skin")
         return verts, faces, cj, drop
 
     def _set_body(self, verts, faces):

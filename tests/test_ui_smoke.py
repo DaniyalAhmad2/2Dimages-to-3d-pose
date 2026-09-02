@@ -399,6 +399,57 @@ def test_a_character_failure_reaches_the_3d_card(qapp):
     assert win.view3d_error.isVisibleTo(win._view3d_card)
     assert "truncated" in win.view3d_error.text()
 
+    # ...and it goes away again when the next frame poses. A per-frame fault
+    # (a degenerate pose, a transient LinAlgError) used to pin the banner for
+    # the rest of the session: `_report` de-duplicates on the last message and
+    # only `fit_subject` ever cleared it, so the 3D card went on saying it was
+    # "showing the captured skeleton only" over a perfectly good character.
+    class Fine(NoPelvis):
+        def pose_and_joints(self, *a, **k):
+            return np.zeros((4, 3)), np.zeros((1, 3), int), np.zeros((15, 3))
+
+    win.view3d._character = Fine()
+    verts, faces, cj, drop = win.view3d._skin(np.zeros((15, 3)))
+    assert verts is not None
+    assert not win.view3d_error.isVisibleTo(win._view3d_card)
+    assert win.view3d_error.text() == ""
+
+
+def test_a_good_frame_does_not_withdraw_the_take_wide_warning(qapp):
+    """A frame that skins perfectly withdraws only the message about THIS
+    frame not skinning.
+
+    `fit_subject`'s warning is about the whole take — the rig was never sized,
+    so every frame is scaled by its own height ratio and the figure pulses —
+    and every one of those frames skins fine. A per-frame "all clear" that
+    cleared it would delete the warning on the very next repaint, on exactly
+    the take it is about."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+
+    class Unsizable:
+        def fit_to_subject(self, poses):
+            return None                      # the case that pulses
+
+        def pose_and_joints(self, *a, **k):  # ...but posing works fine
+            return np.zeros((4, 3)), np.zeros((1, 3), int), np.zeros((15, 3))
+
+        def ground_drop(self, *a, **k):
+            return 0.0
+
+    win.view3d._character = Unsizable()
+    win.view3d._char_error = ""
+    win.view3d.fit_subject(np.stack([gt, gt]))
+    assert "pulse" in win.view3d_error.text()
+
+    win.view3d._skin(np.zeros((15, 3)))
+    assert "pulse" in win.view3d_error.text(), (
+        "a good frame deleted the take-wide sizing warning")
+    assert win.view3d_error.isVisibleTo(win._view3d_card)
+
 
 def test_an_unfittable_character_says_so_instead_of_pulsing(qapp):
     """`fit_to_subject` returning None drops the rig back on a PER-FRAME
@@ -552,3 +603,85 @@ def test_a_project_calibrated_before_the_report_says_so_rather_than_guessing(
     win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
     assert win.sidebar.row_marker._v.text() == "—"
     assert "cm" in win.sidebar.row_baseline._v.text()
+
+
+def test_a_typed_scale_survives_a_recompute(qapp, tmp_path):
+    """The "Set scale" box is pre-filled with the height the app measured, but
+    once the user has typed the height they MEASURED, that number is theirs.
+
+    Every sidebar refresh — project load, Recalculate 3D, any qualityChanged —
+    ran the pre-fill, so a user who typed 178.0 and then pressed "Recalculate
+    3D" before "Set scale" watched their measurement silently revert to the
+    app's own guess and rescaled the calibration to a number it had invented.
+    """
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    _write_calibration(tmp_path, rig)
+    win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
+
+    prefilled = win.sidebar.scale_value.value()
+    assert prefilled > 0, "the box should start at the measured height"
+
+    # a refresh with nothing typed may still track the measurement
+    win._refresh_quality()
+    assert win.sidebar.scale_value.value() == prefilled
+
+    win.sidebar.scale_value.setValue(178.0)     # the tape measure says so
+    win._refresh_quality()
+    assert win.sidebar.scale_value.value() == pytest.approx(178.0), (
+        "a refresh overwrote a height the user typed")
+
+
+def test_an_unreadable_calibration_report_says_so(qapp, tmp_path):
+    """"No report.json" (a project older than Phase 6) and "report.json is
+    corrupt" are different facts. Both used to show "—", so a take whose
+    provenance WAS recorded but is unreadable looked like a take that never
+    had any."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    calib = _write_calibration(tmp_path, rig)
+    (calib / "report.json").write_text("{not json at all")
+
+    win = MainWindow(ProjectModel(data, rig, project_dir=str(tmp_path)))
+    text = win.sidebar.row_marker._v.text()
+    assert text != "—", "an unreadable report read as 'nothing was recorded'"
+    assert "report.json" in text and "could not be read" in text
+
+
+def test_a_take_that_cannot_be_measured_is_measured_once(qapp, tmp_path):
+    """`take_quality` walks every frame twice. When it raises, the failure is
+    cached like a success: otherwise the one take the measurement cannot
+    handle re-runs it — and re-emits the same status message — on every
+    sidebar refresh, which is every frame change."""
+    import pose3d.quality as quality
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    calls = {"n": 0}
+    messages = []
+    model.statusMessage.connect(messages.append)
+
+    def boom(*a, **k):
+        calls["n"] += 1
+        raise RuntimeError("this take cannot be measured")
+
+    original = quality.take_quality
+    quality.take_quality = boom
+    try:
+        assert model.quality() is None
+        assert model.quality() is None
+        assert model.quality() is None
+    finally:
+        quality.take_quality = original
+
+    assert calls["n"] == 1, "the failed measurement re-ran on every refresh"
+    assert len(messages) == 1 and "cannot be measured" in messages[0]
+
+    # ...and invalidating the readouts lets it be tried again
+    model.invalidate_readouts()
+    assert model.quality() is not None

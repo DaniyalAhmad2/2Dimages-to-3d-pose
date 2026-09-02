@@ -435,8 +435,6 @@ def retarget_error(character, up: np.ndarray, height: float, scale: float,
             # no hips in this frame: the rig has no root, so there is no
             # retarget error to measure here. Not an error, just no sample.
             continue
-        if J is None:
-            continue
         n_posed += 1
         J = np.asarray(J, float)
         d = np.linalg.norm(J - p, axis=1)

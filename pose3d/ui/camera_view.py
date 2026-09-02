@@ -16,6 +16,8 @@ from PySide6.QtWidgets import (
 
 from pose3d.core.skeleton import (
     BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS)
+from pose3d.ui.model import (
+    STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED)
 from pose3d.ui.panels import (
     COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_band, acc_label,
     accuracy_pct)
@@ -46,10 +48,10 @@ RAG_COLORS = {
 # measurement of this frame, and none may look like one.
 HOLLOW_STATES = ("filled", "unmeasured", "rejected")
 
-# Per-joint states the model supplies alongside the residuals.
-STATE_OK = "ok"
-STATE_NOT_MEASURED = "not_measured"
-STATE_REJECTED = "rejected"
+# The per-joint states are imported from `pose3d.ui.model`, which produces
+# them, rather than restated here: two independent copies of three string
+# constants desync on a typo with nothing to catch it — the dots would simply
+# stop being drawn as "rejected" and no test would notice.
 
 # The face keypoints (eyes/ears) that orient the character's head. Drawn
 # smaller and in one fixed accent colour: they are not part of the skeleton,

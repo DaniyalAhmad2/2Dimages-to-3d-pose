@@ -61,8 +61,10 @@ def test_the_accuracy_gauge_stays_readable_on_a_light_host(light_host):
     colour, leaving near-white text on white."""
     from pose3d.ui.panels import PoseAccuracyGauge
 
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+
     g = PoseAccuracyGauge()
-    g.set_value(92.0)
+    g.set_cameras({CAM_LEFT: 92.0, CAM_RIGHT: 88.0})
     img = _render(g)
 
     # sample the corners, which are background whatever the arc is doing

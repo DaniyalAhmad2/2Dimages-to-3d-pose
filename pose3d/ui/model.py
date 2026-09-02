@@ -21,6 +21,11 @@ from pose3d.pipeline import CalibratedRig, bone_length_targets, fit_frame
 
 HEAD_JOINT = int(Joint.HEAD)
 
+# Cached in place of a `TakeQuality` when the measurement raised: distinct
+# from None (= "not measured yet"), so one failure is reported once per
+# invalidation instead of on every sidebar refresh.
+_QUALITY_FAILED = object()
+
 # Per-joint states the camera views paint. A joint with no 3D is not a joint
 # with a poor one, and the two used to be drawn identically.
 STATE_OK = "ok"
@@ -227,10 +232,20 @@ class ProjectModel(QObject):
     def _persist_rig(self, factor: float) -> None:
         """Write the rescaled rig back, keeping the calibration's provenance.
 
-        `save_rig` alone would drop report.json's evidence and the recorded
-        vertical, so the report is read, its one length-valued field scaled,
-        and handed back; the vertical is a DIRECTION, which a scale cannot
-        touch, so it is restored verbatim if the rewrite dropped it.
+        `save_rig` alone would drop report.json's evidence, so the report is
+        read, its one length-valued field scaled, and handed back. The
+        recorded vertical is a DIRECTION, which a scale cannot touch: it is
+        carried through the same report (`save_rig` copies it into
+        extrinsics.json), so the folder is written once rather than written
+        and then patched. A project with no report.json — calibrated before
+        Phase 6 — has nothing to carry it in, and only that case re-opens the
+        file.
+
+        Neither read is swallowed. "There is no report.json" is a fact about
+        an older project and stays quiet; "report.json is there and is not
+        readable" is a fault, and dropping the recorded vertical or the tag
+        provenance without a word is how a calibration silently loses its
+        evidence.
         """
         if not self.project_dir:
             self.statusMessage.emit(
@@ -243,34 +258,55 @@ class ProjectModel(QObject):
         from pose3d.calib.resolve import save_rig
         calib_dir = Path(self.project_dir) / "calibration"
         ext_path = calib_dir / "extrinsics.json"
-        try:
-            before = json.loads(ext_path.read_text())
-        except Exception:
-            before = {}
-        report = None
-        try:
-            report = json.loads((calib_dir / "report.json").read_text())
-        except Exception:
-            report = None                 # calibrated before report.json
+        up_keys = ("world_up", "world_up_source", "world_up_spread_deg")
+        before = self._read_json(
+            ext_path,
+            "The calibration's extrinsics.json could not be read ({reason}), "
+            "so any vertical recorded in it is not carried into the rescaled "
+            "calibration.")
+        report = self._read_json(
+            calib_dir / "report.json",
+            "The calibration's report.json could not be read ({reason}), so "
+            "the rescaled calibration is saved without its marker provenance.")
         if report is not None and report.get("marker_length_m") is not None:
             report["marker_length_m"] = float(
                 report["marker_length_m"]) * factor
             report["marker_length_source"] = (
                 f"rescaled in-app by {factor:.4f}x from a measured distance")
+        if report is not None and report.get("world_up") is None and before:
+            for key in up_keys:
+                if key in before:
+                    report[key] = before[key]
         try:
             save_rig(self.rig, calib_dir, report)
-            doc = json.loads(ext_path.read_text())
-            restored = False
-            for key in ("world_up", "world_up_source", "world_up_spread_deg"):
-                if key not in doc and key in before:
-                    doc[key] = before[key]
-                    restored = True
-            if restored:
-                ext_path.write_text(json.dumps(doc, indent=2))
+            if report is None and before:
+                # No report to carry the vertical, so put it back by hand.
+                doc = json.loads(ext_path.read_text())
+                restored = {k: before[k] for k in up_keys
+                            if k in before and k not in doc}
+                if restored:
+                    ext_path.write_text(json.dumps(doc | restored, indent=2))
         except Exception as e:
             self.statusMessage.emit(
                 f"Could not save the rescaled calibration "
                 f"({type(e).__name__}: {e})")
+
+    def _read_json(self, path, complaint: str):
+        """Parse a calibration side-file: dict, or None when it is absent.
+
+        `complaint` is emitted (with `{reason}` filled in) when the file EXISTS
+        but cannot be read — the case the old blanket `except Exception` made
+        indistinguishable from "this project predates that file".
+        """
+        import json
+        try:
+            return json.loads(path.read_text())
+        except FileNotFoundError:
+            return None                   # older project: nothing to keep
+        except Exception as e:
+            self.statusMessage.emit(
+                complaint.format(reason=f"{type(e).__name__}: {e}"))
+            return None
 
     def redetect_all(self, detector, load_image) -> None:
         """Re-run the detector on every frame, then recompute 3D."""
@@ -505,14 +541,23 @@ class ProjectModel(QObject):
         Computed once per recompute — it is a take-wide measurement, not a
         per-frame one — and cached, because the sidebar reads it on every
         refresh and it walks every frame twice.
+
+        A FAILURE is cached too. Without that, a take the measurement cannot
+        handle re-ran the whole two-pass walk and re-emitted the same status
+        message on every sidebar refresh — which is every frame change — so
+        the one take that cannot be measured is also the one that runs the
+        measurement most often.
         """
         if self.rig is None or not self.project.frames:
+            return None
+        if self._quality is _QUALITY_FAILED:
             return None
         if self._quality is None:
             from pose3d.quality import take_quality
             try:
                 self._quality = take_quality(self.project, self.rig)
             except Exception as e:      # never let a readout break the app
+                self._quality = _QUALITY_FAILED
                 self.statusMessage.emit(
                     f"Could not measure this take ({type(e).__name__}: {e})")
                 return None
@@ -586,6 +631,38 @@ class ProjectModel(QObject):
             for c in CAMERAS:
                 states[c][j] = state
         return states
+
+
+def worst_per_joint(errors, stage: str):
+    """The worse of the two cameras, per joint — never their mean.
+
+    `errors` is one frame of `ProjectModel._accuracy`. A joint the left camera
+    places well and the right does not is a joint with a problem, and the mean
+    of the two says it is half a problem.
+
+    This and `frame_stat` are the two statistics that decide the timeline band
+    and the gauge, so they live beside the residuals they reduce rather than as
+    private helpers on the window: they are facts about a project, and a test
+    should not have to reach into a QMainWindow to compute one.
+    """
+    stack = [np.asarray(errors[c][stage], float) for c in errors]
+    if not stack:
+        return np.full(0, np.nan)
+    # fmax, not nanmax: NaN-tolerant, and all-NaN gives NaN without the
+    # "all-NaN slice" warning nanmax raises on a joint neither view saw.
+    return np.fmax.reduce(np.stack(stack), axis=0)
+
+
+def frame_stat(per_joint):
+    """One number for a frame: the MEDIAN joint, not the worst.
+
+    The worst of 15 joints is a max over 15 samples; on a good take it is red
+    almost every frame, which is how the old timeline managed to be red 21
+    times out of 26 (and green never) and tell the user nothing.
+    """
+    a = np.asarray(per_joint, float)
+    a = a[np.isfinite(a)]
+    return float(np.median(a)) if a.size else float("nan")
 
 
 _NO_RIG_NOTE = (

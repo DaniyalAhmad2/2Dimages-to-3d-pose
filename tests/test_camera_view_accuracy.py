@@ -28,9 +28,9 @@ from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS         # noqa: E40
 from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS             # noqa: E402
 from pose3d.quality import load_rig                                  # noqa: E402
 from pose3d.ui.camera_view import RAG_COLORS, CameraPanel            # noqa: E402
-from pose3d.ui.main_window import MainWindow                         # noqa: E402
 from pose3d.ui.model import (                                        # noqa: E402
-    STATE_NOT_MEASURED, STATE_REJECTED, ProjectModel)
+    STATE_NOT_MEASURED, STATE_REJECTED, ProjectModel, frame_stat,
+    worst_per_joint)
 from pose3d.ui.panels import (                                       # noqa: E402
     ACC_AMBER_FRAC, ACC_GREEN_FRAC, acc_band, accuracy_pct)
 
@@ -193,8 +193,8 @@ def _band_counts(model, stage="measured"):
 def _timeline_bands(model):
     counts = {"green": 0, "amber": 0, "red": 0}
     for i in range(len(model.project.frames)):
-        frac = MainWindow._frame_stat(
-            MainWindow._worst_per_joint(model._accuracy(i), "measured"))
+        frac = frame_stat(
+            worst_per_joint(model._accuracy(i), "measured"))
         counts["red" if not np.isfinite(frac) else
                "green" if frac < ACC_GREEN_FRAC else
                "amber" if frac < ACC_AMBER_FRAC else "red"] += 1
