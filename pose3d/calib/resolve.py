@@ -80,7 +80,8 @@ def save_rig(rig: CalibratedRig, calib_dir, report: dict | None = None) -> None:
     """Persist a rig to <calib_dir> in the format app._load_rig expects.
 
     `report` is the provenance record from `resolve_calibration`; when given it
-    is written alongside as report.json.
+    is written as report.json and its recorded vertical is copied into
+    extrinsics.json, where the view and the export read it.
     """
     calib_dir = Path(calib_dir)
     calib_dir.mkdir(parents=True, exist_ok=True)
@@ -92,6 +93,11 @@ def save_rig(rig: CalibratedRig, calib_dir, report: dict | None = None) -> None:
         "right": {"R": rig.ext[CAM_RIGHT].R.tolist(),
                   "t": rig.ext[CAM_RIGHT].t.tolist()},
     }
+    if report and report.get("world_up") is not None:
+        doc["world_up"] = _to_jsonable(report["world_up"])
+        doc["world_up_source"] = report.get("world_up_source")
+        doc["world_up_spread_deg"] = _to_jsonable(
+            report.get("world_up_spread_deg"))
     (calib_dir / "extrinsics.json").write_text(json.dumps(doc, indent=2))
     if report is not None:
         (calib_dir / "report.json").write_text(
@@ -103,6 +109,25 @@ def load_extrinsics_json(path):
     d = json.loads(Path(path).read_text())
     return (Extrinsics(R=np.array(d["left"]["R"], float), t=np.array(d["left"]["t"], float)),
             Extrinsics(R=np.array(d["right"]["R"], float), t=np.array(d["right"]["t"], float)))
+
+
+def load_world_up(calib_dir):
+    """The recorded vertical from a calibration folder, or None.
+
+    Returns (up, source, spread_deg). None for a project calibrated before the
+    vertical was recorded — those keep levelling on the subject, unchanged.
+    """
+    try:
+        d = json.loads((Path(calib_dir) / "extrinsics.json").read_text())
+        up = d["world_up"]
+    except Exception:
+        return None
+    up = np.asarray(up, float).ravel()
+    n = float(np.linalg.norm(up))
+    if up.shape != (3,) or not np.isfinite(n) or n < 1e-9:
+        return None
+    return (up / n, str(d.get("world_up_source") or "recorded"),
+            float(d.get("world_up_spread_deg") or 0.0))
 
 
 @dataclass
@@ -419,7 +444,7 @@ class RigSolution:
 
 def solve_rig_from_observations(
     observations, frame_order, intr, marker_length: float,
-    dictionary: str | None = None,
+    dictionary: str | None = None, poses=None,
 ) -> RigSolution:
     """Pick a world tag, a world frame and an IPPE branch pair, with evidence.
 
@@ -485,6 +510,21 @@ def solve_rig_from_observations(
               CAM_RIGHT: solves[CAM_RIGHT][branch[1]]}
     ext = {cam: picked[cam].extrinsics for cam in CAMERAS}
 
+    # tag layout in world coords, for the vertical: every admitted tag the LEFT
+    # camera sees in the world frame, mapped through that camera's pose.
+    layout = {}
+    R_w, t_w = ext[CAM_LEFT].R, ext[CAM_LEFT].t
+    for tag_id in admitted:
+        s = _solves(observations, world_frame, CAM_LEFT, tag_id,
+                    intr[CAM_LEFT], marker_length)
+        if s:
+            layout[tag_id] = (R_w.T @ s[0].R, R_w.T @ (s[0].t - t_w))
+
+    from pose3d.geometry.gravity import estimate_world_up
+    rig = CalibratedRig(intr[CAM_LEFT], intr[CAM_RIGHT], ext[CAM_LEFT],
+                        ext[CAM_RIGHT])
+    up, spread, cands = estimate_world_up(rig, layout, poses)
+
     centres = {cam: ext[cam].camera_center for cam in CAMERAS}
     axes = {cam: ext[cam].R.T @ np.array([0.0, 0.0, 1.0]) for cam in CAMERAS}
     report = {
@@ -514,6 +554,10 @@ def solve_rig_from_observations(
             picked),
         "focal_source_per_camera": {cam: intr[cam].source for cam in CAMERAS},
         "image_size": {cam: list(intr[cam].image_size) for cam in CAMERAS},
+        "world_up": (None if up is None else up.tolist()),
+        "world_up_source": (None if up is None else " + ".join(cands)),
+        "world_up_spread_deg": (None if up is None else float(spread)),
+        "world_up_candidates": {k: v.tolist() for k, v in cands.items()},
     }
     msg = (f"Calibration estimated from ArUco marker {world_tag} "
            f"(frame {world_frame}).")
@@ -586,9 +630,11 @@ def resolve_calibration(
             "no ArUco tags were detected in any image.", approximate)
 
     intr = {CAM_LEFT: intr_left, CAM_RIGHT: intr_right}
+    poses = np.stack([f.fitted3d for f in project.frames])
     sol = solve_rig_from_observations(
         observations, [f.frame_id for f in project.frames], intr,
-        marker_length, DICT_NAME_BY_ID.get(dict_id))
+        marker_length, DICT_NAME_BY_ID.get(dict_id),
+        poses=(poses if np.isfinite(poses).any() else None))
     if not sol.ok:
         return CalibrationResult(False, None, "failed", sol.message,
                                  approximate, sol.report)

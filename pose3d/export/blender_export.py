@@ -34,7 +34,8 @@ class ExportResult:
 
 
 def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
-                           head3d: np.ndarray | None = None):
+                           head3d: np.ndarray | None = None,
+                           recorded_up=None):
     """Per-frame posed bone matrices, computed with the SAME skinning the live
     3D view uses, so the exported character matches the preview pose-for-pose.
 
@@ -43,7 +44,7 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
     """
     try:
         from pose3d.geometry.character import Character
-        from pose3d.geometry.orient import (sequence_up, de_tilt_matrix,
+        from pose3d.geometry.orient import (take_up, de_tilt_matrix,
                                             detect_vertical, upright_matrix)
     except Exception:
         return None, None
@@ -54,9 +55,9 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
 
     poses3d = np.asarray(poses3d, float).reshape(-1, NUM_JOINTS, 3)
     # orient exactly as the 3D view does, so the export matches the preview
-    # pose-for-pose (see orient.sequence_up for why the calibration frame is
-    # not used as the vertical reference)
-    up = sequence_up(poses3d)
+    # pose-for-pose: the vertical recorded at calibration time when there is
+    # one, else the subject's own body line (see orient.take_up)
+    up, _source, _spread = take_up(poses3d, recorded_up)
     if up is not None:
         R = de_tilt_matrix(up).T
     else:
@@ -118,6 +119,7 @@ def export_animation(
     display_frame: int = 0,
     character: str | None = "__bundled__",
     head3d: np.ndarray | None = None,
+    recorded_up=None,
     on_line=None,
 ) -> ExportResult:
     if character == "__bundled__":
@@ -130,7 +132,7 @@ def export_animation(
     if character and Path(character).exists():
         # drive the rig with the exact skinning the live view uses
         bone_frames, bone_names = _character_bone_frames(
-            poses3d, display_frame, head3d)
+            poses3d, display_frame, head3d, recorded_up)
         if bone_frames is not None:
             doc["bone_frames"] = bone_frames
             doc["bone_names"] = bone_names

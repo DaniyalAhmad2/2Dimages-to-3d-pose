@@ -83,3 +83,20 @@ def test_mismatched_resolutions_are_reported():
 
 def test_no_rig_is_not_an_error():
     assert check_rig(None) == []
+
+
+def test_a_recorded_vertical_changes_what_the_tilt_costs():
+    """The world frame's tilt is only a problem because of what the view does
+    about it. Once a vertical is recorded, the old warning ("a lean held all
+    take reads as upright") is no longer true, and a warning that is no longer
+    true is worse than none."""
+    rig = _rig((_tipped_cam((-0.3, -3, 1.5)), _tipped_cam((0.3, -3, 1.5))),
+               _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True),
+               _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True))
+    recorded = (np.array([0.0, 0.0, 1.0]), "camera pair + tag row", 9.0)
+
+    msgs = " ".join(check_rig(rig, recorded))
+    assert "camera pair + tag row" in msgs and "±9°" in msgs
+    assert "levels on the subject" not in msgs
+    # ...and without one, the old message stands unchanged
+    assert "levels on the subject" in " ".join(check_rig(rig))

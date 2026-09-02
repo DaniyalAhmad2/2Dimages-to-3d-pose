@@ -21,9 +21,10 @@ class _ExportWorker(QThread):
     status = Signal(str)
     finished_res = Signal(object)          # ExportResult or Exception
 
-    def __init__(self, poses, out, name, fps, display_frame, head3d=None):
+    def __init__(self, poses, out, name, fps, display_frame, head3d=None,
+                 recorded_up=None):
         super().__init__()
-        self._a = (poses, out, name, fps, display_frame, head3d)
+        self._a = (poses, out, name, fps, display_frame, head3d, recorded_up)
 
     def _on_line(self, line: str):
         if "Fra:" in line:
@@ -41,12 +42,13 @@ class _ExportWorker(QThread):
 
     def run(self):
         from pose3d.export.blender_export import export_animation
-        poses, out, name, fps, df, head3d = self._a
+        poses, out, name, fps, df, head3d, recorded_up = self._a
         self.status.emit("Posing the character in Blender…")
         try:
             res = export_animation(poses, out, name=name, fps=fps,
                                    render_video=True, display_frame=df,
-                                   head3d=head3d, on_line=self._on_line)
+                                   head3d=head3d, recorded_up=recorded_up,
+                                   on_line=self._on_line)
         except Exception as e:      # surface any failure to the UI thread
             res = e
         self.finished_res.emit(res)
@@ -283,9 +285,15 @@ class MainWindow(QMainWindow):
         self._refresh_calibration_status()
 
     def _refresh_calibration_status(self):
+        from pathlib import Path
+
         from pose3d.calib.quality import check_rig
+        from pose3d.calib.resolve import load_world_up
+        recorded = None
+        if self.model.project_dir:
+            recorded = load_world_up(Path(self.model.project_dir) / "calibration")
         self.sidebar.set_calibrated(self.model.rig is not None,
-                                    check_rig(self.model.rig))
+                                    check_rig(self.model.rig, recorded))
 
     def _on_import(self):
         from PySide6.QtWidgets import QMessageBox
@@ -367,7 +375,8 @@ class MainWindow(QMainWindow):
         heads = np.stack([f.head3d for f in frames])
         worker = _ExportWorker(poses, out, self.model.project.name,
                                self.model.project.fps, self.model.current,
-                               head3d=heads)
+                               head3d=heads,
+                               recorded_up=getattr(self, "_recorded_up", None))
         self._export_worker = worker       # keep a reference
         worker.status.connect(prog.setLabelText)
 
@@ -487,20 +496,28 @@ class MainWindow(QMainWindow):
     def _apply_view_orientation(self):
         """Orient the 3D view so "up" is trustworthy.
 
-        Levelled on the subject's own body line; see orient.sequence_up for why
-        neither the calibration frame nor the cameras can serve as gravity on
-        this rig. The sidebar states the cost of that.
+        The vertical recorded at calibration time when the project has one (it
+        is a property of the room, so it keeps a lean held for the whole take),
+        else the subject's own body line as before. The sidebar states which,
+        and how uncertain it is.
         """
-        from pose3d.geometry.orient import sequence_up, de_tilt_matrix
+        from pathlib import Path
+
+        from pose3d.calib.resolve import load_world_up
+        from pose3d.geometry.orient import take_up, de_tilt_matrix
+        recorded = None
+        if self.model.project_dir:
+            recorded = load_world_up(Path(self.model.project_dir) / "calibration")
+        self._recorded_up = recorded          # the export levels on it too
         frames = self.model.project.frames
         poses = [f.fitted3d for f in frames
                  if f.fitted3d is not None and not np.isnan(f.fitted3d).all()]
         R = None
-        if poses:
-            up = sequence_up(np.stack(poses))
-            if up is not None:
-                R = de_tilt_matrix(up)
-        self.sidebar.show_levelling_note(R is not None)
+        up, source, spread = take_up(np.stack(poses) if poses else None,
+                                     recorded)
+        if up is not None:
+            R = de_tilt_matrix(up)
+        self.sidebar.show_levelling_note(R is not None, source, spread)
         self.view3d.set_orientation(R)
         if poses:
             # size the character to this subject (same fit the export uses)
