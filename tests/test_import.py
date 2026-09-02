@@ -143,3 +143,72 @@ def test_import_calibrate_save_reload(tmp_path):
     assert model.rig is not None
     assert model.project_dir == str(folder)
     assert len(model.project.frames) == len(proj.frames)
+
+
+# --- head keypoints survive an import -------------------------------------
+
+def test_import_populates_head_keypoints(tmp_path):
+    """Import Images used to run its own detection loop that wrote only
+    kp2d/scores, silently dropping Detection.head_xy — so every project ever
+    made through the wizard was headless and the character's head just rode
+    the neck. The dialog now calls pipeline.detect_project, the one loop.
+    """
+    from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS
+    from pose3d.detect.base import Detection
+    from pose3d.geometry.triangulate import triangulate_points
+    from pose3d.pipeline import detect_project
+
+    proj, intr, _ = _two_cam_marker_project(tmp_path, marker_len=0.30)
+    res = resolve_calibration(proj, _loader, marker_length=0.30,
+                              intr_left=intr, intr_right=intr)
+    assert res.ok, res.message
+
+    gt3d = np.array([[0.0, 0.0, 0.2], [-0.03, 0.02, 0.24], [0.03, 0.02, 0.24],
+                     [-0.05, 0.0, 0.22], [0.05, 0.0, 0.22]])
+    from tests.test_extrinsics import _look_at
+    import cv2 as _cv2
+
+    def _project(pts, R, t):
+        rvec, _ = _cv2.Rodrigues(R)
+        img, _ = _cv2.projectPoints(pts, rvec, t.reshape(3, 1), intr.K, intr.dist)
+        return img.reshape(-1, 2)
+
+    rig = res.rig
+    per_cam = {c: _project(gt3d, rig.ext[c].R, rig.ext[c].t)
+               for c in (CAM_LEFT, CAM_RIGHT)}
+
+    class _Det:
+        def __init__(self):
+            self._i = 0
+
+        def detect(self, image_bgr):
+            cam = CAM_LEFT if self._i % 2 == 0 else CAM_RIGHT
+            self._i += 1
+            return Detection(xy=np.zeros((NUM_JOINTS, 2)),
+                             scores=np.full(NUM_JOINTS, 0.9),
+                             head_xy=per_cam[cam].copy(),
+                             head_scores=np.full(NUM_HEAD_KP, 0.9))
+
+    detect_project(proj, _Det(), _loader)
+
+    f = proj.frames[0]
+    for c in (CAM_LEFT, CAM_RIGHT):
+        assert np.isfinite(f.head2d[c]).all()
+        assert np.isfinite(f.head_scores[c]).all()
+
+    f.head3d = triangulate_points(
+        f.head2d[CAM_LEFT], f.head2d[CAM_RIGHT],
+        rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+        rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    assert np.isfinite(f.head3d).all()
+    assert np.max(np.linalg.norm(f.head3d - gt3d, axis=1)) < 0.01
+
+
+def test_import_dialog_calls_the_pipeline_detection_loop():
+    """Regression guard for the deleted inline loop: the dialog must not grow
+    its own copy of detection again."""
+    import inspect
+    from pose3d.ui import import_dialog
+    src = inspect.getsource(import_dialog.ImportDialog._process)
+    assert "detect_project(" in src
+    assert "det.detect(" not in src

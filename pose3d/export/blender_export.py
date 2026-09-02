@@ -34,9 +34,17 @@ class ExportResult:
 
 
 def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
-                           head3d: np.ndarray | None = None):
+                           head3d: np.ndarray | None = None,
+                           filled: np.ndarray | None = None):
     """Per-frame posed bone matrices, computed with the SAME skinning the live
     3D view uses, so the exported character matches the preview pose-for-pose.
+
+    `filled` is the (T, NUM_JOINTS) flag array from `pipeline.fill_gaps`. The
+    export reads the same array the 3D view draws from, so the two can never
+    disagree about what a dropout is: a one-frame gap the view shows filled
+    (amber) is posed here too, and a longer gap the view shows as a hole stays
+    absent here — which is what keeps Blender's hold-the-last-known-pose rule
+    from quietly papering over a dropout the app is telling the user about.
 
     Returns (bone_frames, bone_names) or (None, None) if the character asset is
     unavailable — the Blender job then falls back to its aim-only retarget.
@@ -78,6 +86,12 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
     bone_frames = []
     for i, pose in enumerate(poses3d):
         valid = ~np.isnan(pose).any(1)
+        if filled is not None:
+            # A joint fill_gaps flagged has a value, so this changes nothing
+            # today; it is here so the coupling is explicit and checked. The
+            # `& valid` is the guarantee: a flag can never conjure a joint the
+            # pose does not have, whatever a caller passes in.
+            valid |= np.asarray(filled[i], bool) & valid
         if not valid.any():
             bone_frames.append(None); continue
         up = pose @ R                       # upright; centring is irrelevant here
@@ -118,6 +132,7 @@ def export_animation(
     display_frame: int = 0,
     character: str | None = "__bundled__",
     head3d: np.ndarray | None = None,
+    filled: np.ndarray | None = None,
     on_line=None,
 ) -> ExportResult:
     if character == "__bundled__":
@@ -130,7 +145,7 @@ def export_animation(
     if character and Path(character).exists():
         # drive the rig with the exact skinning the live view uses
         bone_frames, bone_names = _character_bone_frames(
-            poses3d, display_frame, head3d)
+            poses3d, display_frame, head3d, filled)
         if bone_frames is not None:
             doc["bone_frames"] = bone_frames
             doc["bone_names"] = bone_names

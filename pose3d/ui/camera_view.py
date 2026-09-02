@@ -27,6 +27,9 @@ RAG_COLORS = {
     "amber": COL_AMBER,
     "red": COL_RED,
     "corrected": COL_PURPLE,
+    # drawn as a hollow ring, never a filled dot: this joint's 3D was
+    # interpolated across a one-frame dropout, not measured here.
+    "filled": COL_AMBER,
 }
 
 # The face keypoints (eyes/ears) that orient the character's head. Drawn
@@ -63,7 +66,12 @@ class JointItem(QGraphicsEllipseItem):
         self.set_status("green")
 
     def set_status(self, status: str):
+        if status == "filled":
+            self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            self.setPen(QPen(RAG_COLORS["filled"], 2))
+            return
         self.setBrush(QBrush(RAG_COLORS.get(status, RAG_COLORS["red"])))
+        self.setPen(QPen(QColor(20, 20, 20), 1))
 
     def itemChange(self, change, value):
         # live signal only updates the bone lines in-view; the model is NOT
@@ -107,6 +115,7 @@ class CameraView(QGraphicsView):
         self._accuracy = None       # per-joint reprojection error (px)
         self._scores = None         # per-joint detector confidence
         self._corrected = None      # per-joint hand-corrected flags
+        self._filled = None         # per-joint gap-filled (3D interpolated)
         self._build_items()
 
     def _build_items(self):
@@ -146,14 +155,18 @@ class CameraView(QGraphicsView):
 
     def set_pose(self, xy: np.ndarray, scores: np.ndarray,
                  corrected: np.ndarray | None = None,
-                 head_xy: np.ndarray | None = None):
+                 head_xy: np.ndarray | None = None,
+                 filled: np.ndarray | None = None):
         """Place joints from (NUM_JOINTS,2) pixel coords + scores.
 
         `head_xy` is the optional (NUM_HEAD_KP,2) face keypoints; eyes and
         ears become small draggable dots (the nose stays the HEAD dot).
+        `filled` flags joints whose 3D was interpolated across a one-frame
+        dropout (pipeline.fill_gaps); they are drawn as hollow rings.
         """
         self._scores = np.asarray(scores, float)
         self._corrected = corrected
+        self._filled = filled
         for item in self._face:
             k = item.joint_id - NUM_JOINTS
             q = None if head_xy is None else head_xy[k]
@@ -212,6 +225,11 @@ class CameraView(QGraphicsView):
             detail = f"detection confidence {shown}"
         tip = (f"<b>{name}</b><br>"
                f"<span style='color:{RAG_COLORS[status].name()};'>{detail}</span>")
+        if self._filled is not None and self._filled[j]:
+            status = "filled"
+            tip += (f"<br><span style='color:{RAG_COLORS['filled'].name()};'>"
+                    f"3D interpolated — this joint was missing for one frame"
+                    f"</span>")
         if self._corrected is not None and self._corrected[j]:
             status = "corrected"
             tip += (f"<br><span style='color:{RAG_COLORS['corrected'].name()};'>"

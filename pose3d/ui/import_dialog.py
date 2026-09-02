@@ -18,9 +18,9 @@ from pathlib import Path
 import cv2
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox, QHBoxLayout,
-    QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton, QVBoxLayout,
-    QWidget,
+    QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton,
+    QVBoxLayout, QWidget,
 )
 
 from pose3d.calib.intrinsics import Intrinsics
@@ -30,6 +30,10 @@ from pose3d.calib.resolve import (
 from pose3d.core.importer import build_project, match_frames
 from pose3d.core.io_project import save_project
 from pose3d.ui import filedialog
+
+
+class _Cancelled(Exception):
+    """The user pressed Cancel in the progress dialog."""
 
 
 class _FilePicker(QWidget):
@@ -117,8 +121,16 @@ class ImportDialog(QDialog):
         pform = QFormLayout(proj_box)
         self.name = QLineEdit("Imported_Session")
         self.out_pick = _FilePicker("dir")
+        # Off by default, and it says why: a temporal filter is a video-rate
+        # tool. On stop-motion frames there is no temporal signal to filter,
+        # so it just drags every frame toward its neighbours.
+        self.smooth_check = QCheckBox(
+            "Smooth across frames (video-rate capture only; a stop-motion "
+            "take has no temporal signal to filter)")
+        self.smooth_check.setChecked(False)
         pform.addRow("Name:", self.name)
         pform.addRow("Save to folder:", self.out_pick)
+        pform.addRow("Smoothing:", self.smooth_check)
         root.addWidget(proj_box)
 
         # --- buttons ---
@@ -192,26 +204,36 @@ class ImportDialog(QDialog):
             elif cal.approximate:
                 QMessageBox.information(self, "Calibration", cal.message)
 
-            # detection with progress
+            # detection with progress — the pipeline's own loop, so the face
+            # keypoints (and anything else it learns to write) are not dropped
+            # on the floor by a duplicate loop that only knew about kp2d
             det = self._ensure_detector()
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
-            from pose3d.core.project import CAMERAS
-            for i, frame in enumerate(project.frames):
+            from pose3d.pipeline import detect_project
+
+            def on_frame(i, n):
                 if prog.wasCanceled():
-                    return
-                for cam in CAMERAS:
-                    d = det.detect(cv2.imread(frame.images[cam]))
-                    frame.kp2d[cam] = d.xy; frame.scores[cam] = d.scores
-                prog.setValue(i + 1); _pe()
+                    raise _Cancelled()
+                prog.setValue(i); _pe()
+
+            try:
+                detect_project(project, det, lambda p: cv2.imread(str(p)),
+                               on_frame=on_frame)
+            except _Cancelled:
+                prog.close()
+                return
+
+            smooth = self.smooth_check.isChecked()
+            project.smoothing = "ema0.6" if smooth else "none"
 
             # reconstruct if calibrated
-            dropped = 0
+            dropped, report = 0, None
             if rig is not None:
                 prog.setLabelText("Reconstructing 3D…"); _pe()
                 from pose3d.pipeline import fit_project, triangulate_project
                 dropped = triangulate_project(project, rig)
-                fit_project(project, smooth=True)
+                report = fit_project(project, smooth=smooth)
                 save_rig(rig, folder / "calibration")
 
             save_project(project, folder)
@@ -219,9 +241,12 @@ class ImportDialog(QDialog):
             self.result_folder = str(folder)
             msg = f"Imported {len(project.frames)} frames.\n{cal.message}"
             from pose3d.pipeline import rejection_note
-            note = rejection_note(dropped, len(project.frames))
-            if note:
-                msg += "\n\n" + note
+            notes = [rejection_note(dropped, len(project.frames))]
+            if report is not None:
+                notes.append(report.note())
+            for note in notes:
+                if note:
+                    msg += "\n\n" + note
             QMessageBox.information(self, "Done", msg)
             self.accept()
         except Exception as e:                       # surface any failure cleanly

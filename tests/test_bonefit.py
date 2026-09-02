@@ -1,9 +1,14 @@
-"""Phase 4 verification: bone-length fit + temporal smoothing."""
+"""Phase 4 verification: the bone-length fit.
+
+Temporal smoothing has its own suite (tests/test_smoothing.py): the only
+guard it ever had here was that it reduced variance, which a lag does too,
+and that is how a 21.8 %-of-height defect stayed green.
+"""
 import numpy as np
 
-from pose3d.core.skeleton import BONES, NUM_JOINTS
+from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
 from pose3d.geometry.bonefit import (
-    fit_bone_lengths, measure_bone_lengths, smooth_temporal,
+    fit_bone_lengths, measure_bone_lengths, solvable_joints,
 )
 from tests.synth import sample_skeleton_3d
 
@@ -48,24 +53,6 @@ def test_fit_no_fill_leaves_missing_joint_nan():
     fitted = fit_bone_lengths(raw, target, fill_missing=False)
     assert np.isnan(fitted[6]).all()       # not invented
     assert not np.isnan(fitted[5]).any()   # observed joints still fitted
-
-
-def test_smoothing_reduces_variance():
-    gt = sample_skeleton_3d()
-    rng = np.random.default_rng(2)
-    seq = np.stack([gt + rng.normal(0, 0.02, gt.shape) for _ in range(20)])
-    sm = smooth_temporal(seq, alpha=0.4)
-    raw_var = np.var(np.diff(seq, axis=0))
-    sm_var = np.var(np.diff(sm, axis=0))
-    assert sm_var < raw_var
-
-
-def test_smoothing_nan_safe():
-    gt = sample_skeleton_3d()
-    seq = np.stack([gt, gt.copy(), gt.copy()])
-    seq[1, 4] = np.nan
-    sm = smooth_temporal(seq)
-    assert sm.shape == seq.shape
 
 
 # --- sparse frames --------------------------------------------------------
@@ -134,3 +121,68 @@ def test_one_bad_frame_does_not_lose_the_take():
     assert all(f.fitted3d is not None for f in project.frames)
     for i in (0, 2):                              # the good frames still fit
         assert not np.isnan(project.frames[i].fitted3d).any()
+
+
+def test_sparse_frame_uses_lm():
+    """A frame with 5 joints missing must fit on the fast solver.
+
+    Levenberg-Marquardt refuses an under-determined problem, and with all 15
+    joints as variables a 10-joint frame is one. Freezing the joints no
+    observation can pin removes their variables (and their bone residuals, so
+    a frozen joint cannot drag an observed one), which puts the frame back on
+    lm: 746.78 ms -> ~6 ms measured on the client's take.
+    """
+    import time
+
+    gt = sample_skeleton_3d()
+    target = measure_bone_lengths(gt[None])
+    raw = gt.copy()
+    missing = [int(j) for j in (6, 7, 11, 13, 14)]      # wrists, knee, ankles
+    raw[missing] = np.nan
+
+    observed = ~np.isnan(raw).any(1)
+    free = solvable_joints(observed)
+    assert not free[missing].any(), "a dangling joint was left as a variable"
+    n_res = 3 * int(observed.sum()) + sum(
+        1 for a, b in BONES if free[int(a)] and free[int(b)])
+    assert n_res >= 3 * int(free.sum()), "lm would still refuse this frame"
+
+    t0 = time.perf_counter()
+    fitted = fit_bone_lengths(raw, target, fill_missing=False)
+    elapsed = (time.perf_counter() - t0) * 1000
+
+    assert elapsed < 100, f"{elapsed:.1f} ms"           # ~6 ms measured
+    for j in np.flatnonzero(observed):
+        assert np.linalg.norm(fitted[j] - gt[j]) < 0.05, j
+    assert np.isnan(fitted[missing]).all()
+
+
+def test_a_joint_between_two_observed_ones_is_still_solved():
+    """Freezing must not throw away a joint the skeleton genuinely pins:
+    an unobserved elbow with a shoulder AND a wrist either side of it."""
+    gt = sample_skeleton_3d()
+    target = measure_bone_lengths(gt[None])
+    raw = gt.copy()
+    raw[int(Joint.LEFT_ELBOW)] = np.nan
+
+    assert solvable_joints(~np.isnan(raw).any(1))[int(Joint.LEFT_ELBOW)]
+
+    fitted = fit_bone_lengths(raw, target, fill_missing=True)
+    assert np.linalg.norm(fitted[int(Joint.LEFT_ELBOW)]
+                          - gt[int(Joint.LEFT_ELBOW)]) < 0.05
+
+
+def test_a_frozen_joint_cannot_drag_the_observed_ones():
+    """The hazard the old trf path lived with: an unobserved joint parked at
+    the centroid pulls its observed neighbour through the shared bone term."""
+    gt = sample_skeleton_3d()
+    target = measure_bone_lengths(gt[None])
+    full = fit_bone_lengths(gt, target, fill_missing=False)
+
+    raw = gt.copy()
+    raw[int(Joint.LEFT_ANKLE)] = np.nan            # dangling: frozen
+    partial = fit_bone_lengths(raw, target, fill_missing=False)
+
+    moved = np.linalg.norm(partial[int(Joint.LEFT_KNEE)]
+                           - full[int(Joint.LEFT_KNEE)])
+    assert moved < 1e-3, f"knee moved {1000 * moved:.2f} mm"

@@ -20,6 +20,13 @@ CAM_LEFT = "left"
 CAM_RIGHT = "right"
 CAMERAS = (CAM_LEFT, CAM_RIGHT)
 
+# Version of the reconstruction pipeline that produced a project's stored 3D.
+# 1 = the causal-EMA build (every frame blended with the one before it).
+# 2 = each frame is its own bone-fitted triangulation, with flagged gap fill.
+# Stamped into project.json; a file written before the key existed loads as 0,
+# which is what lets the app recompute a legacy take exactly once on open.
+PIPELINE_VERSION = 2
+
 
 def _nan_xy() -> np.ndarray:
     return np.full((NUM_JOINTS, 2), np.nan, dtype=float)
@@ -45,6 +52,10 @@ def _nan_head_xyz() -> np.ndarray:
     return np.full((NUM_HEAD_KP, 3), np.nan, dtype=float)
 
 
+def _no_flags() -> np.ndarray:
+    return np.zeros(NUM_JOINTS, dtype=bool)
+
+
 @dataclass
 class Frame:
     """One matched pair of images and all derived pose data for it."""
@@ -59,6 +70,11 @@ class Frame:
     # per-(cam,joint) flag: True if the point was hand-corrected by the user.
     corrected: dict[str, np.ndarray] = field(
         default_factory=lambda: {c: np.zeros(NUM_JOINTS, bool) for c in CAMERAS})
+    # per-joint flag: True if this frame's 3D point was interpolated across a
+    # one-frame dropout rather than measured (see pipeline.fill_gaps). Drawn
+    # hollow/amber, counted separately, and read by the export, so a fill is
+    # never mistaken for an observation.
+    filled: np.ndarray = field(default_factory=_no_flags)
     # Face keypoints (nose/eyes/ears), kept PARALLEL to the canonical arrays so
     # every `reshape(NUM_JOINTS, ...)` downstream stays true. They orient the
     # head and nothing else: no bones, no bone-length fit, not hand-editable.
@@ -103,6 +119,16 @@ class ProjectData:
     # name/reference here. Loaded lazily by the geometry layer.
     calibration_ref: str | None = None
     corrections: list[Correction] = field(default_factory=list)
+    # "none" (default) or "ema<alpha>", e.g. "ema0.6". Temporal smoothing is a
+    # video-rate tool: a stop-motion take has no temporal signal to filter, and
+    # filtering it drags each frame toward its neighbours. Opt-in per project.
+    smoothing: str = "none"
+    # which detector layout the 2D came from; "coco17" derives NECK/PELVIS as
+    # shoulder/hip midpoints, "halpe26" detects them natively.
+    keypoint_model: str = "coco17"
+    # A project built in memory is by definition current; load_project
+    # overrides this with what the file says (0 for files predating the key).
+    pipeline_version: int = PIPELINE_VERSION
 
     def frame_ids(self) -> list[str]:
         return [f.frame_id for f in self.frames]
