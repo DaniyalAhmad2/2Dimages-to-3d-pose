@@ -109,6 +109,8 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
         "name": project.name,
         "fps": project.fps,
         "calibration_ref": project.calibration_ref,
+        "marker_length": project.marker_length,
+        "keypoint_model": project.keypoint_model,
         "frames": [],
     }
     for f in project.frames:
@@ -156,6 +158,9 @@ def load_project(folder: str | Path) -> ProjectData:
     project = ProjectData(
         name=doc["name"], fps=doc["fps"],
         calibration_ref=doc.get("calibration_ref"), frames=frames,
+        # absent in projects written before these were recorded
+        marker_length=doc.get("marker_length"),
+        keypoint_model=doc.get("keypoint_model"),
     )
     project.corrections = _read_corrections(folder)
     return project

@@ -90,3 +90,35 @@ def test_source_survives_a_save_load_round_trip(tmp_path):
                    source="exif")
     k.save(tmp_path / "i.json")
     assert Intrinsics.load(tmp_path / "i.json").source == "exif"
+
+
+def test_keyless_file_does_not_become_measured(tmp_path):
+    """A file with no `source` has no provenance, and "measured" is a claim.
+
+    The client's own intrinsics were guessed from the image size and written
+    before the field existed; loading and re-saving them stamped them
+    "measured" and laundered the guess into every project that touched them —
+    including any checkerboard override gated on this field, which would then
+    refuse to run.
+    """
+    import json
+
+    def written(K, dist=((0.0,) * 5,), size=(3072, 4080)):
+        p = tmp_path / f"k{K[0][0]}.json"
+        p.write_text(json.dumps({"K": K, "dist": [list(d) for d in dist],
+                                 "image_size": list(size)}))
+        return Intrinsics.load(p)
+
+    guess = [[4080.0, 0, 1536.0], [0, 4080.0, 2040.0], [0, 0, 1.0]]
+    assert written(guess).source == "assumed"          # K still shows the guess
+
+    real = [[3120.0, 0, 1520.0], [0, 3118.0, 2050.0], [0, 0, 1.0]]
+    got = written(real, dist=((0.03, -0.01, 0, 0, 0),))
+    assert got.source == "unknown"                     # could be anything
+    assert not looks_assumed(got)
+
+    # and a file that DOES say stays believed
+    k = Intrinsics(K=np.array(real), dist=np.zeros((1, 5)),
+                   image_size=(3072, 4080), source="measured")
+    k.save(tmp_path / "m.json")
+    assert Intrinsics.load(tmp_path / "m.json").source == "measured"

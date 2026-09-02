@@ -103,6 +103,12 @@ class ProjectData:
     # name/reference here. Loaded lazily by the geometry layer.
     calibration_ref: str | None = None
     corrections: list[Correction] = field(default_factory=list)
+    # What the numbers in this project mean, recorded at import time because
+    # nothing downstream can recover them: the ArUco tag edge the extrinsics
+    # were scaled by (metres), and which detector produced the 2D keypoints.
+    # None on a project imported before they were recorded.
+    marker_length: float | None = None
+    keypoint_model: str | None = None
 
     def frame_ids(self) -> list[str]:
         return [f.frame_id for f in self.frames]

@@ -29,9 +29,9 @@ class Intrinsics:
     #   "assumed" — guessed from the image size; wrong by tens of percent
     #   "exif"    — from the camera's 35mm-equivalent focal length; close
     #   "measured"— checkerboard/ChArUco calibration; exact, with distortion
-    # Not read by the pipeline yet — `quality.looks_assumed` still infers the
-    # answer from K. Recorded now so the focal-selection step has somewhere to
-    # put its verdict.
+    #   "unknown" — a file that predates this field: believe nothing about it
+    # `quality.looks_assumed` still infers the answer from K where it can;
+    # this is what a checkerboard override is gated on.
     source: str = "measured"
 
     def save(self, path: str | Path) -> None:
@@ -53,10 +53,29 @@ class Intrinsics:
             dist=np.array(d["dist"], dtype=float),
             image_size=tuple(d["image_size"]),
             rms=float(d.get("rms", 0.0)),
-            # projects written before this field existed hold whatever the
-            # import produced, which was always the image-size guess
-            source=str(d.get("source", "measured")),
+            source=_loaded_source(d),
         )
+
+
+def _loaded_source(d: dict) -> str:
+    """How a file without a `source` field should be labelled.
+
+    NOT "measured". A file with no provenance has none: defaulting to the best
+    label laundered the client's own guessed intrinsics into every project that
+    loaded and re-saved them, and a checkerboard override gated on this field
+    would then refuse to run. The only honest defaults are "assumed" when K
+    still carries the signature of the image-size guess, and "unknown"
+    otherwise.
+    """
+    source = d.get("source")
+    if source:
+        return str(source)
+    from pose3d.calib.quality import looks_assumed
+
+    probe = Intrinsics(K=np.array(d["K"], dtype=float),
+                       dist=np.array(d["dist"], dtype=float),
+                       image_size=tuple(d["image_size"]))
+    return "assumed" if looks_assumed(probe) else "unknown"
 
 
 # A 35mm frame's diagonal, the reference for "35mm-equivalent focal length".

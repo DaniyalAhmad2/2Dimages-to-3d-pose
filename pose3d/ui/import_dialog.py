@@ -178,6 +178,9 @@ class ImportDialog(QDialog):
                 intr_left=il, intr_right=ir, ext_left=el, ext_right=er)
 
             rig = cal.rig
+            # what the numbers mean, kept with the project: the tag size the
+            # extrinsics were scaled by is not recoverable from anything else
+            project.marker_length = float(self.marker.value())
             if not cal.ok:
                 prog.close()
                 cont = QMessageBox.warning(
@@ -194,6 +197,8 @@ class ImportDialog(QDialog):
 
             # detection with progress
             det = self._ensure_detector()
+            project.keypoint_model = (
+                f"rtmpose-{det.mode}" + ("-feet" if det.feet else ""))
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
             from pose3d.core.project import CAMERAS
@@ -212,7 +217,7 @@ class ImportDialog(QDialog):
                 from pose3d.pipeline import fit_project, triangulate_project
                 dropped = triangulate_project(project, rig)
                 fit_project(project, smooth=True)
-                save_rig(rig, folder / "calibration")
+                save_rig(rig, folder / "calibration", cal.report)
 
             save_project(project, folder)
             prog.close()

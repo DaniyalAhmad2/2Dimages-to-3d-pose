@@ -69,80 +69,77 @@ def detect_markers(image: np.ndarray, detector=None):
     return corners, ids_flat
 
 
+@dataclass
+class MarkerSolve:
+    """One of IPPE_SQUARE's two solutions for a single square marker.
+
+    A planar square seen by a pinhole camera has TWO poses that project to the
+    same four corners (they differ by a flip about an axis in the marker
+    plane). Only the corner-pixel noise separates them, so a solve is only
+    trustworthy when the branches' reprojection errors differ a lot; `err` is
+    what makes that judgeable, and it is thrown away by `cv2.solvePnP`, which
+    silently returns the lower-error branch.
+    """
+    R: np.ndarray      # 3x3, X_cam = R @ X_marker + t
+    t: np.ndarray      # (3,)
+    err: float         # reprojection rms of the four corners (px)
+
+    @property
+    def extrinsics(self) -> Extrinsics:
+        return Extrinsics(R=self.R, t=self.t)
+
+
 def estimate_extrinsics_for_marker(
     corners, ids, target_id: int, intr: Intrinsics, marker_length: float,
-) -> Extrinsics | None:
-    """Estimate world->camera pose using ONE specific marker as the world frame.
+) -> list[MarkerSolve]:
+    """BOTH IPPE poses of one marker, best (lowest reprojection error) first.
 
-    Both cameras calling this with the SAME target_id end up in a shared
-    coordinate system (that marker's frame). Returns None if target_id is not
-    among the detected ids or solvePnP fails.
+    The marker's own frame is the world frame, so two cameras calling this with
+    the same target_id end up in a shared coordinate system. Returns [] if
+    target_id was not detected or the solve failed.
+
+    Returning both branches rather than the winner is the point: on the
+    client's take the ratio err[1]/err[0] is 8.7-13.8 for the tags whose pose
+    is real and 1.26 for the one that is bent, and that ratio is the only
+    signal that separates them. Callers score it.
     """
     ids = list(ids)
     if target_id not in ids:
-        return None
+        return []
     idx = ids.index(target_id)
     obj = marker_object_points(marker_length)
-    img_pts = corners[idx].reshape(4, 2).astype(np.float32)
-    ok, rvec, tvec = cv2.solvePnP(
-        obj, img_pts, intr.K, intr.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-    if not ok:
-        return None
-    R, _ = cv2.Rodrigues(rvec)
-    return Extrinsics(R=R, t=tvec.ravel())
+    img_pts = np.asarray(corners[idx], np.float64).reshape(4, 2)
+    n, rvecs, tvecs, errs = cv2.solvePnPGeneric(
+        obj.astype(np.float64), img_pts, intr.K, intr.dist,
+        flags=cv2.SOLVEPNP_IPPE_SQUARE)
+    out = []
+    for i in range(int(n)):
+        R, _ = cv2.Rodrigues(rvecs[i])
+        out.append(MarkerSolve(R=R, t=np.asarray(tvecs[i], float).ravel(),
+                               err=float(np.asarray(errs[i]).ravel()[0])))
+    return sorted(out, key=lambda s: s.err)
 
 
 def estimate_extrinsics(
     image: np.ndarray,
     intr: Intrinsics,
     marker_length: float,
-    tag_world_positions: dict[int, np.ndarray] | None = None,
     detector=None,
 ) -> Extrinsics:
-    """Estimate world->camera pose from the visible ArUco tags.
+    """World->camera pose from the FIRST ArUco tag detected in `image`.
 
-    Two modes:
-    - Multi-tag board (tag_world_positions given): assemble object points for
-      all seen tags in the shared world frame and solvePnP once (robust,
-      recommended for the 4-tag backdrop).
-    - Single tag (tag_world_positions None): use the first detected marker's
-      own frame as the world frame via SOLVEPNP_IPPE_SQUARE.
+    That tag's own frame is the world frame. There is deliberately no
+    multi-tag mode: assembling several tags into one object-point set requires
+    knowing their layout, and assuming they are coplanar and identically
+    rotated is wrong by up to 179 deg on a backdrop where the tags are taped by
+    hand (it put the camera centre 527-1020 mm out on the client's take).
+    `resolve.resolve_calibration` uses one scored tag instead.
     """
     corners, ids = detect_markers(image, detector)
     if not ids:
         raise ValueError("No ArUco markers detected; cannot estimate extrinsics")
-
-    if tag_world_positions is None:
-        # single-marker: that marker defines the world origin
-        obj = marker_object_points(marker_length)
-        img_pts = corners[0].reshape(4, 2).astype(np.float32)
-        ok, rvec, tvec = cv2.solvePnP(
-            obj, img_pts, intr.K, intr.dist, flags=cv2.SOLVEPNP_IPPE_SQUARE)
-        if not ok:
-            raise ValueError("solvePnP failed on single marker")
-    else:
-        # multi-tag: build correspondences across all recognized tags
-        obj_all: list[np.ndarray] = []
-        img_all: list[np.ndarray] = []
-        half = marker_object_points(marker_length)  # local corners TL,TR,BR,BL
-        for c, mid in zip(corners, ids):
-            if mid not in tag_world_positions:
-                continue
-            center = np.asarray(tag_world_positions[mid], dtype=np.float32)
-            obj_all.append(half + center)             # translate to world
-            img_all.append(c.reshape(4, 2).astype(np.float32))
-        if len(obj_all) < 1:
-            raise ValueError("No known tags visible for multi-tag extrinsics")
-        obj = np.concatenate(obj_all, axis=0)
-        img_pts = np.concatenate(img_all, axis=0)
-        flags = (cv2.SOLVEPNP_IPPE_SQUARE if len(obj_all) == 1
-                 else cv2.SOLVEPNP_ITERATIVE)
-        ok, rvec, tvec = cv2.solvePnP(obj, img_pts, intr.K, intr.dist, flags=flags)
-        if not ok:
-            raise ValueError("solvePnP failed on multi-tag set")
-        # refine
-        rvec, tvec = cv2.solvePnPRefineLM(
-            obj, img_pts, intr.K, intr.dist, rvec, tvec)
-
-    R, _ = cv2.Rodrigues(rvec)
-    return Extrinsics(R=R, t=tvec.ravel())
+    solves = estimate_extrinsics_for_marker(
+        corners, ids, ids[0], intr, marker_length)
+    if not solves:
+        raise ValueError("solvePnP failed on single marker")
+    return solves[0].extrinsics
