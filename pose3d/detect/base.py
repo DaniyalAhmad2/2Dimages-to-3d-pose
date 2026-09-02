@@ -43,6 +43,16 @@ class Detection:
 class KeypointDetector(ABC):
     """Detect canonical-order 2D keypoints in a single image."""
 
+    #: What this detector's canonical HEAD point IS: "nose" (the COCO-17
+    #: convention, and what the manual detector marks) or "skull" (a point on
+    #: the head's axis, e.g. Halpe-26's own head keypoint). It is part of the
+    #: interface rather than a detail of one detector because the retarget
+    #: corrects a nose HEAD for its ~45 deg forward offset and must NOT correct
+    #: a skull one, so the project has to record which it holds
+    #: (`ProjectData.head_source`, `pose3d.geometry.character`). "nose" is the
+    #: safe default: it is what every detector emitted before the key existed.
+    head_source: str = "nose"
+
     @abstractmethod
     def detect(self, image_bgr: np.ndarray) -> Detection:
         """Return a Detection for the primary subject in the image."""

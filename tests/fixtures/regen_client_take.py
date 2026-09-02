@@ -119,19 +119,27 @@ def redetect(source: Path, doc: dict) -> dict:
     import tempfile
 
     from pose3d.core.io_project import load_project, save_project
+    from pose3d.core.project import PIPELINE_VERSION
     from pose3d.detect.rtmpose import RTMPoseDetector
     from pose3d.pipeline import run_full
     from pose3d.quality import load_rig
 
     project = load_project(source)
-    det = RTMPoseDetector(mode="balanced", device="cpu", feet=True)
+    # no feet=: which pose model the app runs is RTMPoseDetector's own default
+    # (detect.rtmpose.USE_HALPE26). Pinning it here would re-baseline the
+    # regression net onto a layout the app does not detect with.
+    det = RTMPoseDetector(mode="balanced", device="cpu")
     project.detector = f"rtmpose-{det.mode}" + ("-feet" if det.feet else "")
-    project.head_source = getattr(det, "head_source", "nose")
+    project.head_source = det.head_source
     print(f"  detecting {len(project.frames)} frames x {len(CAMERAS)} cameras "
           f"with {project.detector} ({project.head_source} HEAD)…", flush=True)
     report = run_full(project, det, load_rig(source / "calibration"),
                       lambda p: cv2.imread(str(p)))
     print(f"  {report.note() or 'fit clean'}")
+    # these poses ARE the current pipeline's, whatever the source file said:
+    # leaving the loaded 0 behind would have the app recompute a fixture it
+    # had just computed, and would call the fresh poses the old build's.
+    project.pipeline_version = PIPELINE_VERSION
 
     with tempfile.TemporaryDirectory() as tmp:
         new_doc = json.loads((save_project(project, Path(tmp))

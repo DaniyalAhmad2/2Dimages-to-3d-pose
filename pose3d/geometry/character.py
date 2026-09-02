@@ -193,12 +193,12 @@ _ROLL_WEIGHT = 1.0
 # a bone's head is the exact FK position carried by its parent, so the reported
 # skeleton is guaranteed consistent with the mesh. Fallbacks are used when the
 # rig lacks the bone (e.g. no hand bone -> the forearm's tail is the wrist).
+# HEAD is deliberately absent: what it is read back from depends on what the
+# capture's HEAD point IS, so it lives in _HEAD_FROM_RIG and is filled in per
+# head_source by _resolve_joint_sources.
 _JOINT_FROM_RIG = {
     Joint.PELVIS: (("hips", "head"),),
     Joint.NECK: (("neck", "head"), ("chest", "tail")),
-    # HEAD is the one entry that depends on what the capture's HEAD point IS;
-    # _HEAD_FROM_RIG overrides it per head_source.
-    Joint.HEAD: (("head", "mid"),),
     Joint.LEFT_SHOULDER: (("upper_arm.L", "head"),),
     Joint.RIGHT_SHOULDER: (("upper_arm.R", "head"),),
     Joint.LEFT_ELBOW: (("forearm.L", "head"), ("upper_arm.L", "tail")),
@@ -226,10 +226,11 @@ _JOINT_FROM_RIG = {
 # head-position metric alone (F03's refuter showed that one misleads — its
 # variant improved the head metric while tripling the visible nose-to-mesh
 # distance). Skull HEAD, mid -> tail: HEAD retarget 3.42 -> 1.54 % of height
-# with no face points and 3.93 -> 1.67 % with them; head aim error 6.76 ->
-# 3.78 deg; whole-body retarget median 1.57 -> 1.49 %; and the refuter's own
-# metric flat — reconstructed nose to nearest mesh vertex 1.24 -> 1.20 mm,
-# ear 1.22 -> 1.19 mm.
+# with no face points and 3.93 -> 1.67 % with them; head aim error 4.95 ->
+# 3.83 deg max (1.22 -> 1.19 median); whole-body retarget median 1.57 ->
+# 1.49 %; and the refuter's own metric flat — reconstructed nose to nearest
+# mesh vertex 1.24 -> 1.20 mm, ear 1.22 -> 1.19 mm.
+# `tools/measure_head_gates.py --variants` re-derives all of those.
 _HEAD_FROM_RIG = {
     "nose": (("head", "mid"),),
     "skull": (("head", "tail"),),
@@ -513,6 +514,7 @@ class Character:
         """{canonical joint: (bone index, 'head'|'tail'|'mid')} for this rig."""
         out = {}
         sources = dict(_JOINT_FROM_RIG)
+        # the one joint whose rig point depends on what the capture's HEAD is
         sources[Joint.HEAD] = _HEAD_FROM_RIG[self.head_source]
         for j, cands in sources.items():
             for role, which in cands:

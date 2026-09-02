@@ -1,0 +1,615 @@
+{
+ "generated_by": "tools/measure_head_gates.py",
+ "reproduce": "tools/measure_head_gates.py --project <the client take> --cache <dir> --variants --out <this file>",
+ "take": "Imported_Session",
+ "frames": 26,
+ "switch": {
+  "constant": "pose3d.detect.rtmpose.USE_HALPE26",
+  "ships_on": false
+ },
+ "gates": [
+  {
+   "gate": "HEAD retarget, no face points",
+   "key": "head_retarget_no_face_pct",
+   "rule": "<= 4.0 % of body height",
+   "baseline": 12.733440611004376,
+   "measured": 1.539177666066206,
+   "pass": true,
+   "unit": "%"
+  },
+  {
+   "gate": "HEAD retarget, with face points",
+   "key": "head_retarget_with_face_pct",
+   "rule": "<= 3.0 % of body height",
+   "baseline": 9.027670299476386,
+   "measured": 1.6681608966550376,
+   "pass": true,
+   "unit": "%"
+  },
+  {
+   "gate": "neck-head bone CV",
+   "key": "neck_head_bone_cv_pct",
+   "rule": "<= 4.0 %",
+   "baseline": 9.525882972703029,
+   "measured": 3.1253149339829847,
+   "pass": true,
+   "unit": "%"
+  },
+  {
+   "gate": "neck-Lshoulder bone CV",
+   "key": "neck_lshoulder_bone_cv_pct",
+   "rule": "<= 5.15 % (the COCO-17 baseline)",
+   "baseline": 5.1466792932557555,
+   "measured": 5.98204176801027,
+   "pass": false,
+   "unit": "%"
+  },
+  {
+   "gate": "worst body-joint regression (RIGHT_WRIST)",
+   "key": "worst_body_joint_regression_pct",
+   "rule": "<= 0.5 % of body height",
+   "baseline": 0.0,
+   "measured": 0.22733844460543057,
+   "pass": true,
+   "unit": "% of height"
+  },
+  {
+   "gate": "head aim error, nose path off",
+   "key": "head_aim_error_deg",
+   "rule": "< 5 deg with the nose path disabled",
+   "baseline": 38.56650581013973,
+   "measured": 1.1928411961463086,
+   "pass": true,
+   "unit": "deg"
+  },
+  {
+   "gate": "body epipolar median",
+   "key": "epipolar_median_px",
+   "rule": "no regression on the COCO-17 baseline",
+   "baseline": 4.899798209156523,
+   "measured": 4.675158236385453,
+   "pass": true,
+   "unit": "px"
+  }
+ ],
+ "passed": 6,
+ "of": 7,
+ "runs": {
+  "coco": {
+   "label": "COCO-17 (today)",
+   "head_source": "nose",
+   "readback": "mid",
+   "n_frames": 26,
+   "neck_policy": "derived",
+   "height_m": 0.11953235126997115,
+   "scale": 111.18336833285663,
+   "retarget_no_face_pct": {
+    "HEAD": 12.733440611004376,
+    "NECK": 4.775408559386085,
+    "LEFT_SHOULDER": 0.6993639156893184,
+    "RIGHT_SHOULDER": 0.7170619626213752,
+    "LEFT_ELBOW": 1.75035283968222,
+    "RIGHT_ELBOW": 1.8821624415869682,
+    "LEFT_WRIST": 1.1294634206048586,
+    "RIGHT_WRIST": 0.2813398921222718,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 2.007742755928433,
+    "RIGHT_HIP": 3.17963426839976,
+    "LEFT_KNEE": 0.9342731411764151,
+    "RIGHT_KNEE": 3.9093448014499046,
+    "LEFT_ANKLE": 1.4443791540734303,
+    "RIGHT_ANKLE": 1.0692764005469515
+   },
+   "retarget_with_face_pct": {
+    "HEAD": 9.027670299476386,
+    "NECK": 4.775408559386085,
+    "LEFT_SHOULDER": 0.6993639156893184,
+    "RIGHT_SHOULDER": 0.7170619626213752,
+    "LEFT_ELBOW": 1.75035283968222,
+    "RIGHT_ELBOW": 1.8821624415869682,
+    "LEFT_WRIST": 1.1294634206048586,
+    "RIGHT_WRIST": 0.2813398921222718,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 2.007742755928433,
+    "RIGHT_HIP": 3.17963426839976,
+    "LEFT_KNEE": 0.9342731411764151,
+    "RIGHT_KNEE": 3.9093448014499046,
+    "LEFT_ANKLE": 1.4443791540734303,
+    "RIGHT_ANKLE": 1.0692764005469515
+   },
+   "retarget_median_pct": {
+    "no_face": 1.640442830629827,
+    "with_face": 1.640442830629827
+   },
+   "head_aim_no_face": {
+    "n": 26,
+    "median_deg": 38.56650581013973,
+    "max_deg": 41.06997952300374
+   },
+   "head_aim_with_face": {
+    "n": 26,
+    "median_deg": 24.486237479333585,
+    "max_deg": 32.705714384335664
+   },
+   "bone_cv_pct": {
+    "spine (pelvis-neck)": 4.9190404506306145,
+    "neck-head": 9.525882972703029,
+    "neck-Lshoulder": 5.1466792932557555,
+    "neck-Rshoulder": 5.011593939266246,
+    "L upper arm": 5.409721002666689,
+    "R upper arm": 4.023527040250034,
+    "L forearm": 4.987379038307299,
+    "R forearm": 5.465139245588261,
+    "pelvis-Lhip": 7.125074873201786,
+    "pelvis-Rhip": 7.1230413514069175,
+    "L thigh": 4.916392234792817,
+    "R thigh": 6.316120143853824,
+    "L shin": 11.578461759840335,
+    "R shin": 6.164639218373898
+   },
+   "bone_cv_median_pct": 5.437430124127475,
+   "bone_cv_max_pct": 11.578461759840335,
+   "epipolar_median_px": 4.899798209156523,
+   "epipolar_p90_px": 12.769662133559693,
+   "gaps": {
+    "missing": [],
+    "n_missing": 0,
+    "missing_pct": 0.0,
+    "rejected": 1,
+    "filled": 1
+   }
+  },
+  "halpe": {
+   "label": "Halpe-26, skull HEAD, derived NECK/PELVIS",
+   "head_source": "skull",
+   "readback": "tail",
+   "n_frames": 26,
+   "neck_policy": "derived",
+   "height_m": 0.1301880858531264,
+   "scale": 111.41705895025815,
+   "retarget_no_face_pct": {
+    "HEAD": 1.539177666066206,
+    "NECK": 4.252897715916748,
+    "LEFT_SHOULDER": 0.38302804013309993,
+    "RIGHT_SHOULDER": 0.3980413907905276,
+    "LEFT_ELBOW": 1.9054521165728433,
+    "RIGHT_ELBOW": 1.9102917710012985,
+    "LEFT_WRIST": 1.3567611050511,
+    "RIGHT_WRIST": 0.5086783367277024,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 1.7089288257240873,
+    "RIGHT_HIP": 2.7942939768383277,
+    "LEFT_KNEE": 1.1385302222630784,
+    "RIGHT_KNEE": 3.252764966230064,
+    "LEFT_ANKLE": 1.355987280860129,
+    "RIGHT_ANKLE": 0.9198783204877145
+   },
+   "retarget_with_face_pct": {
+    "HEAD": 1.6681608966550376,
+    "NECK": 4.252897715916748,
+    "LEFT_SHOULDER": 0.38302804013309993,
+    "RIGHT_SHOULDER": 0.3980413907905276,
+    "LEFT_ELBOW": 1.9054521165728433,
+    "RIGHT_ELBOW": 1.9102917710012985,
+    "LEFT_WRIST": 1.3567611050511,
+    "RIGHT_WRIST": 0.5086783367277024,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 1.7089288257240873,
+    "RIGHT_HIP": 2.7942939768383277,
+    "LEFT_KNEE": 1.1385302222630784,
+    "RIGHT_KNEE": 3.252764966230064,
+    "LEFT_ANKLE": 1.355987280860129,
+    "RIGHT_ANKLE": 0.9198783204877145
+   },
+   "retarget_median_pct": {
+    "no_face": 1.4900493468866463,
+    "with_face": 1.4699930571484692
+   },
+   "head_aim_no_face": {
+    "n": 26,
+    "median_deg": 1.1928411961463086,
+    "max_deg": 3.825711888320398
+   },
+   "head_aim_with_face": {
+    "n": 26,
+    "median_deg": 3.7828182783336657,
+    "max_deg": 22.947210715573842
+   },
+   "bone_cv_pct": {
+    "spine (pelvis-neck)": 4.693308848314047,
+    "neck-head": 3.1253149339829847,
+    "neck-Lshoulder": 5.98204176801027,
+    "neck-Rshoulder": 5.8780450287056,
+    "L upper arm": 5.126577006859378,
+    "R upper arm": 5.608951204938484,
+    "L forearm": 4.726595397509018,
+    "R forearm": 5.465384760117128,
+    "pelvis-Lhip": 6.2892973292716,
+    "pelvis-Rhip": 6.258901962439915,
+    "L thigh": 4.809194285462549,
+    "R thigh": 5.0026912202552944,
+    "L shin": 4.579123206297144,
+    "R shin": 7.864924721943345
+   },
+   "bone_cv_median_pct": 5.295980883488253,
+   "bone_cv_max_pct": 7.864924721943345,
+   "epipolar_median_px": 4.675158236385453,
+   "epipolar_p90_px": 12.809905842179807,
+   "gaps": {
+    "missing": [],
+    "n_missing": 0,
+    "missing_pct": 0.0,
+    "rejected": 0,
+    "filled": 0
+   }
+  }
+ },
+ "readback": {
+  "mid": {
+   "label": "skull HEAD, read-back mid",
+   "head_source": "skull",
+   "readback": "mid",
+   "n_frames": 26,
+   "neck_policy": "derived",
+   "height_m": 0.1301880858531264,
+   "scale": 110.10254028720313,
+   "retarget_no_face_pct": {
+    "HEAD": 3.4180975937947458,
+    "NECK": 4.678158694489924,
+    "LEFT_SHOULDER": 0.24540482087742457,
+    "RIGHT_SHOULDER": 0.2521779596028098,
+    "LEFT_ELBOW": 1.6950292022755893,
+    "RIGHT_ELBOW": 1.6907943770627702,
+    "LEFT_WRIST": 1.0389482190992727,
+    "RIGHT_WRIST": 0.1426020506622483,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 1.780639844111929,
+    "RIGHT_HIP": 2.849744698584195,
+    "LEFT_KNEE": 1.485066345984422,
+    "RIGHT_KNEE": 3.625548895037185,
+    "LEFT_ANKLE": 1.033368468562945,
+    "RIGHT_ANKLE": 1.200569413290163
+   },
+   "retarget_with_face_pct": {
+    "HEAD": 3.9281286350874622,
+    "NECK": 4.678158694489924,
+    "LEFT_SHOULDER": 0.24540482087742457,
+    "RIGHT_SHOULDER": 0.2521779596028098,
+    "LEFT_ELBOW": 1.6950292022755893,
+    "RIGHT_ELBOW": 1.6907943770627702,
+    "LEFT_WRIST": 1.0389482190992727,
+    "RIGHT_WRIST": 0.1426020506622483,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 1.780639844111929,
+    "RIGHT_HIP": 2.849744698584195,
+    "LEFT_KNEE": 1.485066345984422,
+    "RIGHT_KNEE": 3.625548895037185,
+    "LEFT_ANKLE": 1.033368468562945,
+    "RIGHT_ANKLE": 1.200569413290163
+   },
+   "retarget_median_pct": {
+    "no_face": 1.5680389298720898,
+    "with_face": 1.5680389298720898
+   },
+   "head_aim_no_face": {
+    "n": 26,
+    "median_deg": 1.2174193664440929,
+    "max_deg": 4.952013196163682
+   },
+   "head_aim_with_face": {
+    "n": 26,
+    "median_deg": 6.764501396065958,
+    "max_deg": 22.708063250305173
+   },
+   "bone_cv_pct": {
+    "spine (pelvis-neck)": 4.693308848314047,
+    "neck-head": 3.1253149339829847,
+    "neck-Lshoulder": 5.98204176801027,
+    "neck-Rshoulder": 5.8780450287056,
+    "L upper arm": 5.126577006859378,
+    "R upper arm": 5.608951204938484,
+    "L forearm": 4.726595397509018,
+    "R forearm": 5.465384760117128,
+    "pelvis-Lhip": 6.2892973292716,
+    "pelvis-Rhip": 6.258901962439915,
+    "L thigh": 4.809194285462549,
+    "R thigh": 5.0026912202552944,
+    "L shin": 4.579123206297144,
+    "R shin": 7.864924721943345
+   },
+   "bone_cv_median_pct": 5.295980883488253,
+   "bone_cv_max_pct": 7.864924721943345,
+   "epipolar_median_px": 4.675158236385453,
+   "epipolar_p90_px": 12.809905842179807,
+   "gaps": {
+    "missing": [],
+    "n_missing": 0,
+    "missing_pct": 0.0,
+    "rejected": 0,
+    "filled": 0
+   }
+  },
+  "tail": {
+   "label": "skull HEAD, read-back tail",
+   "head_source": "skull",
+   "readback": "tail",
+   "n_frames": 26,
+   "neck_policy": "derived",
+   "height_m": 0.1301880858531264,
+   "scale": 111.41705895025815,
+   "retarget_no_face_pct": {
+    "HEAD": 1.539177666066206,
+    "NECK": 4.252897715916748,
+    "LEFT_SHOULDER": 0.38302804013309993,
+    "RIGHT_SHOULDER": 0.3980413907905276,
+    "LEFT_ELBOW": 1.9054521165728433,
+    "RIGHT_ELBOW": 1.9102917710012985,
+    "LEFT_WRIST": 1.3567611050511,
+    "RIGHT_WRIST": 0.5086783367277024,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 1.7089288257240873,
+    "RIGHT_HIP": 2.7942939768383277,
+    "LEFT_KNEE": 1.1385302222630784,
+    "RIGHT_KNEE": 3.252764966230064,
+    "LEFT_ANKLE": 1.355987280860129,
+    "RIGHT_ANKLE": 0.9198783204877145
+   },
+   "retarget_with_face_pct": {
+    "HEAD": 1.6681608966550376,
+    "NECK": 4.252897715916748,
+    "LEFT_SHOULDER": 0.38302804013309993,
+    "RIGHT_SHOULDER": 0.3980413907905276,
+    "LEFT_ELBOW": 1.9054521165728433,
+    "RIGHT_ELBOW": 1.9102917710012985,
+    "LEFT_WRIST": 1.3567611050511,
+    "RIGHT_WRIST": 0.5086783367277024,
+    "PELVIS": 0.0,
+    "LEFT_HIP": 1.7089288257240873,
+    "RIGHT_HIP": 2.7942939768383277,
+    "LEFT_KNEE": 1.1385302222630784,
+    "RIGHT_KNEE": 3.252764966230064,
+    "LEFT_ANKLE": 1.355987280860129,
+    "RIGHT_ANKLE": 0.9198783204877145
+   },
+   "retarget_median_pct": {
+    "no_face": 1.4900493468866463,
+    "with_face": 1.4699930571484692
+   },
+   "head_aim_no_face": {
+    "n": 26,
+    "median_deg": 1.1928411961463086,
+    "max_deg": 3.825711888320398
+   },
+   "head_aim_with_face": {
+    "n": 26,
+    "median_deg": 3.7828182783336657,
+    "max_deg": 22.947210715573842
+   },
+   "bone_cv_pct": {
+    "spine (pelvis-neck)": 4.693308848314047,
+    "neck-head": 3.1253149339829847,
+    "neck-Lshoulder": 5.98204176801027,
+    "neck-Rshoulder": 5.8780450287056,
+    "L upper arm": 5.126577006859378,
+    "R upper arm": 5.608951204938484,
+    "L forearm": 4.726595397509018,
+    "R forearm": 5.465384760117128,
+    "pelvis-Lhip": 6.2892973292716,
+    "pelvis-Rhip": 6.258901962439915,
+    "L thigh": 4.809194285462549,
+    "R thigh": 5.0026912202552944,
+    "L shin": 4.579123206297144,
+    "R shin": 7.864924721943345
+   },
+   "bone_cv_median_pct": 5.295980883488253,
+   "bone_cv_max_pct": 7.864924721943345,
+   "epipolar_median_px": 4.675158236385453,
+   "epipolar_p90_px": 12.809905842179807,
+   "gaps": {
+    "missing": [],
+    "n_missing": 0,
+    "missing_pct": 0.0,
+    "rejected": 0,
+    "filled": 0
+   }
+  }
+ },
+ "face_to_mesh": {
+  "mid": {
+   "readback": "mid",
+   "height_m": 0.1301880858531264,
+   "nose_to_mesh": {
+    "median_mm": 1.2412374325367002,
+    "max_mm": 11.151493654258099,
+    "n": 26
+   },
+   "ear_to_mesh": {
+    "median_mm": 1.2187852681308207,
+    "max_mm": 2.3327048957156684,
+    "n": 26
+   }
+  },
+  "tail": {
+   "readback": "tail",
+   "height_m": 0.1301880858531264,
+   "nose_to_mesh": {
+    "median_mm": 1.1968320209857322,
+    "max_mm": 11.348733798879337,
+    "n": 26
+   },
+   "ear_to_mesh": {
+    "median_mm": 1.194075690660964,
+    "max_mm": 2.0674698010387424,
+    "n": 26
+   }
+  }
+ },
+ "naive_swap": {
+  "label": "Halpe-26, everything native (the naive swap)",
+  "head_source": "skull",
+  "readback": "tail",
+  "n_frames": 26,
+  "neck_policy": "derived",
+  "height_m": 0.1302564539048643,
+  "scale": 111.12993002654832,
+  "retarget_no_face_pct": {
+   "HEAD": 3.100189982153529,
+   "NECK": 1.6123468789079871,
+   "LEFT_SHOULDER": 0.3383482131545,
+   "RIGHT_SHOULDER": 0.35513915863471435,
+   "LEFT_ELBOW": 1.8561442326389392,
+   "RIGHT_ELBOW": 1.915039116495031,
+   "LEFT_WRIST": 1.3499395162791852,
+   "RIGHT_WRIST": 0.45005169942250556,
+   "PELVIS": 0.0,
+   "LEFT_HIP": 2.108406634763876,
+   "RIGHT_HIP": 2.339584533468171,
+   "LEFT_KNEE": 0.649227064613739,
+   "RIGHT_KNEE": 1.84714006533849,
+   "LEFT_ANKLE": 2.2136417522043716,
+   "RIGHT_ANKLE": 0.8264231997138908
+  },
+  "retarget_with_face_pct": {
+   "HEAD": 2.654432368352043,
+   "NECK": 1.6123468789079871,
+   "LEFT_SHOULDER": 0.3383482131545,
+   "RIGHT_SHOULDER": 0.35513915863471435,
+   "LEFT_ELBOW": 1.8561442326389392,
+   "RIGHT_ELBOW": 1.915039116495031,
+   "LEFT_WRIST": 1.3499395162791852,
+   "RIGHT_WRIST": 0.45005169942250556,
+   "PELVIS": 0.0,
+   "LEFT_HIP": 2.108406634763876,
+   "RIGHT_HIP": 2.339584533468171,
+   "LEFT_KNEE": 0.649227064613739,
+   "RIGHT_KNEE": 1.84714006533849,
+   "LEFT_ANKLE": 2.2136417522043716,
+   "RIGHT_ANKLE": 0.8264231997138908
+  },
+  "retarget_median_pct": {
+   "no_face": 1.50145199530158,
+   "with_face": 1.50145199530158
+  },
+  "head_aim_no_face": {
+   "n": 26,
+   "median_deg": 1.912014640472881,
+   "max_deg": 2.748095951761971
+  },
+  "head_aim_with_face": {
+   "n": 26,
+   "median_deg": 3.9476163020832815,
+   "max_deg": 26.925901580984977
+  },
+  "bone_cv_pct": {
+   "spine (pelvis-neck)": 4.165852087501682,
+   "neck-head": 3.8456782594246923,
+   "neck-Lshoulder": 8.134529168312323,
+   "neck-Rshoulder": 4.515315335511207,
+   "L upper arm": 5.126577006859378,
+   "R upper arm": 5.608951204938484,
+   "L forearm": 4.726595397509018,
+   "R forearm": 5.465384760117128,
+   "pelvis-Lhip": 8.463748735580875,
+   "pelvis-Rhip": 7.351041311853077,
+   "L thigh": 4.809194285462549,
+   "R thigh": 5.0026912202552944,
+   "L shin": 4.579123206297144,
+   "R shin": 7.864924721943345
+  },
+  "bone_cv_median_pct": 5.064634113557336,
+  "bone_cv_max_pct": 8.463748735580875,
+  "epipolar_median_px": 4.804952538580421,
+  "epipolar_p90_px": 13.086320382693854,
+  "gaps": {
+   "missing": [],
+   "n_missing": 0,
+   "missing_pct": 0.0,
+   "rejected": 0,
+   "filled": 0
+  }
+ },
+ "nose_path_left_live": {
+  "label": "Halpe-26 with the nose path left live",
+  "head_source": "nose",
+  "readback": "mid",
+  "n_frames": 26,
+  "neck_policy": "derived",
+  "height_m": 0.1301880858531264,
+  "scale": 110.10254028720313,
+  "retarget_no_face_pct": {
+   "HEAD": 5.140340870926707,
+   "NECK": 4.678158694489924,
+   "LEFT_SHOULDER": 0.24540482087742457,
+   "RIGHT_SHOULDER": 0.2521779596028098,
+   "LEFT_ELBOW": 1.6950292022755893,
+   "RIGHT_ELBOW": 1.6907943770627702,
+   "LEFT_WRIST": 1.0389482190992727,
+   "RIGHT_WRIST": 0.1426020506622483,
+   "PELVIS": 0.0,
+   "LEFT_HIP": 1.780639844111929,
+   "RIGHT_HIP": 2.849744698584195,
+   "LEFT_KNEE": 1.485066345984422,
+   "RIGHT_KNEE": 3.625548895037185,
+   "LEFT_ANKLE": 1.033368468562945,
+   "RIGHT_ANKLE": 1.200569413290163
+  },
+  "retarget_with_face_pct": {
+   "HEAD": 3.9281286350874622,
+   "NECK": 4.678158694489924,
+   "LEFT_SHOULDER": 0.24540482087742457,
+   "RIGHT_SHOULDER": 0.2521779596028098,
+   "LEFT_ELBOW": 1.6950292022755893,
+   "RIGHT_ELBOW": 1.6907943770627702,
+   "LEFT_WRIST": 1.0389482190992727,
+   "RIGHT_WRIST": 0.1426020506622483,
+   "PELVIS": 0.0,
+   "LEFT_HIP": 1.780639844111929,
+   "RIGHT_HIP": 2.849744698584195,
+   "LEFT_KNEE": 1.485066345984422,
+   "RIGHT_KNEE": 3.625548895037185,
+   "LEFT_ANKLE": 1.033368468562945,
+   "RIGHT_ANKLE": 1.200569413290163
+  },
+  "retarget_median_pct": {
+   "no_face": 1.5680389298720898,
+   "with_face": 1.5680389298720898
+  },
+  "head_aim_no_face": {
+   "n": 26,
+   "median_deg": 12.523076548056931,
+   "max_deg": 27.753184442437302
+  },
+  "head_aim_with_face": {
+   "n": 26,
+   "median_deg": 6.764501396065958,
+   "max_deg": 22.708063250305173
+  },
+  "bone_cv_pct": {
+   "spine (pelvis-neck)": 4.693308848314047,
+   "neck-head": 3.1253149339829847,
+   "neck-Lshoulder": 5.98204176801027,
+   "neck-Rshoulder": 5.8780450287056,
+   "L upper arm": 5.126577006859378,
+   "R upper arm": 5.608951204938484,
+   "L forearm": 4.726595397509018,
+   "R forearm": 5.465384760117128,
+   "pelvis-Lhip": 6.2892973292716,
+   "pelvis-Rhip": 6.258901962439915,
+   "L thigh": 4.809194285462549,
+   "R thigh": 5.0026912202552944,
+   "L shin": 4.579123206297144,
+   "R shin": 7.864924721943345
+  },
+  "bone_cv_median_pct": 5.295980883488253,
+  "bone_cv_max_pct": 7.864924721943345,
+  "epipolar_median_px": 4.675158236385453,
+  "epipolar_p90_px": 12.809905842179807,
+  "gaps": {
+   "missing": [],
+   "n_missing": 0,
+   "missing_pct": 0.0,
+   "rejected": 0,
+   "filled": 0
+  }
+ }
+}

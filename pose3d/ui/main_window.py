@@ -294,9 +294,11 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
-            self.model.redetect_all(det, self.load_image)
-            # the 2D was replaced, so what HEAD means was too
+            # BEFORE redetect_all, which re-poses and redraws as it goes: the
+            # 2D is about to be replaced, so what HEAD means is replaced with
+            # it, and nothing may be posed under the old convention.
             self._adopt_head_source(det)
+            self.model.redetect_all(det, self.load_image)
         finally:
             QApplication.restoreOverrideCursor()
         self._apply_view_orientation()   # poses changed: re-fit the character
@@ -316,16 +318,26 @@ class MainWindow(QMainWindow):
         self._refresh_views()
 
     def _adopt_head_source(self, det):
-        """Record the head convention a re-detection just wrote to the project.
+        """Record the head convention a re-detection is about to write.
 
         `redetect_all` replaces every 2D point, so a project detected as
         COCO-17 becomes a Halpe-26 one; leaving `head_source` behind would have
         the retarget correct a skull HEAD for the nose's forward offset.
         """
         from pose3d.geometry.character import set_default_head_source
-        source = getattr(det, "head_source", "nose")
+        source = det.head_source
         self.model.project.head_source = source
         set_default_head_source(source)
+        # The 3D view builds its Character once and keeps it; the Blender
+        # export builds a fresh one per export and would read the new
+        # convention immediately. Drop the cached one when the convention
+        # actually moves, or the preview and the export would pose the same
+        # frame differently — the one thing they may never do. It is rebuilt,
+        # and re-fitted by _apply_view_orientation, on the next draw.
+        view = getattr(self, "view3d", None)
+        cached = getattr(view, "_character", None)
+        if cached is not None and cached.head_source != source:
+            view._character = None
 
     def _on_recalibrate(self):
         self.model.recompute_all()

@@ -44,10 +44,15 @@ from pose3d.detect.base import Detection, KeypointDetector
 #:   HEAD retarget, no face points   12.73 -> 1.54 % of height   (gate <= 4.0)  PASS
 #:   HEAD retarget, with face points  9.03 -> 1.67 %             (gate <= 3.0)  PASS
 #:   neck-head bone CV                9.53 -> 3.13 %             (gate <= 4.0)  PASS
-#:   neck-Lshoulder bone CV           5.15 -> 5.98 %          (gate <= 5.15)  FAIL
-#:   worst body-joint regression             +0.32 % of height  (gate <= 0.5)  PASS
-#:   head aim error, nose path off            1.19 deg median   (gate <  5)    PASS
+#:   neck-Lshoulder bone CV           5.15 -> 5.98 %           (gate <= 5.15)  FAIL
+#:   worst body-joint regression      +0.23 % of height (R wrist) (gate <= 0.5) PASS
+#:   head aim error, nose path off   38.57 -> 1.19 deg median    (gate <  5)   PASS
 #:   body epipolar median             4.90 -> 4.68 px      (gate: no regress)  PASS
+#:
+#: Re-derive every one of those with `tools/measure_head_gates.py` (it also
+#: re-measures the COCO-17 baseline rather than trusting it); the run that
+#: decided this is `docs/audit-2026-09/phase5_metrics.json`, and a test asserts
+#: this constant and that file still say the same thing.
 #:
 #: The head win is large and real, and keeping NECK derived does contain most
 #: of the neck regression the native swap causes (8.13 %), but not all of it:

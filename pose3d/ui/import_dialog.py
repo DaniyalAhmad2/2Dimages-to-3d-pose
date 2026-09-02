@@ -214,8 +214,10 @@ class ImportDialog(QDialog):
             project.detector = (
                 f"rtmpose-{det.mode}" + ("-feet" if det.feet else ""))
             # what this detector's canonical HEAD point IS, so the retarget
-            # cannot correct a skull HEAD for the nose's forward offset
-            project.head_source = getattr(det, "head_source", "nose")
+            # cannot correct a skull HEAD for the nose's forward offset.
+            # KeypointDetector declares the attribute, so a detector that
+            # forgets it cannot silently fall back to "nose".
+            project.head_source = det.head_source
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
             from pose3d.pipeline import detect_project

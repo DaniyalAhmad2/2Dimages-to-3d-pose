@@ -237,3 +237,175 @@ def test_re_detecting_moves_the_head_convention_with_the_2d(qapp):
         assert ch.default_head_source() == "skull"
     finally:
         ch.set_default_head_source("nose")
+
+
+def test_every_detector_declares_what_its_head_point_is():
+    """`head_source` belongs to the detector INTERFACE, not to RTMPose. A
+    detector that simply forgot it used to fall through a
+    `getattr(det, "head_source", "nose")` to the nose convention with no
+    signal — i.e. straight into the double correction the key exists to
+    prevent. The base class answers instead, and answers "nose", which is what
+    every detector written before the key emitted."""
+    from pose3d.detect.base import KeypointDetector
+    from pose3d.geometry.character import HEAD_SOURCES
+
+    assert KeypointDetector.head_source == "nose"
+    assert KeypointDetector.head_source in HEAD_SOURCES
+
+    class _Forgetful(KeypointDetector):
+        def detect(self, image_bgr):        # pragma: no cover - never called
+            raise NotImplementedError
+
+    assert _Forgetful().head_source == "nose"
+
+
+def _stub_rtmpose(monkeypatch):
+    """Build RTMPoseDetector without loading (or downloading) any ONNX."""
+    from pose3d.detect import models, rtmpose
+
+    monkeypatch.setattr(models, "resolve",
+                        lambda mode, feet: models.Weights(
+                            det="det.onnx", det_input_size=(640, 640),
+                            pose="pose.onnx", pose_input_size=(192, 256)))
+    monkeypatch.setattr(models, "TwoStageDetector",
+                        lambda w, backend="onnxruntime", device="cpu": object())
+    return rtmpose.RTMPoseDetector
+
+
+def test_a_built_detector_reports_the_head_point_its_model_emits(monkeypatch):
+    """The one-switch invariant, asserted on a CONSTRUCTED detector rather
+    than on the source text: what `USE_HALPE26` selects and what the detector
+    says its HEAD is must be the same fact, or a project would record a
+    convention its 2D does not hold."""
+    from pose3d.core.skeleton import HALPE26_HEAD_SOURCE
+    from pose3d.detect import rtmpose
+
+    RTMPoseDetector = _stub_rtmpose(monkeypatch)
+
+    default = RTMPoseDetector()
+    assert default.feet is rtmpose.USE_HALPE26
+    assert default.head_source == (HALPE26_HEAD_SOURCE
+                                   if rtmpose.USE_HALPE26 else "nose")
+
+    assert RTMPoseDetector(feet=True).head_source == "skull"
+    assert RTMPoseDetector(feet=False).head_source == "nose"
+
+
+def test_the_re_baseline_route_uses_the_shipped_detector():
+    """`regen_client_take.py --redetect` is what re-baselines the regression
+    fixture. If it pinned `feet=`, it would re-baseline the whole regression
+    net onto a layout the app does not detect with — silently, since every
+    threshold moves with it."""
+    from tests.fixtures import regen_client_take
+
+    src = inspect.getsource(regen_client_take)
+    for line in src.splitlines():
+        if "RTMPoseDetector(" in line and "import" not in line:
+            assert "feet" not in line, line.strip()
+
+
+class _FakeCharacter:
+    def __init__(self, head_source):
+        self.head_source = head_source
+
+
+def test_re_detecting_drops_the_views_cached_character(qapp):
+    """The 3D view builds its Character once and keeps it; the Blender export
+    builds a fresh one per export. If a re-detection moved the convention and
+    the cached one stayed, the preview and the export would pose the same
+    frame under different conventions — the one thing the two may never do."""
+    from pose3d.core.project import ProjectData
+    from pose3d.geometry import character as ch
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    class _Skull:
+        head_source = "skull"
+
+    class _Nose:
+        head_source = "nose"
+
+    try:
+        win = MainWindow(ProjectModel(ProjectData(name="legacy"), None))
+
+        win.view3d._character = _FakeCharacter("nose")
+        win._adopt_head_source(_Skull())
+        assert win.view3d._character is None      # convention moved: rebuild
+
+        kept = _FakeCharacter("nose")
+        win.view3d._character = kept
+        win._adopt_head_source(_Nose())
+        assert win.view3d._character is kept      # unchanged: no churn
+    finally:
+        ch.set_default_head_source("nose")
+
+
+def test_the_convention_moves_before_anything_is_re_posed(qapp, monkeypatch):
+    """`redetect_all` re-poses and redraws as it goes, so the head convention
+    has to be in place BEFORE it runs, not after: anything posed in between
+    would be posed under the convention the 2D no longer holds."""
+    from pose3d.core.project import Frame, ProjectData
+    from pose3d.geometry import character as ch
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    class _Skull:
+        head_source = "skull"
+
+    seen = {}
+
+    try:
+        data = ProjectData(name="legacy")
+        data.frames.append(Frame(frame_id="0000"))   # the window draws one
+        win = MainWindow(ProjectModel(data, None))
+        win.detector = _Skull()                   # no model loading
+        win.view3d._character = _FakeCharacter("nose")
+
+        def fake_redetect_all(det, load_image):
+            seen["published"] = ch.default_head_source()
+            seen["project"] = win.model.project.head_source
+            seen["cached"] = win.view3d._character
+
+        monkeypatch.setattr(win.model, "redetect_all", fake_redetect_all)
+        win._on_run_detection()
+
+        assert seen == {"published": "skull", "project": "skull",
+                        "cached": None}
+    finally:
+        ch.set_default_head_source("nose")
+
+
+def test_the_switch_agrees_with_the_measured_gate_table():
+    """The gate table decides whether the skull HEAD ships, so the constant
+    and the measurement may not drift apart.
+
+    `docs/audit-2026-09/phase5_metrics.json` is what
+    `tools/measure_head_gates.py` wrote on the client take; this asserts that
+    the gates in it are still the ones fixed in advance (nobody may loosen a
+    threshold to make a gate pass), that its verdict is its own arithmetic, and
+    that `USE_HALPE26` says the same thing. Flipping the constant without
+    re-measuring fails here.
+    """
+    import json
+    from pathlib import Path
+
+    import tools.measure_head_gates as gates
+    from pose3d.detect import rtmpose
+
+    path = (Path(__file__).resolve().parents[1]
+            / "docs" / "audit-2026-09" / "phase5_metrics.json")
+    if not path.exists():                    # a checkout without the evidence
+        pytest.skip(f"{path} not present")
+    doc = json.loads(path.read_text())
+
+    assert {g["key"] for g in doc["gates"]} == set(gates.GATES)
+    for g in doc["gates"]:
+        assert g["rule"] == gates.GATES[g["key"]], g["key"]
+
+    assert doc["passed"] == sum(bool(g["pass"]) for g in doc["gates"])
+    assert doc["of"] == len(doc["gates"])
+    assert doc["switch"]["constant"] == "pose3d.detect.rtmpose.USE_HALPE26"
+    assert doc["switch"]["ships_on"] is (doc["passed"] == doc["of"])
+    assert rtmpose.USE_HALPE26 is doc["switch"]["ships_on"], (
+        "USE_HALPE26 and the measured gate table disagree: re-run "
+        "tools/measure_head_gates.py before moving the switch")
