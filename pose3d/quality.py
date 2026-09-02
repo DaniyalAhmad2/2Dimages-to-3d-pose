@@ -287,7 +287,12 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
                 float(np.percentile(vals, 90)) if vals else float("nan"),
                 diag[cam]),
         }
-    thr = float(pl.epipolar_threshold(rig))
+    # The gate this take is ACTUALLY judged by, from this take's own
+    # distribution (pipeline.epipolar_gate is the one implementation of the
+    # formula). Reporting `epipolar_threshold(rig)` here would print the
+    # ceiling — the widest the gate may ever be — as though it were the
+    # threshold the pairs below were counted against.
+    thr = pl.epipolar_gate(_nanstat(allv, np.median), min(diag.values()))
     return {
         "per_joint": per,
         "per_image": per_image,

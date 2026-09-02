@@ -669,7 +669,8 @@ class ProjectModel(QObject):
         """
         if self._epi_thr is None:
             from pose3d.pipeline import epipolar_threshold
-            self._epi_thr = float(epipolar_threshold(self.rig))
+            self._epi_thr = float(
+                epipolar_threshold(self.rig, self.project))
         return self._epi_thr
 
     def joint_states(self, idx: int) -> dict[str, list[str]]:

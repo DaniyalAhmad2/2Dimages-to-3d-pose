@@ -24,7 +24,9 @@ from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
     smooth_temporal,
 )
-from pose3d.geometry.triangulate import epipolar_distance, triangulate_points
+from pose3d.geometry.triangulate import (
+    epipolar_distance, fundamental_matrix, triangulate_points,
+)
 
 
 class CalibratedRig:
@@ -115,10 +117,109 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
 _EPI_THR_FRAC = 0.014
 
 
-def epipolar_threshold(rig: CalibratedRig) -> float:
-    """Pixels of epipolar disagreement tolerated, scaled to the image size."""
-    w, h = rig.intr[CAM_LEFT].image_size
-    return float(_EPI_THR_FRAC * np.hypot(w, h))
+# The data-driven gate: k x a robust scale of the take's OWN Sampson
+# distribution, floored so a near-perfect take does not gate itself to
+# nothing, and capped at _EPI_THR_FRAC of the SMALLER image's diagonal.
+# k = 6 measured on the client take: median 4.91 px -> 29.4 px, which still
+# clears that take's own tail (max 29.38 px, 0 of 388 pairs rejected) while
+# being 2.4x tighter than the 71.5 px the image-only rule gave. k = 5 gives
+# 24.6 px and clips the tail; the floor is what k = 5 could not supply.
+_EPI_K = 6.0
+_EPI_FLOOR_PX = 25.0
+
+
+def per_image_allowances(rig: CalibratedRig) -> dict[str, float]:
+    """Point-to-line disagreement tolerated IN EACH IMAGE, in its own pixels.
+
+    _EPI_THR_FRAC of that camera's own diagonal — 71.5 px on the client's
+    3072x4080 left view, 35.8 px on its 1536x2048 right one. The Sampson
+    distance the gate's other half judges is (d_L^-2 + d_R^-2)^-1/2: it is
+    below BOTH per-image distances and is dominated by the lower-resolution
+    one, so on a 2:1 mixed rig it is not in either image's pixels. These two
+    numbers are, and each is measured against the image it belongs to.
+    """
+    return {c: float(_EPI_THR_FRAC * np.hypot(*rig.intr[c].image_size))
+            for c in (CAM_LEFT, CAM_RIGHT)}
+
+
+def point_line_distances(pt_left, pt_right, F) -> tuple[float, float]:
+    """Per-image point-to-epipolar-line distances (d_L, d_R) in px.
+
+    Sampson is one number for the pair; these two say how far the observation
+    sits from its partner's epipolar line IN EACH IMAGE, which is the only
+    form comparable across an asymmetric rig once each is divided by its own
+    image diagonal. `F` is the rig's fundamental matrix, passed in because it
+    is a constant of the rig and rebuilding it per pair is 388 matrix
+    inversions on the client take.
+
+    The same formula as `pose3d.quality._point_line_px` — the gate and the
+    metric that reports on the gate must not be able to disagree about what
+    "how far apart are these two views" means, and
+    test_cross_view.py::test_the_gate_and_the_metric_measure_the_same_thing
+    pins them together.
+    """
+    pt_left = np.asarray(pt_left, float).reshape(2)
+    pt_right = np.asarray(pt_right, float).reshape(2)
+    if np.isnan(pt_left).any() or np.isnan(pt_right).any():
+        return float("nan"), float("nan")
+    xl = np.array([pt_left[0], pt_left[1], 1.0])
+    xr = np.array([pt_right[0], pt_right[1], 1.0])
+    num = abs(float(xr @ F @ xl))
+    lr = F @ xl                      # epipolar line of xl, in the RIGHT image
+    ll = F.T @ xr                    # epipolar line of xr, in the LEFT image
+    nl = float(np.hypot(ll[0], ll[1]))
+    nr = float(np.hypot(lr[0], lr[1]))
+    return (num / nl if nl > 1e-12 else float("nan"),
+            num / nr if nr > 1e-12 else float("nan"))
+
+
+def epipolar_gate(median_px: float, ceiling_px: float) -> float:
+    """The gate from a take's own median disagreement. THE formula.
+
+    Exposed so the sidebar can state the gate from the distribution it already
+    has (`pose3d.quality`'s epipolar block) instead of keeping a second copy
+    of the arithmetic; `epipolar_threshold` is this same formula fed from a
+    project.
+    """
+    if not np.isfinite(median_px):
+        return float(ceiling_px)
+    return float(min(max(_EPI_K * float(median_px), _EPI_FLOOR_PX),
+                     float(ceiling_px)))
+
+
+def epipolar_threshold(rig: CalibratedRig,
+                       project: ProjectData | None = None) -> float:
+    """Pixels of epipolar disagreement tolerated by the cross-view gate.
+
+    Data-driven when a project is supplied: clip(6 x median Sampson, 25 px,
+    1.4 % of the SMALLER image's diagonal). The image-only rule this replaces
+    was 71.5 px on the client take against an observed median of 4.91 px —
+    14.6x the data, 3x its p99, and provably inert: it rejected 0 of 388 pairs
+    and caught the ankle-on-knee hallucination its own docstring names in only
+    15 of 26 frames. It was also scaled from the LEFT image alone, so on this
+    2:1 rig it was 2.79 % of the right image's diagonal, and it stayed silent
+    through ~7 deg of extrinsic error.
+
+    Without a project there is no distribution to measure, so this returns the
+    ceiling — the widest the gate may ever be. That is the honest answer for a
+    caller holding a rig and nothing else, and it is still tighter than the
+    old rule whenever the low-resolution camera is not the left one.
+    """
+    ceiling = min(per_image_allowances(rig).values())
+    if project is None or not project.frames:
+        return float(ceiling)
+    dists = []
+    for frame in project.frames:
+        for j in range(NUM_JOINTS):
+            e = epipolar_distance(
+                frame.kp2d[CAM_LEFT][j], frame.kp2d[CAM_RIGHT][j],
+                rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+            if np.isfinite(e):
+                dists.append(e)
+    if not dists:
+        return float(ceiling)
+    return epipolar_gate(float(np.median(dists)), ceiling)
 
 
 def validate_cross_view(project: ProjectData, rig: CalibratedRig,
@@ -128,12 +229,14 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
     When a joint is occluded/out-of-frame in one camera, the detector often
     hallucinates it (e.g. an ankle collapsed onto the knee). Such a point can
     never correspond to the same 3D location the other camera sees, so its
-    epipolar distance is large. For every joint present in BOTH views, if the
-    disagreement exceeds the gate, the observation in the LOWER-confidence
-    view is marked `frame.rejected[cam][j] = True` — so it is not triangulated
-    (the 3D point drops out too, since a joint needs both views), but it is
-    still drawn, still draggable, and still in the file. User-corrected joints
-    are trusted and never auto-rejected.
+    epipolar distance is large. For every joint present in BOTH views, two
+    tests are applied — the Sampson distance against `epi_thr`, and the
+    point-to-line distance in EACH image against 1.4 % of that image's own
+    diagonal — and if EITHER is exceeded the observation in the LOWER-
+    confidence view is marked `frame.rejected[cam][j] = True`. It is then not
+    triangulated (the 3D point drops out too, since a joint needs both views),
+    but it is still drawn, still draggable, and still in the file.
+    User-corrected joints are trusted and never auto-rejected.
 
     NON-DESTRUCTIVE, and that is the whole point: this used to write NaN into
     `kp2d` and 0.0 into `scores`, which `io_project` then persisted. A rig
@@ -146,7 +249,10 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
     Returns the number of observations rejected.
     """
     if epi_thr is None:
-        epi_thr = epipolar_threshold(rig)
+        epi_thr = epipolar_threshold(rig, project)
+    allow = per_image_allowances(rig)
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
     dropped = 0
     for frame in project.frames:
         # Re-derived, never accumulated: a mask left over from the last rig
@@ -161,7 +267,15 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
                 continue
             e = epipolar_distance(pl, pr, rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
                                   rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
-            if np.isnan(e) or e <= epi_thr:
+            d_l, d_r = point_line_distances(pl, pr, F)
+            # EITHER, never both: d_R is systematically the smaller of the two
+            # (median 5.57 px vs 10.21 px on the client rig), so requiring
+            # both to exceed their own 1.4 % would need d_R > 35.8 px when its
+            # measured maximum is 33.8 — strictly more permissive than the
+            # rule it replaces, which is the opposite of the intent.
+            if not ((np.isfinite(e) and e > epi_thr)
+                    or (np.isfinite(d_l) and d_l > allow[CAM_LEFT])
+                    or (np.isfinite(d_r) and d_r > allow[CAM_RIGHT])):
                 continue
             sl = frame.scores[CAM_LEFT][j]
             sr = frame.scores[CAM_RIGHT][j]

@@ -502,6 +502,16 @@ class Sidebar(QWidget):
             "an independent check on it — and it moves on a wrong focal "
             "length, which the bone spread does not.")
         lay.addWidget(self.row_epipolar)
+        self.row_gate = _StackedRow("Cross-view gate", "—")
+        self.row_gate.setToolTip(
+            "How far the two views may disagree about one keypoint before it "
+            "is refused (drawn purple, not triangulated). Sized from THIS "
+            "take: six times its own median disagreement, floored at 25 px "
+            "and capped at 1.4 % of the smaller image's diagonal. The fixed "
+            "1.4 %-of-the-left-image rule it replaces was 71.5 px here — 14.6x "
+            "the median, wide enough to pass a rig seven degrees out and to "
+            "miss an ankle detected on the knee in 11 of 26 frames.")
+        lay.addWidget(self.row_gate)
         self.row_symmetry = _InfoRow("L/R symmetry", "—")
         lay.addWidget(self.row_symmetry)
         self.symmetry_note = QLabel("")
@@ -625,7 +635,8 @@ class Sidebar(QWidget):
         and a stale row is worse than an empty one.
         """
         if q is None:
-            for row in (self.row_bone_cv, self.row_epipolar, self.row_symmetry):
+            for row in (self.row_bone_cv, self.row_epipolar, self.row_gate,
+                        self.row_symmetry):
                 row.set_value("—")
             self.symmetry_note.hide()
             return
@@ -643,6 +654,7 @@ class Sidebar(QWidget):
             else:
                 parts.append(f"{px:.1f} px ({_pct1(frac, 2)})")
         self.row_epipolar.set_value(" / ".join(parts))
+        self.row_gate.set_value(_gate_text(q.epipolar or {}))
         asym = [v.get("asym_pct") for v in (q.symmetry or {}).values()]
         asym = [a for a in asym if a is not None and np.isfinite(a)]
         self.row_symmetry.set_value(
@@ -651,6 +663,22 @@ class Sidebar(QWidget):
         self.symmetry_note.setText("\n\n".join(f"• {n}" for n in notes))
         self.symmetry_note.setToolTip("\n\n".join(notes))
         self.symmetry_note.setVisible(bool(notes))
+
+
+def _gate_text(epi: dict) -> str:
+    """The gate and the distribution it was sized from, in one line.
+
+    `threshold_px` is the gate `pose3d.quality` counted `frac_over_threshold`
+    against, which is the gate `validate_cross_view` runs — one number from
+    one place, so the sidebar cannot quote a threshold nothing was measured
+    against.
+    """
+    med, thr = epi.get("median_px"), epi.get("threshold_px")
+    if med is None or thr is None or not np.isfinite(med) or not np.isfinite(thr):
+        return "—"
+    mx = epi.get("max_px")
+    tail = f", max {mx:.1f}" if mx is not None and np.isfinite(mx) else ""
+    return f"{thr:.0f} px — median {med:.1f}{tail} px"
 
 
 def _cm(v) -> str:

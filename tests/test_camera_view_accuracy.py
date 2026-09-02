@@ -342,4 +342,4 @@ def test_the_gate_the_dot_quotes_is_the_gate_the_gate_used(qapp):
     rig = load_rig(FIXTURE / "calibration")
     m = ProjectModel(project, rig)
     assert m.epipolar_gate() == pytest.approx(
-        pipeline.epipolar_threshold(rig))
+        pipeline.epipolar_threshold(rig, project))

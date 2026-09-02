@@ -76,6 +76,8 @@ def test_consistent_observations_survive_at_phone_resolution(geo):
 
 
 def test_the_tolerance_scales_with_the_image():
+    """With no take to measure, the gate is its CEILING — the widest it may
+    ever be — and that still scales with the sensor."""
     small, _, _ = _rig_and_project(default_two_cam())
     big, _, _ = _rig_and_project(_upscaled_symmetric(4.0))
     assert epipolar_threshold(big) > 3.0 * epipolar_threshold(small)
@@ -242,3 +244,157 @@ def test_a_hand_placed_point_is_not_left_flagged(geo):
 
     f.set_kp(CAM_LEFT, ankle, 10.0, 20.0, score=1.0, corrected=True)
     assert not f.rejected[CAM_LEFT][ankle]
+
+
+# --- the gate is sized from the data, per image (F36) -----------------------
+
+def test_the_gate_uses_each_image_s_own_scale(geo):
+    """1.4 % of THAT image's diagonal, not 1.4 % of the left one's.
+
+    The old rule read `rig.intr[CAM_LEFT].image_size` and applied the answer
+    to a Sampson distance that mixes both cameras' pixel units. On the
+    client's genuinely 2:1 rig that made the gate 1.400 % of the left diagonal
+    and 2.793 % of the right's — the low-resolution camera, whose pixels are
+    worth twice as much, got twice the licence.
+    """
+    from pose3d.pipeline import per_image_allowances
+
+    rig, data, _ = _rig_and_project(geo)
+    allow = per_image_allowances(rig)
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        assert allow[cam] == pytest.approx(
+            0.014 * np.hypot(*rig.intr[cam].image_size))
+    ratio = np.hypot(*rig.intr[CAM_LEFT].image_size) / np.hypot(
+        *rig.intr[CAM_RIGHT].image_size)
+    assert allow[CAM_LEFT] / allow[CAM_RIGHT] == pytest.approx(ratio)
+    # and consistent observations still pass both halves of the gate
+    assert validate_cross_view(data, rig) == 0
+
+
+def test_the_per_image_gate_rejects_what_sampson_would_wave_through(geo):
+    """"EITHER exceeds", not "both".
+
+    Sampson is (d_L^-2 + d_R^-2)^-1/2 — below BOTH per-image distances and
+    dominated by the smaller — so a disagreement can be over an image's own
+    allowance while the pair's Sampson distance is not. Requiring both to
+    exceed would have needed d_R > 35.8 px on the client rig when its measured
+    maximum is 33.8: strictly more permissive than the rule it replaces.
+    """
+    from pose3d.pipeline import per_image_allowances, point_line_distances
+    from pose3d.geometry.triangulate import fundamental_matrix
+
+    rig, data, _ = _rig_and_project(geo)
+    allow = per_image_allowances(rig)
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    f = data.frames[0]
+    j = int(Joint.LEFT_WRIST)
+
+    # walk the right-view point off its epipolar line until it is just over
+    # that image's own allowance
+    base = f.kp2d[CAM_RIGHT][j].copy()
+    for step in np.arange(1.0, 400.0, 1.0):
+        f.kp2d[CAM_RIGHT][j] = base + (0.0, step)
+        _, d_r = point_line_distances(f.kp2d[CAM_LEFT][j],
+                                      f.kp2d[CAM_RIGHT][j], F)
+        if d_r > allow[CAM_RIGHT]:
+            break
+    else:                                        # pragma: no cover
+        pytest.fail("could not push the point past its own image's allowance")
+
+    # a Sampson-only gate wide enough to miss it still leaves the per-image
+    # test to catch it
+    assert validate_cross_view(data, rig, epi_thr=1e9) == 1
+    assert f.rejected[CAM_RIGHT][j] or f.rejected[CAM_LEFT][j]
+
+
+def test_the_gate_is_sized_from_the_take_not_the_sensor():
+    """clip(6 x median, 25 px, 1.4 % of the smaller diagonal)."""
+    from pose3d.pipeline import epipolar_gate
+
+    assert epipolar_gate(5.0, 100.0) == pytest.approx(30.0)   # 6 x median
+    assert epipolar_gate(0.0, 100.0) == pytest.approx(25.0)   # floored
+    assert epipolar_gate(50.0, 35.8) == pytest.approx(35.8)   # capped
+    assert epipolar_gate(float("nan"), 35.8) == pytest.approx(35.8)
+
+
+def test_the_client_take_is_gated_on_its_own_distribution():
+    """The acceptance number: 71.5 px -> ~29 px, still 0 of 388 rejected.
+
+    Measured on the committed fixture: Sampson median 4.908, p99 23.97, max
+    29.384 px; the gate lands at 29.45, which clears that tail by 0.06 px. The
+    left image's own allowance is 71.50 px (max observed 59.33) and the
+    right's 35.84 px (max observed 33.82), so neither per-image test fires
+    either. If this ever drops a pair, the gate has become tighter than the
+    take it is judging and the k in `pipeline._EPI_K` is what to look at.
+    """
+    from pose3d.core.io_project import load_project
+    from pose3d.quality import load_rig
+
+    data = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    thr = epipolar_threshold(rig, data)
+    assert 25.0 <= thr <= 30.0, thr                  # today 29.45
+    assert epipolar_threshold(rig) == pytest.approx(35.84, abs=0.01)  # ceiling
+    assert validate_cross_view(data, rig) == 0
+
+
+def test_the_gate_and_the_metric_measure_the_same_thing():
+    """`pipeline.point_line_distances` and `quality._point_line_px` are one
+    formula in two places; a drift between them would let the sidebar report
+    a disagreement the gate never saw."""
+    from pose3d.geometry.triangulate import fundamental_matrix
+    from pose3d.pipeline import point_line_distances
+    from pose3d.quality import _point_line_px
+
+    rig, data, _ = _rig_and_project(close_range_two_cam())
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    rng = np.random.default_rng(0)
+    f = data.frames[0]
+    for j in range(NUM_JOINTS):
+        pl = f.kp2d[CAM_LEFT][j] + rng.normal(0, 40, 2)
+        pr = f.kp2d[CAM_RIGHT][j] + rng.normal(0, 40, 2)
+        assert point_line_distances(pl, pr, F) == pytest.approx(
+            _point_line_px(pl, pr, F))
+    assert all(np.isnan(v) for v in
+               point_line_distances([np.nan, 0.0], f.kp2d[CAM_RIGHT][0], F))
+
+
+def test_the_narrower_gate_catches_the_hallucination_it_names():
+    """The gate's own docstring names an ankle collapsed onto the knee; the
+    71.5 px rule caught it in 15 of the client take's 25 eligible frames.
+
+    Measured on the committed fixture, injecting the hallucination one frame
+    at a time (so the corruption cannot widen the very median that sizes the
+    gate): ankle-on-knee 15 -> 21 of 25, wrist-on-elbow 8 -> 25 of 26. The
+    four ankle frames still missed sit as low as 9.2 px of disagreement —
+    below this take's own tail (max 29.38 px), so no threshold can catch them
+    without rejecting good data instead.
+    """
+    from pose3d.core.io_project import load_project
+    from pose3d.quality import load_rig
+
+    rig = load_rig(FIXTURE / "calibration")
+    clean = load_project(FIXTURE)
+    thr = epipolar_threshold(rig, clean)          # sized on the CLEAN take
+
+    caught = {}
+    for name, bad, good in (("ankle", Joint.LEFT_ANKLE, Joint.LEFT_KNEE),
+                            ("wrist", Joint.LEFT_WRIST, Joint.LEFT_ELBOW)):
+        n = hit = 0
+        for i in range(len(clean.frames)):
+            data = load_project(FIXTURE)
+            f = data.frames[i]
+            if np.isnan(f.kp2d[CAM_LEFT][int(good)]).any() \
+                    or np.isnan(f.kp2d[CAM_RIGHT][int(bad)]).any():
+                continue
+            n += 1
+            f.kp2d[CAM_LEFT][int(bad)] = f.kp2d[CAM_LEFT][int(good)]
+            f.scores[CAM_LEFT][int(bad)] = 0.3
+            validate_cross_view(data, rig, epi_thr=thr)
+            hit += bool(f.rejected[CAM_LEFT][int(bad)])
+        caught[name] = (hit, n)
+
+    assert caught["ankle"][0] >= 20, caught["ankle"]     # today 21 of 25
+    assert caught["wrist"][0] >= 23, caught["wrist"]     # today 25 of 26
