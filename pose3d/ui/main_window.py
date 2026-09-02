@@ -83,6 +83,7 @@ class MainWindow(QMainWindow):
         root.setContentsMargins(0, 0, 0, 0); root.setSpacing(0)
         self._root_lay = root
 
+        self._build_menus()
         root.addWidget(self._build_topbar())
 
         mid = QWidget(); mid_lay = QHBoxLayout(mid)
@@ -125,6 +126,7 @@ class MainWindow(QMainWindow):
         self._tl_area = tl_area
         self._fs_active = False
         self._fs_split = self._fs_side = None
+        self._migration_banner = None
 
         self._wire()
         self._load_model()
@@ -147,6 +149,16 @@ class MainWindow(QMainWindow):
         self.btn_export = QPushButton("⬇  Export Results")
         lay.addWidget(self.btn_import); lay.addWidget(self.btn_export)
         return bar
+
+    def _build_menus(self):
+        """The one menu action the dashboard needs: the migration path for a
+        project made before face keypoints existed."""
+        tools = self.menuBar().addMenu("&Tools")
+        act = tools.addAction("Re-detect face points only")
+        act.setToolTip("Detect the nose/eyes/ears again so the character's "
+                       "head can be oriented, leaving the body pose and every "
+                       "hand correction exactly as they are")
+        act.triggered.connect(self._on_redetect_head)
 
     def _build_action_row(self):
         row = QWidget(); row.setObjectName("actionRow")
@@ -277,6 +289,19 @@ class MainWindow(QMainWindow):
             QApplication.restoreOverrideCursor()
         self._apply_view_orientation()   # poses changed: re-fit the character
         self._refresh_views(); self._refresh_timeline_status()
+
+    def _on_redetect_head(self):
+        from PySide6.QtWidgets import QApplication
+        det = self._ensure_detector()
+        if det is None:
+            return
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        QApplication.processEvents()
+        try:
+            self.model.redetect_head(det, self.load_image)
+        finally:
+            QApplication.restoreOverrideCursor()
+        self._refresh_views()
 
     def _on_recalibrate(self):
         self.model.recompute_all()
@@ -511,8 +536,38 @@ class MainWindow(QMainWindow):
             # size the character to this subject (same fit the export uses)
             self.view3d.fit_subject(np.stack(poses))
 
+    def _show_migration_banner(self, note: str):
+        """One dismissible line saying what changed on open, and offering the
+        stored pose back. Nothing has been written to disk."""
+        bar = QWidget()
+        lay = QHBoxLayout(bar)
+        lay.setContentsMargins(0, 0, 0, 0); lay.setSpacing(8)
+        label = QLabel(note); label.setWordWrap(True)
+        restore = QPushButton("Restore stored pose")
+        dismiss = QPushButton("Dismiss")
+        lay.addWidget(label, 1); lay.addWidget(restore); lay.addWidget(dismiss)
+        self.statusBar().addWidget(bar, 1)
+        self._migration_banner = bar
+
+        def close_banner():
+            self.statusBar().removeWidget(bar)
+            bar.deleteLater()
+            self._migration_banner = None
+
+        def on_restore():
+            if self.model.restore_stored_pose():
+                self._apply_view_orientation()
+                self._refresh_views(); self._refresh_timeline_status()
+            close_banner()
+
+        restore.clicked.connect(on_restore)
+        dismiss.clicked.connect(close_banner)
+
     def _load_model(self):
         p = self.model.project
+        # A project written by an older pipeline is brought up to date once,
+        # here, with no button press — and says so, with this take's numbers.
+        note = self.model.upgrade_pipeline() or self.model.migration_note
         self.title_label.setText(f"Project: {p.name}")
         res = "—"
         if p.frames and p.frames[0].images:
@@ -527,3 +582,5 @@ class MainWindow(QMainWindow):
             self.timeline.select(0)
             self._refresh_timeline_status()
         self._refresh_history()
+        if note:
+            self._show_migration_banner(note)

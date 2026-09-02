@@ -32,6 +32,10 @@ from pose3d.core.io_project import save_project
 from pose3d.ui import filedialog
 
 
+class _Cancelled(Exception):
+    """The user pressed Cancel in the progress dialog."""
+
+
 class _FilePicker(QWidget):
     """A read-only line + Browse button for one or many files/a folder."""
 
@@ -200,18 +204,25 @@ class ImportDialog(QDialog):
             elif cal.approximate:
                 QMessageBox.information(self, "Calibration", cal.message)
 
-            # detection with progress
+            # detection with progress — the pipeline's own loop, so the face
+            # keypoints (and anything else it learns to write) are not dropped
+            # on the floor by a duplicate loop that only knew about kp2d
             det = self._ensure_detector()
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
-            from pose3d.core.project import CAMERAS
-            for i, frame in enumerate(project.frames):
+            from pose3d.pipeline import detect_project
+
+            def on_frame(i, n):
                 if prog.wasCanceled():
-                    return
-                for cam in CAMERAS:
-                    d = det.detect(cv2.imread(frame.images[cam]))
-                    frame.kp2d[cam] = d.xy; frame.scores[cam] = d.scores
-                prog.setValue(i + 1); _pe()
+                    raise _Cancelled()
+                prog.setValue(i); _pe()
+
+            try:
+                detect_project(project, det, lambda p: cv2.imread(str(p)),
+                               on_frame=on_frame)
+            except _Cancelled:
+                prog.close()
+                return
 
             smooth = self.smooth_check.isChecked()
             project.smoothing = "ema0.6" if smooth else "none"

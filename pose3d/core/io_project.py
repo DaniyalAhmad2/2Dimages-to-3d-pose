@@ -120,6 +120,9 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
         "name": project.name,
         "fps": project.fps,
         "calibration_ref": project.calibration_ref,
+        # what produced the stored 3D, so a later build knows whether the file
+        # needs recomputing (pose3d.core.project.PIPELINE_VERSION)
+        "pipeline_version": int(project.pipeline_version),
         "smoothing": project.smoothing,
         "keypoint_model": project.keypoint_model,
         "frames": [],
@@ -173,6 +176,9 @@ def load_project(folder: str | Path) -> ProjectData:
         calibration_ref=doc.get("calibration_ref"), frames=frames,
         smoothing=doc.get("smoothing") or "none",
         keypoint_model=doc.get("keypoint_model") or "coco17",
+        # 0, not PIPELINE_VERSION: a file written before the key existed was
+        # produced by the causal-EMA build and must be recomputed on open.
+        pipeline_version=int(doc.get("pipeline_version", 0)),
     )
     project.corrections = _read_corrections(folder)
     return project

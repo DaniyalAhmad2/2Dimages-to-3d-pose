@@ -73,7 +73,12 @@ def build_model(project_folder: str | None):
     if project_folder and Path(project_folder).exists():
         project = load_project(project_folder)
         rig = _load_rig(Path(project_folder) / "calibration")
-        return ProjectModel(project, rig, project_dir=project_folder)
+        model = ProjectModel(project, rig, project_dir=project_folder)
+        # A take saved by an older pipeline is corrected here, once, before
+        # anything is drawn — the window then shows what changed and offers
+        # the stored pose back. Nothing is written to disk.
+        model.upgrade_pipeline()
+        return model
     project = ProjectData(name="No project loaded")
     return ProjectModel(project, None)
 

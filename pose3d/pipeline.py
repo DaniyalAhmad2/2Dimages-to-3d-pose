@@ -36,21 +36,61 @@ class CalibratedRig:
         self.ext = {CAM_LEFT: ext_l, CAM_RIGHT: ext_r}
 
 
+def _detector_keypoint_model(detector: KeypointDetector) -> str:
+    """Which joint layout this detector emits.
+
+    Read off the detector rather than declared by it: only RTMPose has the
+    choice today (`feet=True` selects Halpe-26, which detects neck/pelvis
+    natively instead of deriving them as midpoints), and a detector that grows
+    an explicit attribute is honoured first.
+    """
+    declared = getattr(detector, "keypoint_model", None)
+    if declared:
+        return str(declared)
+    return "halpe26" if getattr(detector, "feet", False) else "coco17"
+
+
 def detect_project(project: ProjectData, detector: KeypointDetector,
-                   load_image) -> None:
+                   load_image, on_frame=None, respect_corrections: bool = True,
+                   fields: str = "all") -> None:
     """Populate each frame's 2D keypoints/scores via the detector.
 
     load_image(path) -> BGR ndarray. Mutates project in place.
+
+    on_frame(i, n) is called after each frame, for a progress dialog.
+
+    respect_corrections keeps hand-placed points: a correction is a human
+    saying the detector was wrong there, and re-running detection used to
+    overwrite every one of them while leaving the `corrected` flag set — so
+    the UI went on claiming a point had been corrected by hand after the
+    correction had been thrown away.
+
+    fields="head" writes only the face keypoints (head2d/head_scores), leaving
+    kp2d, scores and corrected untouched. That is the migration path for a
+    project made before face keypoints existed: its body pose and its
+    corrections survive, and the head stops riding the neck.
     """
-    for frame in project.frames:
+    if fields not in ("all", "head"):
+        raise ValueError(f"fields must be 'all' or 'head', not {fields!r}")
+    if fields == "all":
+        project.keypoint_model = _detector_keypoint_model(detector)
+    n = len(project.frames)
+    for i, frame in enumerate(project.frames):
         for cam in (CAM_LEFT, CAM_RIGHT):
             img = load_image(frame.images[cam])
             det = detector.detect(img)
-            frame.kp2d[cam] = det.xy
-            frame.scores[cam] = det.scores
+            if fields == "all":
+                keep = frame.corrected[cam] if respect_corrections \
+                    else np.zeros(NUM_JOINTS, bool)
+                frame.kp2d[cam] = np.where(keep[:, None], frame.kp2d[cam],
+                                           det.xy)
+                frame.scores[cam] = np.where(keep, frame.scores[cam],
+                                             det.scores)
             if det.head_xy is not None:
                 frame.head2d[cam] = det.head_xy
                 frame.head_scores[cam] = det.head_scores
+        if on_frame is not None:
+            on_frame(i + 1, n)
 
 
 # Epipolar tolerance as a fraction of the image DIAGONAL. A flat 30 px was

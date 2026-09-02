@@ -11,7 +11,9 @@ import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from pose3d.core.corrections import CorrectionStack
-from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
+from pose3d.core.project import (
+    CAM_LEFT, CAM_RIGHT, CAMERAS, PIPELINE_VERSION, ProjectData,
+)
 from pose3d.core.skeleton import Joint, NUM_JOINTS
 from pose3d.geometry.triangulate import reprojection_error, triangulate_one
 from pose3d.pipeline import CalibratedRig, bone_length_targets, fit_frame
@@ -51,6 +53,51 @@ class ProjectModel(QObject):
         self.current = 0
         self.auto_recalc = True
         self.stack = CorrectionStack({f.frame_id: f for f in project.frames})
+        # set by upgrade_pipeline() when a legacy project is recomputed on open
+        self.migration_note = ""
+        self._stored_fitted3d = None
+
+    # --- pipeline version migration ---
+    def upgrade_pipeline(self) -> str:
+        """Bring a project written by an older pipeline up to date, once.
+
+        The fix for the smoothing defect changes what the client sees the
+        moment they open the take they complained about, so it has to happen
+        without a button press — and it has to say, in real numbers, what
+        moved and offer the stored pose back. Nothing is written to disk: the
+        recompute lives in memory until the user saves.
+
+        Returns the sentence to show, or "" when nothing was done.
+        """
+        p = self.project
+        if not p.frames or p.pipeline_version >= PIPELINE_VERSION:
+            return ""
+        if self.rig is None:
+            p.pipeline_version = PIPELINE_VERSION
+            self.migration_note = _NO_RIG_NOTE
+            return self.migration_note
+        stored = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
+        self.recompute_all()
+        p.pipeline_version = PIPELINE_VERSION
+        self._stored_fitted3d = stored
+        now = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
+        self.migration_note = _recompute_note(stored, now)
+        return self.migration_note
+
+    def restore_stored_pose(self) -> bool:
+        """Put back the pose as the previous build had saved it (this session
+        only — nothing was overwritten on disk)."""
+        if self._stored_fitted3d is None:
+            return False
+        for f, pose in zip(self.project.frames, self._stored_fitted3d):
+            f.fitted3d = pose.copy()
+        self._stored_fitted3d = None
+        self.migration_note = ""
+        self.set_frame(self.current)
+        self.statusMessage.emit(
+            "Restored the pose stored by the previous build. Recalculate 3D "
+            "to go back to the corrected one.")
+        return True
 
     # --- whole-project recompute / detection / save ---
     def recompute_all(self) -> None:
@@ -80,7 +127,35 @@ class ProjectModel(QObject):
         detect_project(self.project, detector, load_image)
         self.recompute_all()
         self.statusMessage.emit(
-            f"Detection complete ({len(self.project.frames)} frames)")
+            f"Detection complete ({len(self.project.frames)} frames); "
+            f"hand-corrected points were kept")
+
+    def redetect_head(self, detector, load_image) -> None:
+        """Re-run the detector for the FACE keypoints only.
+
+        The migration path for a project made before face keypoints existed:
+        it gives the character's head something to be oriented by without
+        touching the body pose or a single hand correction.
+        """
+        if detector is None:
+            self.statusMessage.emit("No detector available in this build")
+            return
+        if self.rig is None:
+            self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
+            return
+        from pose3d.pipeline import detect_project
+        from pose3d.geometry.triangulate import triangulate_points
+        self.statusMessage.emit("Re-detecting face points…")
+        detect_project(self.project, detector, load_image, fields="head")
+        for f in self.project.frames:
+            f.head3d = triangulate_points(
+                f.head2d[CAM_LEFT], f.head2d[CAM_RIGHT],
+                self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
+                self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+        self.set_frame(self.current)
+        self.statusMessage.emit(
+            f"Face points re-detected on {len(self.project.frames)} frames; "
+            f"the body pose and every correction were left alone")
 
     def save(self) -> None:
         from pose3d.core.io_project import save_project
@@ -239,6 +314,45 @@ class ProjectModel(QObject):
         with warnings.catch_warnings():   # all-NaN joint -> quiet nanmean
             warnings.simplefilter("ignore", RuntimeWarning)
             return np.nanmean(np.stack(errs), axis=0)
+
+
+_NO_RIG_NOTE = (
+    "This project was made by an earlier build whose 3D lagged one frame "
+    "behind the keypoints. It has no calibration loaded, so the stored pose "
+    "has been left exactly as it was — load or re-estimate the calibration "
+    "and press Recalculate 3D to correct it.")
+
+
+def _recompute_note(stored: np.ndarray, now: np.ndarray) -> str:
+    """The recompute-on-open sentence, with this take's own numbers."""
+    d = np.linalg.norm(now - stored, axis=2)
+    d = d[np.isfinite(d)]
+    if not d.size:
+        return ""
+    med, mx = float(np.median(d)), float(d.max())
+    height = _body_height(now)
+    pct = ""
+    if np.isfinite(height) and height > 1e-9:
+        pct = (f" ({100.0 * med / height:.0f} % / {100.0 * mx / height:.0f} % "
+               f"of the figure's height)")
+    return (f"Recomputed with solver v{PIPELINE_VERSION}: each frame now "
+            f"follows its own keypoints; the previous build blended every "
+            f"frame with the one before it — the pose moved "
+            f"{1000.0 * med:.1f} mm median, {1000.0 * mx:.1f} mm max{pct}.")
+
+
+def _body_height(poses: np.ndarray) -> float:
+    """Median vertical extent of the de-tilted pose — the scale the client
+    actually perceives. Same definition the audit measured against."""
+    from pose3d.geometry.orient import de_tilt_matrix, sequence_up
+    up = sequence_up(poses)
+    if up is None:
+        return float("nan")
+    upright = poses @ de_tilt_matrix(up).T
+    spans = [float(p[v, 2].max() - p[v, 2].min())
+             for p, v in ((q, ~np.isnan(q).any(1)) for q in upright)
+             if v.sum() >= 2]
+    return float(np.median(spans)) if spans else float("nan")
 
 
 def _smoothing_alpha(smoothing: str, default: float = 0.6) -> float:

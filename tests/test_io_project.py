@@ -76,6 +76,50 @@ def test_correction_log(tmp_path):
     assert c.new_xy == (55.0, 690.0)
 
 
+# --- pipeline version stamp (how a fix reaches an existing take) ----------
+
+def test_version_stamp_round_trips(tmp_path):
+    """A project saved by this build reopens with no recompute."""
+    from pose3d.core.project import PIPELINE_VERSION
+
+    p = _make_project()
+    assert p.pipeline_version == PIPELINE_VERSION     # built in memory = current
+    save_project(p, tmp_path)
+
+    import json
+    doc = json.loads((tmp_path / "project.json").read_text())
+    assert doc["pipeline_version"] == PIPELINE_VERSION
+    assert doc["smoothing"] == "none"
+
+    q = load_project(tmp_path)
+    assert q.pipeline_version == PIPELINE_VERSION
+    assert q.smoothing == "none"
+    assert q.keypoint_model == "coco17"
+
+
+def test_legacy_project_without_version_loads_and_recomputes(tmp_path):
+    """A file written before the key existed came out of the causal-EMA build
+    and must be recomputed exactly once — so it loads as version 0, not as
+    current."""
+    import json
+    from pose3d.core.project import PIPELINE_VERSION
+
+    save_project(_make_project(), tmp_path)
+    doc = json.loads((tmp_path / "project.json").read_text())
+    for key in ("pipeline_version", "smoothing", "keypoint_model"):
+        doc.pop(key)
+    for fd in doc["frames"]:
+        fd.pop("filled")
+    (tmp_path / "project.json").write_text(json.dumps(doc))
+
+    q = load_project(tmp_path)
+
+    assert q.pipeline_version == 0 < PIPELINE_VERSION
+    assert q.smoothing == "none"                      # defaults, not a crash
+    assert q.keypoint_model == "coco17"
+    assert not q.frames[0].filled.any()
+    assert np.allclose(q.frames[0].pose3d[Joint.HEAD], [0.1, 1.7, 0.0])
+
 
 def test_filled_flags_round_trip(tmp_path):
     p = _make_project()

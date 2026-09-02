@@ -20,6 +20,13 @@ CAM_LEFT = "left"
 CAM_RIGHT = "right"
 CAMERAS = (CAM_LEFT, CAM_RIGHT)
 
+# Version of the reconstruction pipeline that produced a project's stored 3D.
+# 1 = the causal-EMA build (every frame blended with the one before it).
+# 2 = each frame is its own bone-fitted triangulation, with flagged gap fill.
+# Stamped into project.json; a file written before the key existed loads as 0,
+# which is what lets the app recompute a legacy take exactly once on open.
+PIPELINE_VERSION = 2
+
 
 def _nan_xy() -> np.ndarray:
     return np.full((NUM_JOINTS, 2), np.nan, dtype=float)
@@ -119,6 +126,9 @@ class ProjectData:
     # which detector layout the 2D came from; "coco17" derives NECK/PELVIS as
     # shoulder/hip midpoints, "halpe26" detects them natively.
     keypoint_model: str = "coco17"
+    # A project built in memory is by definition current; load_project
+    # overrides this with what the file says (0 for files predating the key).
+    pipeline_version: int = PIPELINE_VERSION
 
     def frame_ids(self) -> list[str]:
         return [f.frame_id for f in self.frames]
