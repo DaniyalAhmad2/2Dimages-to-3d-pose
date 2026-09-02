@@ -346,23 +346,36 @@ def reprojection(poses: np.ndarray, kp2d: dict[str, np.ndarray], rig,
 def gap_stats(project: ProjectData) -> dict:
     """Where the take has no 3D, and how it got that way.
 
-    `rejected` counts 2D observations that are absent from the stored project
-    (the cross-view gate NaNs them in place, so a dropped observation and one
-    the detector never found look the same afterwards).
+    Two distinct ways an observation can be absent, counted separately
+    because the responses to them are opposite — one is a detection to fix,
+    the other a calibration to fix:
+
+    * `rejected` — (cam, joint) observations the cross-view gate ruled
+      inconsistent with the other view (`Frame.rejected`). Since 6.1 the gate
+      is a MASK, so these points are still in `kp2d`, still drawn and still
+      draggable, and the count is re-derived on every recompute.
+    * `undetected` — (cam, joint) observations that are simply not there
+      (NaN in `kp2d`): the detector never produced them. This is what
+      `rejected` used to count, back when the gate wrote NaN over the
+      keypoint and the two were indistinguishable afterwards.
 
     `missing` is counted on `pose3d`, the measurement, so a gap-filled joint
     still counts as missing HERE — it is a hole the cameras left — while
     `filled` says how many of those holes the fit was nonetheless given a
     value for. The two are meant to be read together.
     """
-    missing, rejected, filled = [], 0, 0
+    missing, rejected, undetected, filled = [], 0, 0, 0
     for f in project.frames:
         p = np.asarray(f.pose3d, float).reshape(NUM_JOINTS, 3)
         for j in range(NUM_JOINTS):
             if np.isnan(p[j]).all():
                 missing.append((f.frame_id, JOINT_NAMES[j]))
         for c in CAMERAS:
-            rejected += int(np.isnan(np.asarray(f.kp2d[c], float)).any(1).sum())
+            undetected += int(
+                np.isnan(np.asarray(f.kp2d[c], float)).any(1).sum())
+            mask = f.rejected.get(c) if hasattr(f, "rejected") else None
+            if mask is not None:
+                rejected += int(np.count_nonzero(np.asarray(mask, bool)))
         flags = getattr(f, "filled", None)
         if flags is not None:
             filled += int(np.count_nonzero(flags))
@@ -372,6 +385,7 @@ def gap_stats(project: ProjectData) -> dict:
         "n_missing": len(missing),
         "missing_pct": 100.0 * len(missing) / total,
         "rejected": rejected,
+        "undetected": undetected,
         "filled": filled,
     }
 

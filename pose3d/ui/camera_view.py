@@ -291,25 +291,32 @@ class CameraView(QGraphicsView):
             detail = (f"accuracy {pct:.0f}% ({acc_label(pct)}) — "
                       f"{100.0 * err:.2f}% of the figure's height in this view")
 
-        tip = (f"<b>{name}</b><br>"
-               f"<span style='color:{RAG_COLORS[status].name()};'>{detail}</span>")
+        # The extra lines FIRST, because two of them change what the joint is —
+        # and the headline is coloured with the joint's final state. Built the
+        # other way round, an interpolated or hand-corrected joint drew an
+        # amber/blue dot while its tooltip's first line kept the accuracy
+        # band's colour, so the dot and the words disagreed about what it is.
+        more = []
         if self._delivered is not None and np.isfinite(self._delivered[j]):
-            tip += (f"<br><span style='color:#8a91a3;'>pose shown: "
-                    f"{100.0 * float(self._delivered[j]):.2f}% of height"
-                    f"</span>")
+            more.append(f"<span style='color:#8a91a3;'>pose shown: "
+                        f"{100.0 * float(self._delivered[j]):.2f}% of height"
+                        f"</span>")
         if self._scores is not None and np.isfinite(self._scores[j]):
-            tip += (f"<br><span style='color:#8a91a3;'>detector confidence "
-                    f"{100.0 * float(self._scores[j]):.0f}%</span>")
+            more.append(f"<span style='color:#8a91a3;'>detector confidence "
+                        f"{100.0 * float(self._scores[j]):.0f}%</span>")
         if self._filled is not None and self._filled[j]:
             status = "filled"
-            tip += (f"<br><span style='color:{RAG_COLORS['filled'].name()};'>"
-                    f"3D interpolated — this joint was missing for one frame"
-                    f"</span>")
+            more.append(f"<span style='color:{RAG_COLORS['filled'].name()};'>"
+                        f"3D interpolated — this joint was missing for one "
+                        f"frame</span>")
         if self._corrected is not None and self._corrected[j]:
             status = "corrected"
-            tip += (f"<br><span style='color:{RAG_COLORS['corrected'].name()};'>"
-                    f"corrected by hand</span>")
-        return status, tip
+            more.append(f"<span style='color:{RAG_COLORS['corrected'].name()};'>"
+                        f"corrected by hand</span>")
+
+        tip = (f"<b>{name}</b><br>"
+               f"<span style='color:{RAG_COLORS[status].name()};'>{detail}</span>")
+        return status, "<br>".join([tip, *more])
 
     def _on_moved_live(self, joint_id: int, pos: QPointF):
         # cheap live feedback during the drag: just redraw the bone lines

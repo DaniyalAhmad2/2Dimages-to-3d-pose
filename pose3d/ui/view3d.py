@@ -106,7 +106,10 @@ class View3D(gl.GLViewWidget):
         self._show_capture = False
         self._character = None          # lazily-loaded skinned character
         self._take = None               # the whole take, raw world poses
-        self._place = None              # (offset (3,), pelvis travel) in view space
+        # (offset (3,), pelvis travel) in view space; (None, 0.0) once the take
+        # has been measured and yielded no placement. None means "not measured
+        # yet" — see `_take_placement`, which caches both answers.
+        self._place = None
         self._framed = False
         self._vaxis = None
         self._vsign = 1.0
@@ -190,40 +193,63 @@ class View3D(gl.GLViewWidget):
         (None, 0.0) when the take is not known yet — a single `set_pose` with
         no `fit_subject` still draws, on the old per-frame rule.
 
+        A frame the character cannot be posed on (`PoseUnavailable`: no PELVIS
+        and no hip) contributes no seat and is SKIPPED, exactly as the export
+        skips it (`_character_document`'s `pose_bone_matrices` gives None for
+        that frame). It must not cost the take its placement: letting one such
+        frame abandon the take-wide rule sends the view back to per-frame
+        centring — the F13 preview defect Phase 3 fixed — with the export still
+        placing by the take, and no message anywhere.
+
+        A genuine fault (a missing rig asset, a corrupt .npz) is a different
+        thing and is reported through `characterError` like `_skin` does,
+        rather than silently degrading.
+
         Costs one posing pass per frame of the take, ONCE, cached until the
-        take or the orientation changes. The app's takes are photographed
-        poses (26 on the client's), so that is milliseconds.
+        take or the orientation changes — the fallback is cached too, so a take
+        that yields no placement is not re-posed on every frame change. The
+        app's takes are photographed poses (26 on the client's), so that is
+        milliseconds.
         """
         if self._place is not None:
             return self._place
         if self._take is None:
-            return None, 0.0
+            return None, 0.0            # no take yet: nothing to cache
         try:
             from pose3d.geometry.character import take_pelvis_ref
             ch = self._ensure_character()
             up = self._to_view(self._take)
             ref = take_pelvis_ref(up)
             if ref is None:
-                return None, 0.0
+                self._place = (None, 0.0)
+                return self._place
             seats, pelvis = [], []
             for pose in up:
                 valid = ~np.isnan(pose).any(1)
                 if not valid.any():
                     continue
                 vpose = np.where(valid[:, None], pose, np.nan)
-                verts, _faces, cj = ch.pose_and_joints(vpose, valid)
+                try:
+                    verts, _faces, cj = ch.pose_and_joints(vpose, valid)
+                except PoseUnavailable:
+                    continue            # no root to stand on: no seat either
                 if verts is None or not len(verts):
                     continue
                 seats.append(ground_datum(verts, cj, ch.ground_drop(vpose, valid)))
                 pelvis.append(take_pelvis_ref(pose[None]))
             if not seats:
-                return None, 0.0
+                self._place = (None, 0.0)
+                return self._place
             offset = np.array([ref[0], ref[1], float(min(seats))])
             pel = np.asarray([p for p in pelvis if p is not None], float)
             travel = float(np.linalg.norm(pel.max(0) - pel.min(0))) if len(pel) else 0.0
             self._place = (offset, travel)
-        except Exception:
-            return None, 0.0
+        except Exception as e:
+            self._report(f"The character could not be placed for this take "
+                         f"({type(e).__name__}: {e}) — the 3D view is centring "
+                         f"each frame on its own, so it no longer matches the "
+                         f"export.", "place")
+            self._place = (None, 0.0)
         return self._place
 
     def _to_view(self, pts):

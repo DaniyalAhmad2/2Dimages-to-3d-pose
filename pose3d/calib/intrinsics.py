@@ -203,6 +203,13 @@ def checkerboard_override(current: Intrinsics, images: list[np.ndarray],
     centre costs 19 px of epipolar error while the tags stay happy). The
     checkerboard capture also has to match the shot: lock autofocus, or the
     focal it measures is not the focal that took the images.
+
+    NOTHING CALLS THIS, and that is a decision rather than an oversight: it is
+    on the deferred register in docs/DECISIONS.md ("Wiring
+    `intrinsics.checkerboard_override` to a UI or CLI"). The function and its
+    gate are implemented and tested so the override exists the day a client
+    shoots a board; the capture screen that would invoke it is the work that
+    was not done.
     """
     if current is not None and current.source == "measured":
         return current

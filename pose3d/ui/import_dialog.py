@@ -211,13 +211,10 @@ class ImportDialog(QDialog):
             # keypoints (and anything else it learns to write) are not dropped
             # on the floor by a duplicate loop that only knew about kp2d
             det = self._ensure_detector()
-            project.detector = (
-                f"rtmpose-{det.mode}" + ("-feet" if det.feet else ""))
-            # what this detector's canonical HEAD point IS, so the retarget
-            # cannot correct a skull HEAD for the nose's forward offset.
-            # KeypointDetector declares the attribute, so a detector that
-            # forgets it cannot silently fall back to "nose".
-            project.head_source = det.head_source
+            # keypoint_model / head_source / detector are all written by
+            # detect_project from the detector itself: they are facts about
+            # the detection, and a caller that forgot head_source produced a
+            # halpe26 project posed under the nose convention.
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
             from pose3d.pipeline import detect_project

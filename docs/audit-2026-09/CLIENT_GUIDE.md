@@ -74,9 +74,10 @@ The updates make the tag-based path robust instead:
 
 - both branches of every tag's pose are scored across all frames, bent or ambiguous tags
   are rejected, and the calibration is written to a report you can read;
-- the focal length can be refined from the tags themselves across the whole take when
-  two or more tags are visible to a camera in most frames (on your take this recovered
-  the left phone's focal to within 0.2 % of the value implied by its metadata);
+- the focal length is **not** guessed differently per project: it is taken from the image
+  size and recorded as assumed, in the same report, because that is what measured best on
+  your take (the two views agree to 4.9 pixels on the body with it, and to 10.9 pixels
+  with the focal your phone's metadata implies);
 - the vertical direction is estimated from the cameras and the tag row, with its
   uncertainty shown;
 - the accuracy readouts will show numbers you can check with a ruler (camera separation,
@@ -84,8 +85,9 @@ The updates make the tag-based path robust instead:
   near zero.
 
 If you ever want the last few percent: the same four tags glued to one flat board, held
-at three or four tilts in front of each phone once (about 20 seconds per phone), gives
-the software a full lens model without a checkerboard. It is optional.
+at three or four tilts in front of each phone once (about 20 seconds per phone), gives a
+full lens model without a checkerboard. It is optional, and it is a one-time measurement
+we would run for you from those photographs — there is no button for it in the app.
 
 ## 6. What to expect after the fixes
 

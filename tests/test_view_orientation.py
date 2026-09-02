@@ -6,12 +6,11 @@ one — and the ground datum must sit still under the figure's ankle instead of
 sliding about under whichever mesh vertex is lowest.
 """
 import numpy as np
-import pytest
 
 from pose3d.core.skeleton import Joint
 from pose3d.ui.view3d import ground_datum, upright_matrix
 from tests.gates import needs_character
-from tests.test_retarget import fixture_poses
+from tests.test_retarget import fixture_head_source, fixture_poses
 
 
 def test_upright_matrix_is_rotation_for_all_axes():
@@ -58,12 +57,15 @@ def test_grounding_is_ankle_based():
     on this take): the whole scene translated against the fixed grid by 9.2 %
     of body height across 26 frames. Grounding a fixed drop below the posed
     ankle holds the datum still by construction.
+
+    Measured on the COMMITTED client take (tests/fixtures/client_take), so this
+    runs everywhere: reading the gitignored workspace copy made Phase 2's
+    ground-datum fix a gate that existed on one machine and skipped on every
+    other checkout.
     """
     from pose3d.geometry.character import Character
     poses = fixture_poses()
-    if poses is None:
-        pytest.skip("the client take is gitignored; not checked out here")
-    ch = Character()
+    ch = Character(head_source=fixture_head_source())
     ch.fit_to_subject(poses)
     height = float(np.median([_z_extent(p) for p in poses]))
 
@@ -90,18 +92,19 @@ def test_grounding_is_ankle_based():
     # measured 0.0000 % (9.2 % grounding on the lowest mesh vertex)
     assert np.ptp(over_grid) <= 0.5, "the ground datum still slides"
     # and it stands at the rig's own rest ankle height, 4.94 % of rig height,
-    # which is 5.32 % of this subject's: a drop left in RIG units instead of
+    # which is 4.91 % of this subject's: a drop left in RIG units instead of
     # pose units would put the figure hundreds of percent off the grid.
     assert 3.0 <= np.median(over_grid) <= 8.0
 
     # What a viewer actually sees, which the two assertions above cannot show.
     # The datum no longer tracks whichever vertex happens to be lowest: under
     # the old rule the mesh minimum sat exactly ON the grid every frame, and
-    # under this one a tilted sole dips below it (measured 3.62 % median).
+    # under this one a tilted sole dips below it (measured 2.55 % median).
     assert max(below_grid) > 1.0, \
         "the datum is back on the lowest mesh vertex"
     # ...but the dip is the accepted cost of an ankle datum with an unlevelled
-    # sole, not a licence to sink: measured 9.57 % of body height worst case.
+    # sole, not a licence to sink: measured 8.40 % of body height worst case
+    # (9.57 % on the COCO-17 workspace copy this used to read).
     # A drop mistakenly left in RIG units, or read off a fingertip on a rig
     # whose arms hang below its feet, buries the figure far deeper than this.
     assert max(below_grid) <= 11.0, \
@@ -258,3 +261,89 @@ def test_the_view_and_the_export_place_the_figure_the_same_way():
     resid = expected - seen * ch._scale
     assert np.abs(resid - resid.mean(0)).max() <= 1e-6 * ch.rig_h, \
         f"view and export disagree by {np.abs(resid - resid.mean(0)).max():.6f} rig units"
+
+
+@needs_character()
+def test_one_unposable_frame_does_not_cost_the_take_its_placement():
+    """A frame with no PELVIS and no hips must be SKIPPED, not fatal.
+
+    `Character.pose_and_joints` raises `PoseUnavailable` for such a frame, and
+    a blanket `except Exception` around the whole take turned that into "this
+    take has no placement" — which sends `set_pose` back to centring every
+    frame on its own valid joints (the F13 preview defect Phase 3 fixed) while
+    the export, which skips exactly the same frame and keeps the take-wide
+    rule, goes on placing by the take. The two then disagree with no message
+    anywhere. One frame in, everything else must be unchanged.
+    """
+    from pose3d.geometry.character import take_pelvis_ref
+    poses = _travelling_take()
+    healthy = _headless_view(poses.copy())._take_placement()
+
+    gappy = poses.copy()
+    for j in (Joint.PELVIS, Joint.LEFT_HIP, Joint.RIGHT_HIP):
+        gappy[2, int(j)] = np.nan            # no root to stand on, this frame
+    view = _headless_view(gappy)
+    place, travel = view._take_placement()
+    assert place is not None, "one unposable frame reverted the whole take"
+    # the same rule as the healthy take: the seat is the lowest sole over the
+    # frames that COULD be posed, and the missing frame is simply not one of
+    # them (its own pelvis is gone, so the horizontal reference moves with it)
+    assert np.allclose(place[:2], take_pelvis_ref(gappy)[:2])
+    assert np.isclose(place[2], healthy[0][2])
+    assert travel > 0.0
+
+    # and every frame that CAN be posed is still drawn through that one offset
+    for k, pose in enumerate(gappy):
+        if k == 2:
+            continue
+        view.set_pose(pose)
+        drawn, _valid = view.drawn["capture"]
+        assert np.allclose(drawn, pose - place, atol=1e-9), f"frame {k}"
+
+
+@needs_character()
+def test_a_take_with_no_placement_is_measured_once():
+    """The fallback is cached like the answer is.
+
+    The failure path used to return without storing anything, so a take that
+    yields no placement re-posed EVERY frame of the take on every frame
+    change — the one thing the cache exists to prevent.
+    """
+    poses = _travelling_take()
+    for j in (Joint.PELVIS, Joint.LEFT_HIP, Joint.RIGHT_HIP):
+        poses[:, int(j)] = np.nan            # no frame can be posed at all
+    view = _headless_view(poses)
+    calls = []
+    real = view._character.pose_and_joints
+
+    def counted(*a, **kw):
+        calls.append(1)
+        return real(*a, **kw)
+
+    view._character.pose_and_joints = counted
+    assert view._take_placement() == (None, 0.0)
+    n = len(calls)
+    assert view._take_placement() == (None, 0.0)
+    assert view._take_placement() == (None, 0.0)
+    assert len(calls) == n, "the whole take is re-posed on every frame"
+
+
+@needs_character()
+def test_a_real_character_fault_in_the_placement_is_reported():
+    """`PoseUnavailable` is normal and quiet; anything else is a fault.
+
+    A missing rig asset or a corrupt .npz used to land in the same blanket
+    catch as a hip-less frame and leave the view silently placing per frame.
+    """
+    poses = _travelling_take()
+    view = _headless_view(poses)
+    said = []
+    view._report = lambda msg, source="": said.append((msg, source))
+
+    def boom(*a, **kw):
+        raise RuntimeError("the character asset is a directory")
+
+    view._character.pose_and_joints = boom
+    assert view._take_placement() == (None, 0.0)
+    assert said and "RuntimeError" in said[0][0]
+    assert said[0][1] == "place"           # not withdrawn by a later good skin

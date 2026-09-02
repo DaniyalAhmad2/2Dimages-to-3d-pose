@@ -685,3 +685,21 @@ def test_a_take_that_cannot_be_measured_is_measured_once(qapp, tmp_path):
     # ...and invalidating the readouts lets it be tried again
     model.invalidate_readouts()
     assert model.quality() is not None
+
+
+def test_the_fixed_camera_is_silent_for_a_project_with_no_folder(qapp, capsys):
+    """A project that has not been saved anywhere has no calibration folder to
+    look in, and that is a normal state — the `FileNotFoundError` branch above
+    exists to keep it quiet. `Path(None)` raises TypeError instead, which the
+    generic handler printed as "the project's calibration could not be read":
+    a fault message for a project that is simply new.
+    """
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))          # no project_dir
+    assert win.model.project_dir is None
+    capsys.readouterr()
+    assert win._left_camera() is None
+    assert capsys.readouterr().out == ""

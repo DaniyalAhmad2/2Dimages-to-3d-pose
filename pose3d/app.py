@@ -90,33 +90,12 @@ def build_model(project_folder: str | None):
 def _check_extrinsics(cam: str, d) -> tuple:
     """(R, t) for one camera, or raise ValueError naming what is wrong.
 
-    A 2x2 `R` used to build a perfectly happy `CalibratedRig` and only explode
-    inside triangulation, frames later, as a numpy broadcast error nobody could
-    read. The shape and the orthonormality are cheap and they are the two ways
-    a hand-edited or externally produced extrinsics.json goes wrong.
+    THE implementation is `calib.rigio.check_extrinsics`, so the headless
+    loaders every non-UI caller uses reject the same file for the same reason;
+    this name is kept because the UI's own reason-reporting reads it.
     """
-    import numpy as np
-    try:
-        R = np.asarray(d["R"], float)
-        t = np.asarray(d["t"], float).ravel()
-    except (TypeError, ValueError) as e:
-        raise ValueError(f"{cam} camera: R/t are not numbers ({e})") from e
-    if R.shape != (3, 3):
-        raise ValueError(
-            f"{cam} camera: R is {'x'.join(str(n) for n in R.shape)}, "
-            f"it must be 3x3")
-    if t.shape != (3,):
-        raise ValueError(
-            f"{cam} camera: t has {t.size} numbers, it must have 3")
-    if not np.isfinite(R).all() or not np.isfinite(t).all():
-        raise ValueError(f"{cam} camera: R or t contains NaN/inf")
-    off = float(np.abs(R @ R.T - np.eye(3)).max())
-    if off > 1e-3 or float(np.linalg.det(R)) < 0.0:
-        raise ValueError(
-            f"{cam} camera: R is not a rotation (R·Rᵀ is {off:.3g} off the "
-            f"identity, det {float(np.linalg.det(R)):.3f}) — every "
-            f"reconstruction from it would be skewed")
-    return R, t
+    from pose3d.calib.rigio import check_extrinsics
+    return check_extrinsics(cam, d)
 
 
 def load_rig_with_reason(calib_dir: Path):

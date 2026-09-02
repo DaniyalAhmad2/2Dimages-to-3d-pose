@@ -42,6 +42,11 @@ FAILURE_MESSAGES = {
     "character_load_failed":
         "The character model could not be opened ({detail}).\n\n"
         "Nothing was written rather than exporting a different figure.",
+    "fill_flags_disagree":
+        "This take's gap-fill flags do not match its 3D ({detail}).\n\n"
+        "A joint is flagged as interpolated but has no position, so the "
+        "export cannot tell what it would be writing. Nothing was written. "
+        "Recalculate 3D and export again.",
     "no_posable_frame":
         "No frame of this take could be posed onto the character ({detail}).\n\n"
         "This normally means the 3D reconstruction is empty; the 3D preview "
@@ -261,11 +266,18 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
         valid = ~np.isnan(pose).any(1)
         if filled is not None:
             # `fill_gaps` gives every joint it flags a value, and pose3d itself
-            # stays raw — so a flag can never point at a hole here. Asserted
+            # stays raw — so a flag can never point at a hole here. Checked
             # rather than papered over with `valid |= filled & valid`, which
             # was a tautology dressed as a coupling.
-            assert not (np.asarray(filled[i], bool) & ~valid).any(), (
-                f"frame {i}: fill_gaps flagged a joint the pose does not have")
+            #
+            # NOT an `assert`: `python -O` strips those, so the guard would be
+            # absent from exactly the build a frozen bundle might use, and if
+            # it fired it aborted the export with an AssertionError instead of
+            # the typed reason this phase exists to give.
+            bad = np.flatnonzero(np.asarray(filled[i], bool) & ~valid)
+            if bad.size:
+                return None, ("fill_flags_disagree",
+                              f"frame {i}: joints {list(map(int, bad))}")
         if not valid.any():
             bone_frames.append(None); root_offsets.append(None); continue
         # the face keypoints take the same rotation, so the exported head is

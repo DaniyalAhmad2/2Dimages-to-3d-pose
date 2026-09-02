@@ -11,6 +11,7 @@ import numpy as np
 from pose3d.core.project import Frame, ProjectData
 from pose3d.core.skeleton import NUM_JOINTS, Joint
 from pose3d.pipeline import fill_gaps, fit_project
+from tests.gates import needs_character
 from tests.synth import sample_skeleton_3d
 
 WRIST = int(Joint.LEFT_WRIST)
@@ -309,3 +310,32 @@ def test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame():
     assert np.median(mid) < np.median(hold)
     assert np.percentile(mid, 90) < np.percentile(hold, 90)
     assert np.median(mid) <= 4.8, f"{np.median(mid):.2f} % of height"
+
+
+@needs_character()
+def test_a_fill_flag_pointing_at_a_hole_fails_the_export_by_name():
+    """The `filled ⊆ valid` invariant, enforced where `python -O` cannot
+    remove it.
+
+    It was a bare `assert`: stripped by -O, so the guard was absent from
+    exactly the build a frozen bundle might run, and when it did fire it
+    aborted the export with an AssertionError rather than the typed
+    `ExportResult.reason` this phase built to stop opaque export failures.
+    """
+    from pose3d.export.blender_export import (
+        FAILURE_MESSAGES, _character_document)
+
+    project = _sequence(n=4)
+    fit_project(project)
+    poses = np.stack([f.fitted3d for f in project.frames])
+    filled = np.stack([f.filled for f in project.frames])
+
+    poses[1, WRIST] = np.nan          # a flag with nothing behind it
+    filled[1, WRIST] = True
+
+    frag, reason = _character_document(poses, 0, None, filled=filled)
+    assert frag is None
+    assert reason[0] == "fill_flags_disagree"
+    assert "frame 1" in reason[1] and str(WRIST) in reason[1]
+    # ...and it is a reason the user is actually shown a sentence for
+    assert FAILURE_MESSAGES[reason[0]].format(detail=reason[1])

@@ -7,6 +7,7 @@ knee — while end effectors land within the fitted proportion mismatch. Two-bon
 IK remains as the occlusion fallback, recovering a limb from its end effector
 when the mid joint is missing.
 """
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -19,9 +20,9 @@ from tests.synth import rot_about as _rot_about, sample_skeleton_3d
 pytestmark = needs_character()
 
 
-def _ch():
+def _ch(**kw):
     from pose3d.geometry.character import Character
-    return Character()
+    return Character(**kw)
 
 
 def _lean(pose, deg):
@@ -45,22 +46,47 @@ def _poses():
     return out
 
 
-_FIXTURE = (Path(__file__).resolve().parents[1]
-            / "workspace" / "pose3d_projects" / "Imported_Session")
+#: The COMMITTED client take — the same 26 frames and the same calibration as
+#: `workspace/pose3d_projects/Imported_Session`, re-detected with the shipping
+#: detector (see tests/fixtures/regen_client_take.py). It is read instead of
+#: the workspace copy because that copy is gitignored client data: every gate
+#: that reached for it passed on this machine and SKIPPED everywhere else,
+#: which is a gate that does not exist.
+_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "client_take"
+
+
+@lru_cache(maxsize=1)
+def _fixture_take():
+    from pose3d.core.io_project import load_project
+    from pose3d.geometry.orient import de_tilt_matrix, sequence_up
+    p = load_project(_FIXTURE)
+    poses = np.stack([f.fitted3d for f in p.frames])
+    return poses @ de_tilt_matrix(sequence_up(poses)).T, p.head_source
 
 
 def fixture_poses():
-    """The client take's de-tilted poses, or None when it is not checked out.
+    """The client take's de-tilted delivered poses. Real capture noise.
 
-    The take is gitignored (it is client data), so anything that wants real
-    capture noise has to degrade to the synthetic poses instead of failing.
+    The fixture's stored `fitted3d` rather than a fresh reconstruction: what
+    the tests below measure is the RETARGET onto those poses, so the input is
+    held still on purpose and a pipeline regression is left to
+    tests/test_client_regression.py, which recomputes the same fixture and
+    measures it. (The two agree to 2e-5 of a body height today anyway.)
+
+    A copy per call — the take is cached, and a caller that leans a pose must
+    not lean it for everyone.
     """
-    if not (_FIXTURE / "project.json").is_file():
-        return None
-    from pose3d.core.io_project import load_project
-    from pose3d.geometry.orient import de_tilt_matrix, sequence_up
-    poses = np.stack([f.fitted3d for f in load_project(_FIXTURE).frames])
-    return poses @ de_tilt_matrix(sequence_up(poses)).T
+    return _fixture_take()[0].copy()
+
+
+def fixture_head_source():
+    """What the fixture's canonical HEAD point IS ("skull" today).
+
+    A `Character` measured against these poses must be told: the retarget
+    corrects a nose HEAD for its ~45 deg forward offset and must not correct a
+    skull one.
+    """
+    return _fixture_take()[1]
 
 
 def _height(p):
@@ -839,12 +865,14 @@ def test_roll_error_is_zero_where_the_bend_plane_exists():
     brief's max consecutive-frame change is a metric, not a gate, because the
     CAPTURED bend normal itself moves up to 55.7 deg between these discrete
     stop-motion poses.
+
+    Measured on the COMMITTED client take, so this runs everywhere: it used to
+    read the gitignored workspace copy and skip on every other checkout, i.e.
+    one of Phase 2's two headline angular fixes had no gate anywhere CI runs.
     """
     from pose3d.geometry.character import _BEND_REF, _ROLL_BEND_FULL_DEG
     poses = fixture_poses()
-    if poses is None:
-        pytest.skip("the client take is gitignored; not checked out here")
-    ch = _ch()
+    ch = _ch(head_source=fixture_head_source())
     ch.fit_to_subject(poses)
     worst = 0.0
     for role in _BEND_REF:
@@ -852,8 +880,9 @@ def test_roll_error_is_zero_where_the_bend_plane_exists():
         errs = [err for m in measured if m is not None
                 for bend, err in [m] if bend >= _ROLL_BEND_FULL_DEG]
         assert errs, f"{role}: the take never bends this limb past full weight"
-        # measured: worst median 7.1e-15 deg, worst max 2.6e-14 deg
+        # measured: worst median 6.6e-15 deg, worst max 2.9e-14 deg
         # over the eight bones — zero to floating point, not merely small
+        # (7.1e-15 / 2.6e-14 on the COCO-17 workspace copy this used to read)
         assert float(np.median(errs)) <= 1e-6, f"{role} median"
         assert float(np.max(errs)) <= 1e-6, f"{role} max"
         worst = max(worst, float(np.max(errs)))
@@ -937,8 +966,7 @@ def test_view_and_export_share_one_skinning():
     export path itself is covered by tests/test_export_smoke.py.
     """
     ch = _ch()
-    fx = fixture_poses()
-    for p in list(_poses()) + ([] if fx is None else list(fx)):
+    for p in list(_poses()) + list(fixture_poses()):
         valid = ~np.isnan(p).any(1)
         mats = ch.pose_bone_matrices(p, valid)
         skin = np.array([np.array(mats[n]) @ np.linalg.inv(ch.rest[b])
@@ -968,8 +996,7 @@ def test_the_exported_matrices_are_the_view_through_one_similarity():
     """
     from pose3d.geometry.character import take_pelvis_ref
     ch = _ch()
-    fx = fixture_poses()
-    poses = np.stack(list(_poses()) + ([] if fx is None else list(fx)))
+    poses = np.stack(list(_poses()) + list(fixture_poses()))
     ch.fit_to_subject(poses)
     ref = take_pelvis_ref(poses)
     assert ref is not None

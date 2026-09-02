@@ -118,8 +118,15 @@ class ProjectModel(QObject):
         The fix for the smoothing defect changes what the client sees the
         moment they open the take they complained about, so it has to happen
         without a button press — and it has to say, in real numbers, what
-        moved and offer the stored pose back. Nothing is written to disk: the
-        recompute lives in memory until the user saves.
+        moved and offer the stored pose back. The POSE lives in memory until
+        the user saves — nothing in the project file is touched here.
+
+        One exception, and it is in the calibration rather than the project:
+        the recompute re-decides the SENSE of the recorded vertical from the
+        poses that now exist, and `calib.resolve.finalize_world_up` rewrites
+        `calibration/extrinsics.json` (and `report.json`) when that sign
+        actually flips. A folder that cannot be written costs only that
+        re-check, reported as a note (`recompute_all`).
 
         Returns the sentence to show, or "" when nothing was done.
         """
@@ -177,6 +184,7 @@ class ProjectModel(QObject):
         from pose3d.pipeline import (
             fit_project, rejection_note, triangulate_project)
         self._bone_targets = None
+        write_note = ""
         dropped = triangulate_project(self.project, self.rig)
         smoothing = self.project.smoothing
         report = fit_project(self.project, smooth=smoothing != "none",
@@ -188,7 +196,22 @@ class ProjectModel(QObject):
             from pathlib import Path
 
             from pose3d.calib.resolve import finalize_world_up
-            finalize_world_up(self.project, Path(self.project_dir) / "calibration")
+            try:
+                finalize_world_up(self.project,
+                                  Path(self.project_dir) / "calibration")
+            except OSError as e:
+                # This is the ONE thing a recompute writes, and it writes into
+                # the project folder — which can be read-only (a copy off a
+                # share, an antivirus lock). Raising here would escape a Qt
+                # slot, or — through app.build_model -> upgrade_pipeline —
+                # abort startup before any window exists. The recompute itself
+                # is done and correct in memory; only the calibration's
+                # recorded SIGN stays as it was on disk, so say that and carry
+                # on rather than losing the recompute to a failed write.
+                write_note = (
+                    f"the recorded vertical could not be re-checked "
+                    f"(the calibration folder could not be written: "
+                    f"{type(e).__name__}: {e})")
         self.invalidate_readouts()
         self.set_frame(self.current)
         # pulled, not pushed: measuring the whole take is not free, and it is
@@ -196,7 +219,7 @@ class ProjectModel(QObject):
         self.qualityChanged.emit()
         msg = f"Recalculated 3D for {len(self.project.frames)} frames"
         notes = [n for n in (rejection_note(dropped, len(self.project.frames)),
-                             report.note()) if n]
+                             report.note(), write_note) if n]
         self.statusMessage.emit(" — ".join([msg, *notes]))
 
     # --- scale ---
@@ -591,27 +614,52 @@ class ProjectModel(QObject):
         return self._bone_targets
 
     def _refit_frame(self, f) -> None:
-        """The SAME fit the batch path runs, on one frame.
+        """The SAME fit the batch path runs, on one frame — and on the two
+        frames whose fill was interpolated FROM it.
 
         Including the gap fill: the batch path fits `fill_gaps`'s copy, so the
         live path fits this frame's copy from `fill_frame_gaps`, or a drag
         would silently drop a joint the recompute poses.
+
+        The neighbours matter because the fill reads them: if this drag makes
+        the cross-view gate reject a joint (or reinstates one), a neighbouring
+        frame that had interpolated that joint across a one-frame dropout is
+        now holding a fill the batch path would no longer invent — its
+        `filled` flag and its `fitted3d` would stay stale until the next whole
+        recompute, and the live and batch paths would disagree about which
+        joints were invented. `fill_frame_gaps` reads only the immediate
+        neighbours' `pose3d`, so re-running it either side is enough and it
+        cannot cascade further; the refit only runs when the flags actually
+        moved, so an ordinary drag costs one fit as before.
         """
-        targets = self._targets()
         # by identity: Frame is a dataclass full of arrays, so list.index()
         # would compare them elementwise and raise
         idx = next(i for i, g in enumerate(self.project.frames) if g is f)
-        infill = fill_frame_gaps(self.project, idx)
+        self._fit_one(idx)
+        for nb in (idx - 1, idx + 1):
+            if not 0 <= nb < len(self.project.frames):
+                continue
+            before = np.array(self.project.frames[nb].filled, copy=True)
+            # re-derives the neighbour's flags in place from today's pose3d
+            infill = fill_frame_gaps(self.project, nb)
+            if not np.array_equal(before, self.project.frames[nb].filled):
+                self._fit_one(nb, infill)
+
+    def _fit_one(self, idx: int, infill=None) -> None:
+        """Fit frame `idx` from its gap-filled input (computed if not given)."""
+        f = self.project.frames[idx]
+        if infill is None:
+            infill = fill_frame_gaps(self.project, idx)
         try:
-            f.fitted3d = fit_frame(infill, targets)
+            f.fitted3d = fit_frame(infill, self._targets())
         except Exception as e:
             # Qt swallows exceptions raised in a slot, so a fit that failed on
             # a sparse frame would make the drag look like it did nothing.
             # Showing the raw triangulation is better than showing nothing.
             f.fitted3d = np.asarray(infill, float)
             self.statusMessage.emit(
-                f"Bone fit failed on this frame ({type(e).__name__}); "
-                f"showing the raw triangulation")
+                f"Bone fit failed on frame {f.frame_id} "
+                f"({type(e).__name__}); showing the raw triangulation")
 
     # --- readouts ---
     def figure_h_px(self) -> dict[str, float]:

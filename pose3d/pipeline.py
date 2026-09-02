@@ -78,6 +78,16 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
     project made before face keypoints existed: its body pose and its
     corrections survive, and the head stops riding the neck.
 
+    All three facts about the detection — the layout (`keypoint_model`), the
+    head convention (`head_source`) and the model that produced it
+    (`detector`) — are recorded HERE, from the detector itself. They used to
+    be left to each caller: the provenance string was written out at three
+    call sites, and a caller that forgot `head_source` produced a halpe26
+    project posed under the nose convention, i.e. the ~45 deg nose offset
+    applied to a skull point — the one double-correction the whole
+    `head_source` mechanism exists to prevent. A caller that knows better may
+    still override them afterwards.
+
     Returns how many (frame, camera) face-keypoint sets the detector actually
     supplied — 0 when it returns none, which is the difference between "the
     face points were re-detected" and "this build's detector has no face
@@ -87,6 +97,9 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
         raise ValueError(f"fields must be 'all' or 'head', not {fields!r}")
     if fields == "all":
         project.keypoint_model = _detector_keypoint_model(detector)
+        project.head_source = getattr(detector, "head_source", None) or "nose"
+        project.detector = (getattr(detector, "provenance", None)
+                            or type(detector).__name__)
     heads = 0
     n = len(project.frames)
     for i, frame in enumerate(project.frames):
@@ -533,6 +546,13 @@ def fill_frame_gaps(project: ProjectData, index: int) -> np.ndarray:
     Same rule as the batch fill at the default `max_gap=1` — a joint missing
     here and present in both neighbours becomes their midpoint — so a drag and
     a recompute cannot disagree about which joints were invented.
+
+    The dependency runs BOTH ways: a drag that loses (or reinstates) an
+    observation also changes what the two NEIGHBOURING frames may interpolate,
+    since their fill reads this frame's `pose3d`. The live caller
+    (`ui.model.ProjectModel._refit_frame`) therefore re-runs this for
+    `index ± 1` as well and re-fits either of them whose flags moved. Reading
+    only the immediate neighbours is what bounds that: it cannot cascade.
     """
     frames = project.frames
     f = frames[index]

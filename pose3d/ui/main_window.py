@@ -611,6 +611,12 @@ class MainWindow(QMainWindow):
         """
         import json
         from pathlib import Path
+        if not self.model.project_dir:
+            # a project with no folder yet is a normal state, not a fault:
+            # Path(None) raises TypeError, which the handler below would
+            # report as "the calibration could not be read" — a fault message
+            # for a project that simply has not been saved anywhere.
+            return None
         try:
             calib = Path(self.model.project_dir) / "calibration"
             from pose3d.calib.intrinsics import Intrinsics

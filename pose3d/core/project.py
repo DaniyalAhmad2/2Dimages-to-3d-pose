@@ -148,8 +148,12 @@ class ProjectData:
     # video-rate tool: a stop-motion take has no temporal signal to filter, and
     # filtering it drags each frame toward its neighbours. Opt-in per project.
     smoothing: str = "none"
-    # which detector layout the 2D came from; "coco17" derives NECK/PELVIS as
-    # shoulder/hip midpoints, "halpe26" detects them natively.
+    # the detector LAYOUT the 2D came from ("coco17" / "halpe26"). Ask
+    # `skeleton.derived_joints(...)`, never this string, which joints are
+    # derived: Halpe-26 detects a neck and a hip, but the shipped
+    # HALPE26_POLICY does not take them, so under BOTH layouts NECK and PELVIS
+    # are 2D midpoints. Reading the name instead of the policy is exactly the
+    # bug that left a dragged shoulder with a 28 px stale NECK.
     keypoint_model: str = "coco17"
     # what the canonical HEAD point IS in this project: "nose" (COCO-17) or
     # "skull" (Halpe-26's own head point, on the skull axis). The retarget
@@ -164,7 +168,8 @@ class ProjectData:
     # the ArUco tag edge the extrinsics were scaled by (metres); None on a
     # project imported before it was recorded.
     marker_length: float | None = None
-    # which detector produced the 2D (provenance, e.g. "rtmpose-balanced");
+    # which detector produced the 2D (provenance, e.g. "rtmpose-balanced-feet"
+    # — `KeypointDetector.provenance`, written by pipeline.detect_project);
     # None on a project imported before it was recorded. keypoint_model above
     # is the LAYOUT the pipeline reasons about; this is the model's name.
     detector: str | None = None

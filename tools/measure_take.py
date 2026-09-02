@@ -118,8 +118,8 @@ def markdown(q: TakeQuality, title: str) -> str:
 
     g = q.gaps
     A(f"**Gaps** — {g['n_missing']} joints with no 3D "
-      f"({_f(g['missing_pct'], 1)} %), {g['rejected']} 2D observations absent, "
-      f"{g['filled']} filled")
+      f"({_f(g['missing_pct'], 1)} %), {g['rejected']} 2D observations "
+      f"gated out, {g['undetected']} never detected, {g['filled']} filled")
     if g["missing"]:
         A("")
         A(", ".join(f"{fid} {jname}" for fid, jname in g["missing"][:20]))

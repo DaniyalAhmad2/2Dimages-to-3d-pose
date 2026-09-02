@@ -109,6 +109,13 @@ class RTMPoseDetector(KeypointDetector):
         self.mode = mode
         self.device = device
 
+    @property
+    def provenance(self) -> str:
+        """e.g. "rtmpose-balanced-feet" — the model and the variant that
+        produced the 2D. Written once, by `pipeline.detect_project`; it was
+        spelled out at three call sites before that."""
+        return f"rtmpose-{self.mode}" + ("-feet" if self.feet else "")
+
     def detect(self, image_bgr: np.ndarray) -> Detection:
         keypoints, scores = self._model(image_bgr)   # (N,K,2), (N,K)
         keypoints = np.asarray(keypoints, float)

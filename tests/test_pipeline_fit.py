@@ -486,3 +486,109 @@ def test_redetect_face_points_says_nothing_happened_when_it_did_not():
     for f in data.frames:
         for cam in CAMERAS:
             assert np.isnan(f.head2d[cam]).all()
+
+
+def test_a_recompute_survives_a_calibration_folder_it_cannot_write(
+        tmp_path, monkeypatch):
+    """A recompute must not lose the take to a failed write.
+
+    `recompute_all` re-decides the SENSE of the recorded vertical from the
+    poses it has just computed, and that step REWRITES calibration/*.json.
+    A project folder can be read-only (a copy off a share, an antivirus lock),
+    and the write then raises out of a Qt slot — or, via
+    `app.build_model` -> `upgrade_pipeline`, out of application startup before
+    any window exists. The recompute itself is finished and correct in memory
+    by then, so the only honest outcome is to keep it and say what was skipped.
+    """
+    import pose3d.calib.resolve as resolve
+
+    data, rig = _take(n=3)
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    said = []
+    model.statusMessage.connect(said.append)
+
+    def denied(project, calib_dir):
+        raise PermissionError(f"[Errno 13] Permission denied: {calib_dir}")
+
+    monkeypatch.setattr(resolve, "finalize_world_up", denied)
+
+    model.recompute_all()                       # must not raise
+
+    for f in data.frames:                       # ...and the pose is there
+        assert np.isfinite(f.fitted3d).any()
+    assert "Recalculated 3D" in said[-1]
+    assert "recorded vertical could not be re-checked" in said[-1]
+    assert "Permission denied" in said[-1]
+
+
+def test_a_drag_that_loses_an_observation_withdraws_a_NEIGHBOUR_s_fill():
+    """The last gap in "a drag and a recompute cannot disagree".
+
+    The fill reads the two neighbouring frames, so the dependency runs both
+    ways: a drag that makes the cross-view gate reject a joint here also
+    invalidates a neighbouring frame that had interpolated that joint ACROSS
+    this one. The live path re-derived the fill for the dragged frame only, so
+    the neighbour kept its `filled` flag and its interpolated `fitted3d` until
+    the next whole recompute — and until then the app and the export disagreed
+    with the batch path about which joints were invented.
+    """
+    J = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5)
+
+    # frame 2's LEFT wrist detected on its own elbow: the gate's own example.
+    # Written into kp2d (not through set_joint_2d), which is what a detector
+    # does — so the joint is gated, has no 3D, and is filled from 1 and 3.
+    f2 = data.frames[2]
+    f2.kp2d[CAM_LEFT][J] = f2.kp2d[CAM_LEFT][int(Joint.LEFT_ELBOW)]
+    f2.scores[CAM_LEFT][J] = 0.3
+
+    model = ProjectModel(data, rig)
+    model.recompute_all()
+    assert np.isnan(f2.pose3d[J]).all() and f2.filled[J], \
+        "the setup needs frame 2's wrist gated out and filled"
+
+    # now drag frame 3's wrist far enough that the two views cannot both be
+    # right: the hand-placed view wins, the other is gated, and frame 3 loses
+    # the observation frame 2's fill was interpolated FROM.
+    model.set_frame(3)
+    f3 = data.frames[3]
+    x, y = f3.kp2d[CAM_LEFT][J]
+    model.set_joint_2d(CAM_LEFT, J, float(x) + 250.0, float(y) + 250.0)
+    assert np.isnan(f3.pose3d[J]).all(), "the drag did not lose the pair"
+
+    # the neighbour's fill is gone, not merely stale
+    assert not f2.filled[J], "a neighbour kept a fill it can no longer make"
+    assert np.isnan(f2.fitted3d[J]).all(), \
+        "the neighbour still shows the interpolated wrist"
+
+    # ...and the whole take agrees with what the batch path would say
+    live_filled = np.stack([f.filled.copy() for f in data.frames])
+    live_fitted = np.stack([f.fitted3d.copy() for f in data.frames])
+    model.recompute_all()
+    assert np.array_equal(
+        live_filled, np.stack([f.filled for f in data.frames]))
+    batch_fitted = np.stack([f.fitted3d for f in data.frames])
+    assert np.allclose(live_fitted, batch_fitted, equal_nan=True, atol=1e-9)
+
+
+def test_an_ordinary_drag_does_not_refit_the_neighbours():
+    """The neighbour refit is conditional on the fill flags actually moving:
+    a drag that changes no dropout must still cost exactly one fit."""
+    data, rig = _take(n=5)
+    model = ProjectModel(data, rig)
+    model.recompute_all()
+
+    fits = []
+    real = model._fit_one
+
+    def counted(idx, infill=None):
+        fits.append(idx)
+        return real(idx, infill)
+
+    model._fit_one = counted
+    model.set_frame(2)
+    f = data.frames[2]
+    j = int(Joint.LEFT_KNEE)
+    x, y = f.kp2d[CAM_LEFT][j]
+    model.set_joint_2d(CAM_LEFT, j, float(x) + 1.0, float(y) + 1.0)
+    assert fits == [2]

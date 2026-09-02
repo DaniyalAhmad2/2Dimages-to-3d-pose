@@ -17,7 +17,8 @@ plus the rulings made during implementation. Measurements are on the client take
 | Weighted DLT (F37) | unmeasured | needs a probe; the right camera contributes half the angular resolution |
 | Temporal roll smoothing across frames | would suppress roll pops between poses | rejected for stop-motion: consecutive poses are genuinely different (the captured bend normal itself moves up to 55.7°); smoothing references would re-introduce the cross-pose blending the EMA removal fixed |
 | Progress dialog for recompute-on-open | a long legacy take recomputes synchronously before the window shows | UI work; the recompute is one-time per project |
-| Consolidate `calib.rigio.load_rig` with `app.load_rig_with_reason` | one loader | small refactor; both exist because the headless callers must not import PySide6 |
+| Wiring `intrinsics.checkerboard_override` to a UI or CLI | distortion and a non-central principal point — the only two intrinsics the scene tags can never recover (k1 = 0.03 moves a tag corner 10.9 px but the subject 0.27 px; a principal point 200 px off centre costs 19 px of epipolar error) | nothing invokes it, deliberately: the function and its `Intrinsics.source` gate are implemented and tested, and client question 5's default answer is "an unused override". A capture screen is the work; until a client shoots a board we would run the calibration for them from the photographs (CLIENT_GUIDE §5). This row exists so the next reader can tell it from an oversight. |
+| Consolidate `calib.rigio.load_rig` with `app.load_rig_with_reason` | one loader | small refactor; both exist because the headless callers must not import PySide6. The VALIDATION is now shared (`calib.rigio.check_extrinsics`), so the two loaders can no longer disagree about which files are usable; what is left is the reason-reporting. |
 
 ## Do not re-open (bounded by the audit)
 

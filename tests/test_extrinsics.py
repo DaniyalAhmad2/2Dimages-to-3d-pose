@@ -295,3 +295,74 @@ def test_the_report_says_what_settled_the_sense_of_the_vertical():
                                       d["marker_length_m"], d["dictionary"])
     assert sol.ok
     assert sol.report["world_up_sign_source"] == SIGN_FROM_CAMERA_UP
+
+
+# --- one validation for the app loader and the headless one ----------------
+
+def _calibration_folder(folder, mangle=None):
+    """A minimal, well-formed calibration folder, optionally mangled."""
+    from pose3d.calib.intrinsics import Intrinsics
+
+    calib = Path(folder) / "calibration"
+    calib.mkdir(parents=True, exist_ok=True)
+    K = np.array([[1000.0, 0, 640.0], [0, 1000.0, 360.0], [0, 0, 1.0]])
+    for name in ("left_intrinsics.json", "right_intrinsics.json"):
+        Intrinsics(K=K, dist=np.zeros((1, 5)),
+                   image_size=(1280, 720)).save(calib / name)
+    doc = {"left": {"R": np.eye(3).tolist(), "t": [0.0, 0.0, 0.0]},
+           "right": {"R": np.eye(3).tolist(), "t": [0.12, 0.0, 0.0]}}
+    if mangle is not None:
+        mangle(doc)
+    (calib / "extrinsics.json").write_text(json.dumps(doc))
+    return calib
+
+
+def test_the_headless_loader_refuses_a_malformed_rig_by_name(tmp_path):
+    """`app.load_rig_with_reason` gained this validation because a 2x2 `R`
+    used to explode inside triangulation as an unreadable numpy broadcast
+    error. The headless loader every non-UI caller uses (`quality.load_rig`,
+    tools/measure_take.py, the tests) had the old behaviour, so the same file
+    failed in a sentence in the app and unreadably in the CLI. One
+    implementation, `calib.rigio.check_extrinsics`, for both.
+    """
+    import pytest
+
+    from pose3d.app import _check_extrinsics
+    from pose3d.calib.rigio import check_extrinsics, load_rig, load_rig_or_none
+
+    # the app's name for it IS the headless one: same verdict, same sentence
+    d = {"R": [[1.0, 0.0], [0.0, 1.0]], "t": [0.0, 0.0, 0.0]}
+    with pytest.raises(ValueError) as ui:
+        _check_extrinsics("left", d)
+    with pytest.raises(ValueError) as headless:
+        check_extrinsics("left", d)
+    assert str(ui.value) == str(headless.value)
+
+    good = _calibration_folder(tmp_path / "good")
+    assert load_rig(good) is not None
+
+    def flatten(doc):
+        doc["right"]["R"] = [[1.0, 0.0], [0.0, 1.0]]
+
+    bad = _calibration_folder(tmp_path / "bad_shape", flatten)
+    with pytest.raises(ValueError) as e:
+        load_rig(bad)
+    assert "right" in str(e.value) and "3x3" in str(e.value)
+    # ...and the forgiving wrapper degrades to "no calibration", not to a rig
+    # that explodes on the first triangulation
+    assert load_rig_or_none(bad) is None
+
+    def shear(doc):
+        R = np.eye(3)
+        R[0] *= 1.4
+        doc["left"]["R"] = R.tolist()
+
+    skew = _calibration_folder(tmp_path / "bad_rotation", shear)
+    with pytest.raises(ValueError) as e:
+        load_rig(skew)
+    assert "not a rotation" in str(e.value)
+
+    # the app's own loader turns the SAME exception into the SAME sentence
+    from pose3d.app import load_rig_with_reason
+    rig, reason = load_rig_with_reason(skew)
+    assert rig is None and "not a rotation" in reason

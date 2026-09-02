@@ -511,3 +511,38 @@ def test_a_joint_corrected_in_both_views_is_not_painted_rejected():
         assert states[c][j] != STATE_REJECTED, (
             "a joint that IS triangulated cannot be painted 'not triangulated'")
         assert states[c][j] == "ok"
+
+
+def _headline_color(tip: str) -> str:
+    """The colour of the tooltip's FIRST line — the one under the joint name."""
+    import re
+    m = re.search(r"<span style='color:(#[0-9a-fA-F]{6});'>", tip)
+    assert m, tip
+    return m.group(1)
+
+
+def test_the_tooltip_headline_is_coloured_by_what_the_joint_ENDS_UP_being(qapp):
+    """The dot and its tooltip must agree about what the joint is.
+
+    The headline was coloured with the accuracy band before the state was
+    overridden to "filled" or "corrected", so an interpolated joint drew an
+    amber dot over a tooltip whose first line was still green.
+    """
+    p = _panel(qapp)
+    xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
+    filled = np.zeros(NUM_JOINTS, bool); filled[3] = True
+    corrected = np.zeros(NUM_JOINTS, bool); corrected[4] = True
+    p.view.set_pose(xy, np.full(NUM_JOINTS, 0.9), corrected, filled=filled)
+    p.set_accuracy(np.full(NUM_JOINTS, 0.001))       # everything else: green
+
+    assert _headline_color(p.view._joints[3].toolTip()) \
+        == RAG_COLORS["filled"].name()
+    assert _headline_color(p.view._joints[4].toolTip()) \
+        == RAG_COLORS["corrected"].name()
+    # ...and an ordinary joint still gets its accuracy band
+    assert _headline_color(p.view._joints[5].toolTip()) \
+        == RAG_COLORS["green"].name()
+    # every line the tooltip used to carry is still there
+    assert "interpolated" in p.view._joints[3].toolTip()
+    assert "corrected by hand" in p.view._joints[4].toolTip()
+    assert "confidence" in p.view._joints[5].toolTip().lower()

@@ -134,8 +134,8 @@ def _detect(project_dir: Path, feet: bool, npz: Path,
 
         from pose3d.core.skeleton import map_halpe26
         det._map = partial(map_halpe26, **policy)
-    project.detector = f"rtmpose-{det.mode}" + ("-feet" if det.feet else "")
-    project.head_source = det.head_source
+    # detector / head_source / keypoint_model: written by detect_project,
+    # inside run_full, from the detector itself
     t0 = time.time()
     report = run_full(project, det, load_rig(project_dir / "calibration"),
                       lambda p: cv2.imread(str(p)))

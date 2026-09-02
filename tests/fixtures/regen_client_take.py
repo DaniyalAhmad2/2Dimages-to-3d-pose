@@ -155,10 +155,10 @@ def redetect(source: Path, doc: dict) -> dict:
     # (detect.rtmpose.USE_HALPE26). Pinning it here would re-baseline the
     # regression net onto a layout the app does not detect with.
     det = RTMPoseDetector(mode="balanced", device="cpu")
-    project.detector = f"rtmpose-{det.mode}" + ("-feet" if det.feet else "")
-    project.head_source = det.head_source
+    # detector / head_source / keypoint_model are written by detect_project
+    # (inside run_full) from the detector itself
     print(f"  detecting {len(project.frames)} frames x {len(CAMERAS)} cameras "
-          f"with {project.detector} ({project.head_source} HEAD)…", flush=True)
+          f"with {det.provenance} ({det.head_source} HEAD)…", flush=True)
     report = run_full(project, det, load_rig(source / "calibration"),
                       lambda p: cv2.imread(str(p)))
     print(f"  {report.note() or 'fit clean'}")

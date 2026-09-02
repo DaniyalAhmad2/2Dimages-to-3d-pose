@@ -175,6 +175,12 @@ def test_an_interpolated_joint_is_not_counted_as_a_measurement(quality,
     assert quality.gaps["n_missing"] == 2
     assert quality.gaps["filled"] == 2
     assert set(map(tuple, quality.gaps["missing"])) == GATED_OUT
+    # ...and the two counts say WHICH kind of absence this is, which is the
+    # difference between "fix the detection" and "fix the calibration". The
+    # gate is a mask now, so `rejected` reads it off `Frame.rejected` — while
+    # it counted NaN in `kp2d` it read 0 here, on a take with two gated pairs.
+    assert quality.gaps["rejected"] == 2
+    assert quality.gaps["undetected"] == 0
     for f in delivered.frames:
         if f.filled.any():
             assert np.isnan(f.pose3d[f.filled]).all()

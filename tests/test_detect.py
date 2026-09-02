@@ -140,3 +140,78 @@ def test_detect_project_reports_how_many_face_point_sets_it_wrote():
     assert detect_project(q, _NoFace(), lambda path: blank, fields="head") == 0
     for c in CAMERAS:
         assert np.isnan(q.frames[0].head2d[c]).all()
+
+
+# --- provenance: three facts about one detection, written in one place -----
+
+def test_detect_project_records_the_detection_it_ran():
+    """`keypoint_model`, `head_source` and `detector` all come from the
+    detector, inside `detect_project`.
+
+    They are three facts about the same detection, and leaving them to the
+    caller meant the provenance string was spelled out at three call sites
+    and `head_source` could simply be forgotten — which produces a halpe26
+    project posed under the nose convention, i.e. the ~45 deg nose offset
+    applied to a skull point. That double correction is the one thing the
+    whole `head_source` mechanism exists to prevent.
+    """
+    from pose3d.detect.base import KeypointDetector
+    from pose3d.pipeline import detect_project
+
+    class _Skull(KeypointDetector):
+        keypoint_model = "halpe26"
+        head_source = "skull"
+
+        @property
+        def provenance(self):
+            return "rtmpose-balanced-feet"
+
+        def detect(self, image_bgr):
+            return Detection(xy=np.zeros((NUM_JOINTS, 2)),
+                             scores=np.full(NUM_JOINTS, 0.9))
+
+    p = _one_frame_project()
+    assert (p.keypoint_model, p.head_source, p.detector) \
+        == ("coco17", "nose", None)        # the defaults it must overwrite
+
+    detect_project(p, _Skull(), lambda path: np.zeros((4, 4, 3), np.uint8))
+
+    assert p.keypoint_model == "halpe26"
+    assert p.head_source == "skull"
+    assert p.detector == "rtmpose-balanced-feet"
+
+
+def test_a_detector_that_says_nothing_gets_the_safe_defaults():
+    """"nose" and the class name: a detector predating either attribute must
+    not have its project silently claim a skull HEAD."""
+    from pose3d.pipeline import detect_project
+
+    p = _one_frame_project()
+    detect_project(p, _HeadDetector(), lambda path: np.zeros((4, 4, 3), np.uint8))
+    assert p.head_source == "nose"
+    assert p.detector == "_HeadDetector"
+
+
+def test_a_head_only_redetect_leaves_the_provenance_alone():
+    """`fields="head"` re-detects the FACE points of an existing project; the
+    body 2D, and therefore the layout and head convention it was detected
+    under, are not this detector's work and must not be re-stamped with it."""
+    from pose3d.pipeline import detect_project
+
+    p = _one_frame_project()
+    p.keypoint_model, p.head_source, p.detector = "halpe26", "skull", "old"
+    detect_project(p, _HeadDetector(), lambda path: np.zeros((4, 4, 3), np.uint8),
+                   fields="head")
+    assert (p.keypoint_model, p.head_source, p.detector) \
+        == ("halpe26", "skull", "old")
+
+
+def test_the_rtmpose_provenance_names_the_variant():
+    """The string that used to be written out at three call sites."""
+    from pose3d.detect.rtmpose import RTMPoseDetector
+
+    det = RTMPoseDetector.__new__(RTMPoseDetector)   # no weights, no rtmlib
+    det.mode, det.feet = "balanced", True
+    assert det.provenance == "rtmpose-balanced-feet"
+    det.feet = False
+    assert det.provenance == "rtmpose-balanced"

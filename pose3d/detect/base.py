@@ -57,3 +57,17 @@ class KeypointDetector(ABC):
     @property
     def name(self) -> str:
         return type(self).__name__
+
+    @property
+    def provenance(self) -> str:
+        """What produced the 2D, for `ProjectData.detector` to record.
+
+        Part of the interface for the same reason `head_source` is: it is a
+        fact about the detection, so `pipeline.detect_project` reads it off the
+        detector rather than leaving each caller to spell out the model's
+        variant string and one of them to forget. Not the layout
+        (`keypoint_model`) and not the head convention (`head_source`) — a
+        name a human reading the project file later can recognise. A detector
+        with modes or weights overrides it.
+        """
+        return self.name
