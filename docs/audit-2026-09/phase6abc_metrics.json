@@ -67,6 +67,17 @@
    "unit": "mm",
    "test": "test_bonefit.py::test_fallback_lengths_scale_to_the_subject",
    "note": "the extra 5 mm over the held-gate number is 6.2, not 6.3: losing 26 pairs narrows the gate 29.449 -> 28.439 px, which rejects two pairs of this take's own tail (max 29.384 px) and gap-fills the two joints they carried. p99 1.737 mm, median 0.0412 mm"
+  },
+  {
+   "gate": "the 2D dot never contradicts the gate's own verdict",
+   "key": "joint_states_agrees_with_the_mask",
+   "rule": "joint_states infers 'rejected' from pipeline.cross_view_rejection - THE function that writes Frame.rejected - so a pair the gate deliberately KEEPS (both views hand-corrected) is never painted 'was not triangulated'",
+   "baseline": "a joint corrected in both views read 'rejected' on every recompute, forever, while its 3D fed the fit, the 3D view and the export",
+   "measured": "ok",
+   "pass": true,
+   "unit": "state",
+   "test": "test_camera_view_accuracy.py::test_a_joint_corrected_in_both_views_is_not_painted_rejected",
+   "note": "the inference is a prediction of the next recompute's mask; it was half the rule (cross_view_verdict), and the half it was missing was the one that protects the user's own corrections"
   }
  ],
  "reported": {

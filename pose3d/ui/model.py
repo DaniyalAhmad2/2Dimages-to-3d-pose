@@ -18,7 +18,7 @@ from pose3d.core.skeleton import Joint, NUM_JOINTS
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
-    CalibratedRig, bone_length_targets, cross_view_verdict, fill_frame_gaps,
+    CalibratedRig, bone_length_targets, cross_view_rejection, fill_frame_gaps,
     fit_frame, gated_kp2d, per_image_allowances, revalidate_joint,
 )
 
@@ -705,11 +705,13 @@ class ProjectModel(QObject):
         facts and used to be drawn the same. A rejection is now a flag the
         gate wrote (`Frame.rejected`, re-derived on every recompute), so this
         reports what actually happened rather than inferring it. It ALSO
-        rejects a pair that still disagrees beyond the gate but carries no
-        flag — the same verdict the next recompute will record, from the same
-        `pipeline.cross_view_verdict` — because between a hand edit and a
+        rejects a pair the gate would refuse but carries no flag yet — the
+        same verdict the next recompute will record, from the same
+        `pipeline.cross_view_rejection` — because between a hand edit and a
         recompute the mask is stale for whatever the edit touched, and a joint
-        may still be holding 3D built from a point that has since moved.
+        may still be holding 3D built from a point that has since moved. It
+        is that ONE function and not a paraphrase of it, so the dot cannot
+        call a joint rejected that the gate has decided to keep.
 
         A rejected state carries the numbers (`RejectedState.px` / `.gate`) so
         the tooltip can name them.
@@ -731,14 +733,15 @@ class ProjectModel(QObject):
             # value the old point produced, and the joint read OK right up to
             # the recompute that refused it. 15 verdicts per frame change is
             # under a millisecond.
-            # The WHOLE verdict, not half of it: this used to re-check the
-            # Sampson distance alone, so an unflagged pair that fails only on
-            # the per-image half — the half 6.2 added — read as OK until the
-            # next recompute. `cross_view_verdict` is the one the gate uses.
-            e, bad = cross_view_verdict(f.kp2d[CAM_LEFT][j],
-                                        f.kp2d[CAM_RIGHT][j], self.rig, F,
-                                        thr, allow)
-            if any(flagged.values()) or bad:
+            # The WHOLE rule, not part of it: `cross_view_rejection` is the
+            # function that writes the mask, asked without letting it write.
+            # Checking the Sampson distance alone missed the per-image half
+            # 6.2 added; checking `cross_view_verdict` alone missed the other
+            # end of the rule, that a pair corrected in BOTH views is kept —
+            # so the joints the user had already fixed by hand were painted
+            # "not triangulated" while their 3D sat in the export.
+            e, loser = cross_view_rejection(f, j, self.rig, F, thr, allow)
+            if any(flagged.values()) or loser is not None:
                 state = RejectedState(e, thr)
             elif np.isnan(f.pose3d[j]).any():
                 state = STATE_NOT_MEASURED

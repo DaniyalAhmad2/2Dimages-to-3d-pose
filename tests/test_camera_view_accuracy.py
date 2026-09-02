@@ -468,3 +468,46 @@ def test_an_unflagged_per_image_failure_still_reads_as_rejected():
 
     assert not f.rejected[CAM_LEFT][j] and not f.rejected[CAM_RIGHT][j]
     assert m.joint_states(0)[CAM_RIGHT][j] == STATE_REJECTED
+
+
+def test_a_joint_corrected_in_both_views_is_not_painted_rejected():
+    """The dot must not call a joint rejected that the gate deliberately kept.
+
+    `_judge`'s last rule is that a pair whose BOTH views were placed by hand
+    is kept however far apart they look — the user has overruled the gate, and
+    the joint is triangulated, fitted and exported. `joint_states` inferred
+    its verdict from `cross_view_verdict` alone, which is only the first half
+    of that rule, so exactly those joints came back purple with a tooltip
+    saying they "were not triangulated" — permanently, on the points the user
+    had already fixed by hand, while their 3D was in the export. The
+    inference now asks the question the mask answers
+    (`pipeline.cross_view_rejection`: which view WOULD be flagged), so the two
+    cannot disagree about a joint they are both looking at.
+    """
+    from pose3d.core.skeleton import Joint
+
+    project = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    m = ProjectModel(project, rig)
+    m.recompute_all()
+    f = m.frame()
+
+    # hand-place BOTH views of the ankle, the left one onto the knee — a
+    # disagreement far past any gate, made of two corrected points.
+    j = int(Joint.LEFT_ANKLE)
+    knee = f.kp2d[CAM_LEFT][int(Joint.LEFT_KNEE)]
+    m.set_joint_2d(CAM_LEFT, j, float(knee[0]), float(knee[1]))
+    rx, ry = f.kp2d[CAM_RIGHT][j]
+    m.set_joint_2d(CAM_RIGHT, j, float(rx), float(ry))
+    assert f.corrected[CAM_LEFT][j] and f.corrected[CAM_RIGHT][j]
+
+    m.recompute_all()
+    assert not f.rejected[CAM_LEFT][j] and not f.rejected[CAM_RIGHT][j], (
+        "the gate keeps a pair corrected in both views")
+    assert np.isfinite(f.pose3d[j]).all(), "...and triangulates it"
+
+    states = m.joint_states(0)
+    for c in CAMERAS:
+        assert states[c][j] != STATE_REJECTED, (
+            "a joint that IS triangulated cannot be painted 'not triangulated'")
+        assert states[c][j] == "ok"

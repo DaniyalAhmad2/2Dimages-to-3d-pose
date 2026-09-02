@@ -236,14 +236,15 @@ def cross_view_verdict(pt_left, pt_right, rig: CalibratedRig, F,
     d_R > 35.8 px when its measured maximum is 33.8 — strictly more permissive
     than the rule it replaces, which is the opposite of the intent.
 
-    One function because three callers ask the same question and a fourth
-    reports on the answer: `validate_cross_view` writes the mask,
-    `revalidate_joint` re-derives one entry of it after a drag, and
-    `ui.model.joint_states` explains a joint the mask has not caught up with
-    yet. When those disagree the user is told a joint was rejected for a
-    reason it was not, or shown a green dot on a joint the next recompute
-    will refuse. The Sampson distance is returned as well as the verdict
-    because the tooltip names the number.
+    One function because every caller asks the same question:
+    `cross_view_rejection` turns this verdict into the view that loses (and
+    from there `validate_cross_view` writes the mask, `revalidate_joint`
+    re-derives one entry of it after a drag, and `ui.model.joint_states`
+    explains a joint the mask has not caught up with yet), and
+    `quality.take_quality` reports on the answer. When those disagree the
+    user is told a joint was rejected for a reason it was not, or shown a
+    green dot on a joint the next recompute will refuse. The Sampson distance
+    is returned as well as the verdict because the tooltip names the number.
     """
     pt_left = np.asarray(pt_left, float)
     pt_right = np.asarray(pt_right, float)
@@ -259,18 +260,31 @@ def cross_view_verdict(pt_left, pt_right, rig: CalibratedRig, F,
     return float(e), bad
 
 
-def _judge(frame, j: int, rig: CalibratedRig, F, epi_thr: float,
-           allow: dict[str, float]) -> int:
-    """Write `frame.rejected[*][j]` from this frame's current 2D. 0 or 1.
+def cross_view_rejection(frame, j: int, rig: CalibratedRig, F,
+                         epi_thr: float, allow: dict[str, float],
+                         ) -> tuple[float, str | None]:
+    """`(sampson_px, the view the gate would refuse)` — or `None` for a keep.
 
-    The caller has already cleared both flags for `j`; this only ever sets
-    one, on the view that loses.
+    The WHOLE rule, and it writes nothing. `cross_view_verdict` answers only
+    the first half of it ("do these two views disagree past the gate?"); the
+    second half is who loses, and its last clause is that a pair whose BOTH
+    views were placed by hand is KEPT however far apart they look — the user
+    has overruled the gate, and the joint goes on to be triangulated, fitted
+    and exported.
+
+    It is a separate, pure function because two callers need the same answer
+    and only one of them may write: `_judge` sets the mask from it, and
+    `ui.model.joint_states` uses it to explain a joint whose mask is stale.
+    When those two knew different rules, exactly the joints the gate had
+    decided to trust — the hand-corrected ones — came back purple with a
+    tooltip claiming they were not triangulated, permanently, while their 3D
+    was in the export.
     """
     e, bad = cross_view_verdict(frame.kp2d[CAM_LEFT][j],
                                 frame.kp2d[CAM_RIGHT][j], rig, F, epi_thr,
                                 allow)
     if not bad:
-        return 0
+        return e, None
     sl = frame.scores[CAM_LEFT][j]
     sr = frame.scores[CAM_RIGHT][j]
     # drop the worse (lower-confidence) view, unless it was hand-corrected
@@ -279,7 +293,20 @@ def _judge(frame, j: int, rig: CalibratedRig, F, epi_thr: float,
     if frame.corrected[cam][j]:
         cam = CAM_RIGHT if drop_left else CAM_LEFT      # try the other view
         if frame.corrected[cam][j]:
-            return 0                                    # both corrected: keep
+            return e, None                              # both corrected: keep
+    return e, cam
+
+
+def _judge(frame, j: int, rig: CalibratedRig, F, epi_thr: float,
+           allow: dict[str, float]) -> int:
+    """Write `frame.rejected[*][j]` from this frame's current 2D. 0 or 1.
+
+    The caller has already cleared both flags for `j`; this only ever sets
+    one, on the view `cross_view_rejection` names.
+    """
+    _, cam = cross_view_rejection(frame, j, rig, F, epi_thr, allow)
+    if cam is None:
+        return 0
     frame.rejected[cam][j] = True
     return 1
 
