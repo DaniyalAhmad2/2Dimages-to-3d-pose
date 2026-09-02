@@ -137,6 +137,15 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             "images": {c: _store_image(p, folder) for c, p in f.images.items()},
             "kp2d": {c: _arr_to_json(f.kp2d[c]) for c in CAMERAS},
             "scores": {c: _vec_to_json(f.scores[c]) for c in CAMERAS},
+            # the detector's own output, and the cross-view gate's verdict on
+            # it. Both here so that reopening a project can rebuild exactly
+            # what the app showed, and so no step downstream is ever holding
+            # the only copy of what the cameras saw. Costs roughly a doubling
+            # of project.json (200 KB -> ~400 KB on the client take) and buys
+            # never destroying detector output again.
+            "kp2d_raw": {c: _arr_to_json(f.kp2d_raw[c]) for c in CAMERAS},
+            "scores_raw": {c: _vec_to_json(f.scores_raw[c]) for c in CAMERAS},
+            "rejected": {c: [bool(v) for v in f.rejected[c]] for c in CAMERAS},
             "pose3d": _arr_to_json(f.pose3d),
             "fitted3d": _arr_to_json(f.fitted3d),
             "corrected": {c: [bool(v) for v in f.corrected[c]] for c in CAMERAS},
@@ -163,9 +172,24 @@ def load_project(folder: str | Path) -> ProjectData:
         # .get for the head keys: projects written before head keypoints
         # existed have none, and must still load.
         head2d, head_sc = fd.get("head2d") or {}, fd.get("head_scores") or {}
+        # A project written before the raw arrays existed has one copy of its
+        # 2D and no record of which observations the gate rejected. Back-fill
+        # the raw arrays FROM kp2d and leave the mask empty: that is the
+        # truthful reading of such a file (nothing is flagged, and what is in
+        # kp2d is all that survived), and the next recompute re-derives the
+        # mask. It cannot recover what the old destructive gate already NaN'd
+        # — nothing can, short of re-running the detector — but it can stop it
+        # happening again.
+        raw2d, raw_sc = fd.get("kp2d_raw") or {}, fd.get("scores_raw") or {}
+        rejected = fd.get("rejected") or {}
         for c in CAMERAS:
             fr.kp2d[c] = _json_to_arr(fd["kp2d"][c], 2)
             fr.scores[c] = _json_to_vec(fd["scores"][c])
+            fr.kp2d_raw[c] = (_json_to_arr(raw2d[c], 2) if raw2d.get(c)
+                              else fr.kp2d[c].copy())
+            fr.scores_raw[c] = (_json_to_vec(raw_sc[c]) if raw_sc.get(c)
+                                else fr.scores[c].copy())
+            fr.rejected[c] = _json_to_flags(rejected.get(c))
             fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
             fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
             fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)

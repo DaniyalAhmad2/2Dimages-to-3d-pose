@@ -305,3 +305,41 @@ def test_the_readout_sees_a_lagged_pose():
     assert median(bad, "measured") == pytest.approx(median(good, "measured"))
     ratio = median(bad, "delivered") / median(good, "delivered")
     assert ratio > 2.0, f"a one-frame lag only cost {ratio:.2f}x"   # today 6.2x
+
+
+def test_a_rejected_joint_names_the_number_it_was_rejected_by(qapp):
+    """A purple dot alone is a new kind of silence.
+
+    "The two views disagree" does not tell the user whether to drag the point
+    or recalibrate the rig; "by 84 px, gate 29 px" does. The numbers ride on
+    the state itself (`ui.model.RejectedState`), which still IS the string
+    `STATE_REJECTED`, so nothing between the model and the dot had to grow a
+    parameter to carry them.
+    """
+    from pose3d.ui.model import RejectedState
+
+    p = _panel(qapp)
+    states = ["ok"] * NUM_JOINTS
+    states[7] = RejectedState(84.2, 29.4)
+    p.set_accuracy(np.full(NUM_JOINTS, 0.001), states=states)
+
+    tip = p.view._joints[7].toolTip()
+    assert "84 px" in tip and "gate 29 px" in tip
+    assert "cross-view" in tip
+    assert p.view._joints[7].pen().color() == RAG_COLORS["rejected"]
+    # the state is still the state: a plain string still renders, just without
+    # the numbers
+    assert states[7] == STATE_REJECTED
+    states[7] = STATE_REJECTED
+    p.set_accuracy(np.full(NUM_JOINTS, 0.001), states=states)
+    assert "px" not in p.view._joints[7].toolTip().split("confidence")[0]
+
+
+def test_the_gate_the_dot_quotes_is_the_gate_the_gate_used(qapp):
+    """One number, or the tooltip is fiction: the model's cached gate must be
+    the threshold `validate_cross_view` was run with."""
+    project = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    m = ProjectModel(project, rig)
+    assert m.epipolar_gate() == pytest.approx(
+        pipeline.epipolar_threshold(rig))

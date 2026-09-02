@@ -88,6 +88,12 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             if fields == "all":
                 keep = frame.corrected[cam] if respect_corrections \
                     else np.zeros(NUM_JOINTS, bool)
+                # The detector's own answer, kept whole and separately: the
+                # working arrays below merge it with the user's corrections,
+                # and this is the only record of what the detector said. It is
+                # written once per detection and never again.
+                frame.kp2d_raw[cam] = np.asarray(det.xy, float).copy()
+                frame.scores_raw[cam] = np.asarray(det.scores, float).copy()
                 frame.kp2d[cam] = np.where(keep[:, None], frame.kp2d[cam],
                                            det.xy)
                 frame.scores[cam] = np.where(keep, frame.scores[cam],
@@ -117,23 +123,37 @@ def epipolar_threshold(rig: CalibratedRig) -> float:
 
 def validate_cross_view(project: ProjectData, rig: CalibratedRig,
                         epi_thr: float | None = None) -> int:
-    """Drop 2D observations that are geometrically inconsistent across views.
+    """Mask 2D observations that are geometrically inconsistent across views.
 
     When a joint is occluded/out-of-frame in one camera, the detector often
     hallucinates it (e.g. an ankle collapsed onto the knee). Such a point can
     never correspond to the same 3D location the other camera sees, so its
     epipolar distance is large. For every joint present in BOTH views, if the
-    epipolar distance exceeds `epi_thr` px, the observation in the LOWER-
-    confidence view is dropped (set to NaN) — so it is neither drawn nor
-    triangulated (the 3D point then drops out too, since a joint needs both
-    views). User-corrected joints are trusted and never auto-dropped.
+    disagreement exceeds the gate, the observation in the LOWER-confidence
+    view is marked `frame.rejected[cam][j] = True` — so it is not triangulated
+    (the 3D point drops out too, since a joint needs both views), but it is
+    still drawn, still draggable, and still in the file. User-corrected joints
+    are trusted and never auto-rejected.
 
-    Returns the number of observations dropped.
+    NON-DESTRUCTIVE, and that is the whole point: this used to write NaN into
+    `kp2d` and 0.0 into `scores`, which `io_project` then persisted. A rig
+    wrong by ~12 deg rejects a quarter of a take that way, and fixing the
+    calibration recovered NOTHING — the observations were gone from the file,
+    hidden in the 2D views, and only a full re-detection could bring them
+    back. The mask is rebuilt from scratch here on every call, so a recompute
+    with a better rig reinstates every observation it no longer objects to.
+
+    Returns the number of observations rejected.
     """
     if epi_thr is None:
         epi_thr = epipolar_threshold(rig)
     dropped = 0
     for frame in project.frames:
+        # Re-derived, never accumulated: a mask left over from the last rig
+        # would go on rejecting joints this one is happy with, which is the
+        # destructive behaviour again with an extra step.
+        for c in (CAM_LEFT, CAM_RIGHT):
+            frame.rejected[c][:] = False
         for j in range(NUM_JOINTS):
             pl = frame.kp2d[CAM_LEFT][j]
             pr = frame.kp2d[CAM_RIGHT][j]
@@ -152,10 +172,27 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
                 cam = CAM_RIGHT if drop_left else CAM_LEFT  # try the other view
                 if frame.corrected[cam][j]:
                     continue                                 # both corrected: keep
-            frame.kp2d[cam][j] = np.nan
-            frame.scores[cam][j] = 0.0
+            frame.rejected[cam][j] = True
             dropped += 1
     return dropped
+
+
+def gated_kp2d(frame) -> dict[str, np.ndarray]:
+    """This frame's 2D with the rejected observations removed — a COPY.
+
+    The gate's verdict applied to the arithmetic and nowhere else: everything
+    that reads `Frame.kp2d` keeps seeing what the detector and the user put
+    there, and only triangulation is denied the observations the gate objects
+    to. A rejected point still triangulates in the LIVE path when the user
+    drags it (`ui.model._retriangulate`), because a drag is the user
+    overruling the gate — and `Frame.set_kp` clears its mask when they do.
+    """
+    out = {}
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        xy = np.array(frame.kp2d[cam], dtype=float, copy=True)
+        xy[np.asarray(frame.rejected[cam], bool)] = np.nan
+        out[cam] = xy
+    return out
 
 
 # Above this share of keypoints rejected, the cause is the calibration rather
@@ -182,10 +219,12 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
                         validate: bool = True) -> int:
     """Fill each frame's raw pose3d from its two 2D views.
 
-    By default first drops cross-view-inconsistent observations (occlusion
-    hallucinations) so they don't corrupt the 3D pose. Returns how many were
-    dropped, so callers can tell the user — a bad calibration rejects good
-    detections wholesale, which looks exactly like a detection failure.
+    By default first MASKS cross-view-inconsistent observations (occlusion
+    hallucinations) so they don't corrupt the 3D pose, and triangulates a
+    masked COPY — the mask is a verdict about this rig, and it must not reach
+    the 2D the user can see and drag. Returns how many were rejected, so
+    callers can tell the user: a bad calibration rejects good detections
+    wholesale, which looks exactly like a detection failure.
     """
     dropped = 0
     for frame in project.frames:
@@ -197,8 +236,9 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     if validate:
         dropped = validate_cross_view(project, rig)
     for frame in project.frames:
+        kp = gated_kp2d(frame)
         frame.pose3d = triangulate_points(
-            frame.kp2d[CAM_LEFT], frame.kp2d[CAM_RIGHT],
+            kp[CAM_LEFT], kp[CAM_RIGHT],
             rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
             rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
         # the face points ride the same geometry; they are not cross-view

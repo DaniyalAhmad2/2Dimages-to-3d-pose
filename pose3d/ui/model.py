@@ -34,6 +34,26 @@ STATE_OK = "ok"
 STATE_NOT_MEASURED = "not_measured"
 STATE_REJECTED = "rejected"
 
+
+class RejectedState(str):
+    """`STATE_REJECTED`, carrying the two numbers that make it a diagnosis.
+
+    It IS the string — every `== STATE_REJECTED`, every `RAG_COLORS[...]`
+    lookup and every `in HOLLOW_STATES` goes on working — with the measured
+    disagreement and the gate it failed attached, so the camera view can name
+    them in the tooltip. A purple dot the user cannot get a number out of is
+    just a new kind of silence; a second channel from the model to the view
+    would be a signature change in every caller in between.
+    """
+    __slots__ = ("px", "gate")
+
+    def __new__(cls, px: float, gate: float):
+        self = super().__new__(cls, STATE_REJECTED)
+        self.px = float(px)
+        self.gate = float(gate)
+        return self
+
+
 # Joints the detector does not see but derives as a midpoint of two it does
 # (skeleton.derive_joints). Dragging a shoulder therefore has to move the neck
 # with it, or the pose keeps a neck the user can see is in the wrong place and
@@ -84,6 +104,7 @@ class ProjectModel(QObject):
         self.rig_error = ""
         self._figure_h_px = None
         self._quality = None
+        self._epi_thr = None
 
     # --- pipeline version migration ---
     def upgrade_pipeline(self) -> str:
@@ -572,6 +593,7 @@ class ProjectModel(QObject):
         every correction O(take)."""
         self._figure_h_px = None
         self._quality = None
+        self._epi_thr = None
 
     def quality(self):
         """`pose3d.quality.TakeQuality` for the whole take, or None.
@@ -637,35 +659,55 @@ class ProjectModel(QObject):
             out[cam] = per
         return out
 
+    def epipolar_gate(self) -> float:
+        """The cross-view gate this take is being judged by, in px.
+
+        Cached with the other take-wide numbers and dropped by
+        `invalidate_readouts`: the camera views ask for it on every frame
+        change, and it must be the SAME number the gate itself used or a
+        purple dot would quote a threshold nothing was measured against.
+        """
+        if self._epi_thr is None:
+            from pose3d.pipeline import epipolar_threshold
+            self._epi_thr = float(epipolar_threshold(self.rig))
+        return self._epi_thr
+
     def joint_states(self, idx: int) -> dict[str, list[str]]:
         """Per-camera, per-joint state: why a joint has no number.
 
         "not measured" and "rejected by the cross-view check" are different
-        facts and used to be drawn the same. There is no per-observation
-        rejection flag on `Frame` — the gate NaNs the losing 2D in place — so
-        the distinction is drawn from what is on the frame NOW: both views
-        holding a point that still disagrees beyond the epipolar threshold is
-        a rejection (which is the state a hand-drag lands in); one view having
-        no point at all is simply not measured.
+        facts and used to be drawn the same. A rejection is now a flag the
+        gate wrote (`Frame.rejected`, re-derived on every recompute), so this
+        reports what actually happened rather than inferring it. It ALSO
+        rejects a pair that still disagrees beyond the gate but carries no
+        flag: that is the state a hand-drag lands in between recomputes, and
+        it is the same verdict the next recompute will record.
+
+        A rejected state carries the numbers (`RejectedState.px` / `.gate`) so
+        the tooltip can name them.
         """
         f = self.project.frames[idx]
         states = {c: [STATE_OK] * NUM_JOINTS for c in CAMERAS}
         if self.rig is None:
             return states
-        from pose3d.pipeline import epipolar_threshold
-        thr = epipolar_threshold(self.rig)
+        thr = self.epipolar_gate()
         for j in range(NUM_JOINTS):
-            if not np.isnan(f.pose3d[j]).any():
+            flagged = {c: bool(f.rejected[c][j]) for c in CAMERAS}
+            if not np.isnan(f.pose3d[j]).any() and not any(flagged.values()):
                 continue                    # it has 3D: nothing to explain
             seen = {c: not np.isnan(f.kp2d[c][j]).any() for c in CAMERAS}
-            state = STATE_NOT_MEASURED
+            e = float("nan")
             if all(seen.values()):
                 e = epipolar_distance(
                     f.kp2d[CAM_LEFT][j], f.kp2d[CAM_RIGHT][j],
                     self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
                     self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
-                if np.isfinite(e) and e > thr:
-                    state = STATE_REJECTED
+            if any(flagged.values()) or (np.isfinite(e) and e > thr):
+                state = RejectedState(e, thr)
+            elif np.isnan(f.pose3d[j]).any():
+                state = STATE_NOT_MEASURED
+            else:
+                continue
             for c in CAMERAS:
                 states[c][j] = state
         return states
