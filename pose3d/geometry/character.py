@@ -155,7 +155,13 @@ _LINE_REF = {"hips": _HIP_LINE, "spine": _HIP_LINE, "chest": _SHOULDER_LINE}
 _ROLL_BEND_MIN_DEG = 20.0       # below this the roll term vanishes
 _ROLL_BEND_FULL_DEG = 40.0      # at and above this it applies in full
 # Rollback switch: every roll angle is multiplied by this, so 0.0 restores the
-# pre-roll minimal-rotation matrices bit for bit.
+# pre-roll minimal-rotation matrices bit for bit — EXCEPT at `_align`'s
+# antipodal (c < -0.999999) branch, where the rest references still exist and
+# still pick the spin axis. That is the F43 fix and it is deliberately kept:
+# the old branch flipped a bone's roll by 163.8 deg for a 1 deg wobble, so
+# "bit for bit" holds everywhere the rollback is a rollback and the one place
+# it differs is the place the old answer was arbitrary. See
+# tests/test_retarget.py::test_roll_weight_zero_restores_the_minimal_rotation.
 _ROLL_WEIGHT = 1.0
 
 
@@ -438,7 +444,18 @@ class Character:
         return out
 
     def _rest_ankle_sole_drop(self, rj):
-        """How far the rig's rest ankles sit above its soles, in rig units."""
+        """How far the rig's rest ankles sit above its soles, in rig units.
+
+        ASSUMES the rest mesh's lowest vertex IS a sole — true of the bundled
+        rig (its minimum is a left-foot vertex at x = +2.010 against a left
+        ankle at x = +2.196, giving 0.7121720 rig units = 4.94 % of the
+        14.4228 rig height) and of any rig modelled standing. On a rig posed
+        at rest with its arms hanging below its feet this would silently
+        become a fingertip datum, which would put the figure below the grid by
+        that error; a replacement rig wants checking here rather than a
+        different formula, since restricting the minimum to foot-weighted
+        vertices needs a skin-weight lookup this class does not otherwise do.
+        """
         z = [rj[int(j)][2] for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
         z = [q for q in z if np.isfinite(q)]
         return float(min(z) - self.verts0[:, 2].min()) if z else 0.0
@@ -654,6 +671,19 @@ class Character:
 
         References are directions, so `to_rig`'s uniform scale and translation
         are irrelevant and only the yaw alignment `Rz` is applied.
+
+        KNOWN, ACCEPTED DISCONTINUITY: a limb's bend plane needs all three of
+        its joints, so a wrist (or ankle) that drops to NaN for a single frame
+        removes the parent's roll term for that frame and the bone snaps back
+        to the minimal rotation — up to ~50 deg on the client take. It is an
+        on/off gate where `_bend_weight` is a ramp, and that is deliberate:
+        fading it in over neighbouring frames would need caller-owned temporal
+        state, which desyncs the 3D view (scrubbed in any order) from the
+        Blender export (iterated once, in order) and is forbidden outright.
+        The stateless fallback is weight 0 — today's minimal rotation, no
+        exception, view and export agreeing on it — and Phase 1's flagged
+        single-frame gap fill makes the gap rare. Pinned by
+        tests/test_retarget.py::test_a_missing_wrist_falls_back_to_weight_zero.
         """
         def line(pair):
             jl, jr = pair

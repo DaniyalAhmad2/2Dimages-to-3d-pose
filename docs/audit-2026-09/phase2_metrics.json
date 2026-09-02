@@ -1,0 +1,479 @@
+{
+ "what": "Phase 2 (roll references, hip line, ankle grounding) acceptance metrics on the client take, fix round.",
+ "take": "/media/athena/hd3/Projects/pose3d-tool/workspace/pose3d_projects/Imported_Session",
+ "frames": 26,
+ "body_height_m": 0.1178,
+ "variants": {
+  "before": "_ROLL_WEIGHT = 0 + the lowest-mesh-vertex grounding (the shipped pre-Phase-2 build; bit-identical away from _align's antipodal branch, see rollback note)",
+  "after": "shipped Phase 2 (roll references + ankle grounding)"
+ },
+ "gates_were_restated": {
+  "by": "controller rulings 1 and 2, .superpowers/sdd/have-a-look-at-snuggly-marble/task-fix2-brief.md",
+  "1_continuity": "The brief's ship gate 'max consecutive-frame roll change <= 15 deg' is ACCEPTED AS UNMET and is no longer a gate. The captured bend normal itself moves up to 55.7 deg between consecutive stop-motion poses and the pre-Phase-2 build already fails the gate by a wider margin than the fix does, so the number measures the take, not the retarget. Reference smoothing (pose3d/geometry/retarget.py) was deliberately NOT added: it would re-introduce the cross-pose blending Phase 1 removed and measurement showed it moves upper_arm.L by 1.5 deg and makes forearm.L worse. Restated gate: roll error 0 deg median AND max on the frames where the bend plane exists (bend >= 40 deg), plus the synthetic straightening-sweep continuity test (tests/test_retarget.py::test_roll_is_continuous_across_a_straightening_limb).",
+  "2a_roll_ceiling": "The <= 15 deg roll-error max ceiling applies where bend >= 40 deg. The 20/40 ramp withholds roll authority by design on nearly straight limbs, so the residual on those frames is recorded separately (roll_error_ramped_frames_deg) and not gated.",
+  "2b_hand": "The 'hand.L posed-axis spread <= 40 deg' bound is replaced by 'hand roll spread reduced'. The hand bone has no aim of its own and inherits the forearm verbatim, and the CAPTURED forearm swing is itself ~112 deg, so its axis spread cannot fall near 40 deg however its roll behaves.",
+  "2c_ground": "The ground-datum gate applies to the character's own ankle over the grid. The audit's dz-vs-capture definition (captured ankle z minus the character's lowest vertex) is recorded but not gated: its residual is ankle RETARGET error, which Phase 2 does not address."
+ },
+ "notes": {
+  "max_consecutive_frame_roll_change_deg": "METRIC, NOT A GATE (ruling 1). Definition: each bone's posed roll about its own aim axis, measured against a fixed world gauge (+Z projected perpendicular to the aim), unwrapped, max |change| between consecutive frames. This definition is comparable between `before` and `after`; the audit's 'change in the applied correction' is 0.0 for every bone in `before` by construction and cannot be compared at all. The take is 26 discrete stop-motion poses, so frame-to-frame continuity is not a property the data has.",
+  "roll_convention": "Roll is a MEASUREMENT for upper_arm.* and thigh.* (the elbow and the knee are hinges, so the bend plane fixes the parent bone's spin) and a CONVENTION for forearm.* and shin.* \u2014 pronation and shin twist are never observed and there are no hand or foot keypoints. A 0.0 deg forearm roll error is not accuracy.",
+  "rollback": "_ROLL_WEIGHT = 0 restores the pre-roll matrices bit for bit EXCEPT at _align's antipodal (c < -0.999999) branch, where the rest reference now makes the axis pick deterministic (F43). That branch is deliberately no longer arbitrary.",
+  "sole_tilt": "Recorded, never asserted: the shin of this rigid-footed mannequin genuinely tilts 16-86 deg and levelling the sole would replace a measurement with a convention.",
+  "mesh_below_grid_pct": "The accepted cost of an ankle datum with an unlevelled sole: a tilted foot now crosses the plane instead of the whole scene bobbing. Bounded by tests/test_view_orientation.py::test_grounding_is_ankle_based."
+ },
+ "gates": {
+  "roll_error_limbs_bend_ge_40": {
+   "applies_to": [
+    "upper_arm.L",
+    "upper_arm.R",
+    "thigh.L",
+    "thigh.R"
+   ],
+   "target": "0 deg median AND max (restated, ruling 1)",
+   "measured_after_median_deg": 0.0,
+   "measured_after_max_deg": 2.3048950044155877e-14,
+   "measured_before_max_deg": 72.82364264664953,
+   "pass": true
+  },
+  "hand_roll_spread_reduced": {
+   "target": "hand.L roll spread reduced (restated, ruling 2b)",
+   "definition": "the hand bone inherits the forearm's matrix verbatim, so its roll IS the forearm's: signed angle, about the posed forearm axis, between the carried rest bend reference and the CAPTURED SHOULDER LINE projected perpendicular to that axis; spread = max deviation from the take's circular mean. The gauge is body-fixed on purpose \u2014 a world-fixed gauge folds the subject's torso yaw into 'roll' and reads 44.6 -> 47.6 deg (hand_roll_spread_world_gauge_deg).",
+   "before_deg": 50.6,
+   "after_deg": 38.4,
+   "pass": true,
+   "caveat": "Ruling 2b quotes 94.8 -> 58.9 deg from the Phase 2 report, whose definition of 'hand roll spread' was never recorded; it could not be reproduced here (eight candidate definitions were tried). The definition above is stated in full so the number is auditable. The RULING \u2014 that the bound is 'reduced', not an absolute ceiling \u2014 is what is applied.",
+   "hand_axis_spread_context": {
+    "hand.L_axis_spread_deg": [
+     125.9,
+     119.1
+    ],
+    "captured_forearm_swing_deg": 112.2,
+    "why": "the axis spread cannot fall near the brief's 40 deg: the hand has no aim of its own and the CAPTURED forearm already swings this much."
+   }
+  },
+  "hip_line": {
+   "target": "<= 5.0 deg median, <= 15.0 deg max",
+   "before": {
+    "median": 11.76,
+    "max": 21.18
+   },
+   "after": {
+    "median": 4.5,
+    "max": 14.71
+   },
+   "pass": true
+  },
+  "ground_datum_character_ankle_over_grid": {
+   "target": "<= 0.5 % of body height peak-to-peak (restated, ruling 2c)",
+   "before_ptp_pct": 9.2,
+   "after_ptp_pct": 0.0,
+   "pass": true
+  },
+  "retarget_error_median": {
+   "target": "<= 1.70 % of body height",
+   "before_pct": 1.51,
+   "after_pct": 1.62,
+   "pass": true
+  }
+ },
+ "before": {
+  "roll_error_bend_ge_40_deg": {
+   "upper_arm.L": {
+    "median_deg": 47.76,
+    "max_deg": 72.82,
+    "n": 21
+   },
+   "forearm.L": {
+    "median_deg": 18.22,
+    "max_deg": 45.11,
+    "n": 21
+   },
+   "upper_arm.R": {
+    "median_deg": 12.22,
+    "max_deg": 40.18,
+    "n": 19
+   },
+   "forearm.R": {
+    "median_deg": 14.01,
+    "max_deg": 26.69,
+    "n": 19
+   },
+   "thigh.L": {
+    "median_deg": 28.22,
+    "max_deg": 37.32,
+    "n": 16
+   },
+   "shin.L": {
+    "median_deg": 15.27,
+    "max_deg": 23.41,
+    "n": 16
+   },
+   "thigh.R": {
+    "median_deg": 17.04,
+    "max_deg": 31.33,
+    "n": 10
+   },
+   "shin.R": {
+    "median_deg": 23.42,
+    "max_deg": 34.78,
+    "n": 10
+   }
+  },
+  "roll_error_bend_ge_40_max_unrounded_deg": {
+   "upper_arm.L": 72.82364264664953,
+   "forearm.L": 45.11471323862355,
+   "upper_arm.R": 40.17725108620343,
+   "forearm.R": 26.687452867694788,
+   "thigh.L": 37.32467943793595,
+   "shin.L": 23.41342737207886,
+   "thigh.R": 31.32751232829601,
+   "shin.R": 34.78345847886173
+  },
+  "roll_error_ramped_frames_deg": {
+   "upper_arm.L": {
+    "median_deg": 57.35,
+    "max_deg": 62.06,
+    "n": 5
+   },
+   "forearm.L": {
+    "median_deg": 41.46,
+    "max_deg": 49.01,
+    "n": 5
+   },
+   "upper_arm.R": {
+    "median_deg": 19.16,
+    "max_deg": 41.2,
+    "n": 7
+   },
+   "forearm.R": {
+    "median_deg": 16.7,
+    "max_deg": 30.18,
+    "n": 7
+   },
+   "thigh.L": {
+    "median_deg": 14.38,
+    "max_deg": 22.99,
+    "n": 10
+   },
+   "shin.L": {
+    "median_deg": 11.04,
+    "max_deg": 20.86,
+    "n": 10
+   },
+   "thigh.R": {
+    "median_deg": 30.62,
+    "max_deg": 54.05,
+    "n": 16
+   },
+   "shin.R": {
+    "median_deg": 26.18,
+    "max_deg": 48.27,
+    "n": 16
+   }
+  },
+  "roll_error_all_frames_deg": {
+   "upper_arm.L": {
+    "median_deg": 53.58,
+    "max_deg": 72.82,
+    "n": 26
+   },
+   "forearm.L": {
+    "median_deg": 20.44,
+    "max_deg": 49.01,
+    "n": 26
+   },
+   "upper_arm.R": {
+    "median_deg": 13.58,
+    "max_deg": 41.2,
+    "n": 26
+   },
+   "forearm.R": {
+    "median_deg": 14.37,
+    "max_deg": 30.18,
+    "n": 26
+   },
+   "thigh.L": {
+    "median_deg": 21.25,
+    "max_deg": 37.32,
+    "n": 26
+   },
+   "shin.L": {
+    "median_deg": 13.82,
+    "max_deg": 23.41,
+    "n": 26
+   },
+   "thigh.R": {
+    "median_deg": 26.73,
+    "max_deg": 54.05,
+    "n": 26
+   },
+   "shin.R": {
+    "median_deg": 25.44,
+    "max_deg": 48.27,
+    "n": 26
+   }
+  },
+  "max_consecutive_frame_roll_change_deg": {
+   "upper_arm.L": 44.3,
+   "forearm.L": 25.0,
+   "upper_arm.R": 27.7,
+   "forearm.R": 15.6,
+   "thigh.L": 88.1,
+   "shin.L": 163.8,
+   "thigh.R": 104.2,
+   "shin.R": 82.5,
+   "hips": 22.3,
+   "spine": 71.7,
+   "chest": 112.3
+  },
+  "hand_axis_spread_deg": {
+   "hand.L": 125.9,
+   "hand.R": 27.6
+  },
+  "hand_roll_spread_deg": {
+   "hand.L": 50.6,
+   "hand.R": 17.1
+  },
+  "hand_roll_spread_ptp_deg": {
+   "hand.L": 73.4,
+   "hand.R": 26.4
+  },
+  "hand_roll_spread_world_gauge_deg": {
+   "hand.L": 44.6,
+   "hand.R": 20.3
+  },
+  "captured_forearm_swing_deg": {
+   "hand.L": 112.2,
+   "hand.R": 36.1
+  },
+  "hip_line_error_deg": {
+   "median": 11.76,
+   "max": 21.18
+  },
+  "retarget_error_pct_height": 1.51,
+  "ground_datum_character_ankle_over_grid_pct": {
+   "median": 8.54,
+   "peak_to_peak": 9.2
+  },
+  "ground_datum_dz_vs_capture_pct": {
+   "median": 9.0,
+   "peak_to_peak": 11.16
+  },
+  "mesh_below_grid_pct": {
+   "median": 0.0,
+   "max": 0.0
+  },
+  "sole_tilt_deg": {
+   "foot.L": {
+    "median_deg": 38.5,
+    "max_deg": 73.47,
+    "n": 26
+   },
+   "foot.R": {
+    "median_deg": 42.68,
+    "max_deg": 83.93,
+    "n": 26
+   }
+  }
+ },
+ "after": {
+  "roll_error_bend_ge_40_deg": {
+   "upper_arm.L": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 21
+   },
+   "forearm.L": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 21
+   },
+   "upper_arm.R": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 19
+   },
+   "forearm.R": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 19
+   },
+   "thigh.L": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 16
+   },
+   "shin.L": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 16
+   },
+   "thigh.R": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 10
+   },
+   "shin.R": {
+    "median_deg": 0.0,
+    "max_deg": 0.0,
+    "n": 10
+   }
+  },
+  "roll_error_bend_ge_40_max_unrounded_deg": {
+   "upper_arm.L": 2.2624408517304375e-14,
+   "forearm.L": 1.3206779200689542e-14,
+   "upper_arm.R": 9.386251087112396e-15,
+   "forearm.R": 1.792036761620309e-14,
+   "thigh.L": 2.3048950044155877e-14,
+   "shin.L": 9.281987187158977e-15,
+   "thigh.R": 1.1071276203348056e-14,
+   "shin.R": 1.6695418717258906e-14
+  },
+  "roll_error_ramped_frames_deg": {
+   "upper_arm.L": {
+    "median_deg": 47.37,
+    "max_deg": 50.83,
+    "n": 5
+   },
+   "forearm.L": {
+    "median_deg": 34.24,
+    "max_deg": 39.32,
+    "n": 5
+   },
+   "upper_arm.R": {
+    "median_deg": 0.67,
+    "max_deg": 3.63,
+    "n": 7
+   },
+   "forearm.R": {
+    "median_deg": 0.95,
+    "max_deg": 5.21,
+    "n": 7
+   },
+   "thigh.L": {
+    "median_deg": 5.55,
+    "max_deg": 12.89,
+    "n": 10
+   },
+   "shin.L": {
+    "median_deg": 3.49,
+    "max_deg": 13.12,
+    "n": 10
+   },
+   "thigh.R": {
+    "median_deg": 21.8,
+    "max_deg": 35.76,
+    "n": 16
+   },
+   "shin.R": {
+    "median_deg": 19.38,
+    "max_deg": 31.94,
+    "n": 16
+   }
+  },
+  "roll_error_all_frames_deg": {
+   "upper_arm.L": {
+    "median_deg": 0.0,
+    "max_deg": 50.83,
+    "n": 26
+   },
+   "forearm.L": {
+    "median_deg": 0.0,
+    "max_deg": 39.32,
+    "n": 26
+   },
+   "upper_arm.R": {
+    "median_deg": 0.0,
+    "max_deg": 3.63,
+    "n": 26
+   },
+   "forearm.R": {
+    "median_deg": 0.0,
+    "max_deg": 5.21,
+    "n": 26
+   },
+   "thigh.L": {
+    "median_deg": 0.0,
+    "max_deg": 12.89,
+    "n": 26
+   },
+   "shin.L": {
+    "median_deg": 0.0,
+    "max_deg": 13.12,
+    "n": 26
+   },
+   "thigh.R": {
+    "median_deg": 8.74,
+    "max_deg": 35.76,
+    "n": 26
+   },
+   "shin.R": {
+    "median_deg": 6.81,
+    "max_deg": 31.94,
+    "n": 26
+   }
+  },
+  "max_consecutive_frame_roll_change_deg": {
+   "upper_arm.L": 45.8,
+   "forearm.L": 26.8,
+   "upper_arm.R": 30.9,
+   "forearm.R": 17.3,
+   "thigh.L": 91.2,
+   "shin.L": 163.5,
+   "thigh.R": 103.7,
+   "shin.R": 94.2,
+   "hips": 30.5,
+   "spine": 71.9,
+   "chest": 112.2
+  },
+  "hand_axis_spread_deg": {
+   "hand.L": 119.1,
+   "hand.R": 27.8
+  },
+  "hand_roll_spread_deg": {
+   "hand.L": 38.4,
+   "hand.R": 24.8
+  },
+  "hand_roll_spread_ptp_deg": {
+   "hand.L": 67.1,
+   "hand.R": 43.3
+  },
+  "hand_roll_spread_world_gauge_deg": {
+   "hand.L": 47.6,
+   "hand.R": 36.4
+  },
+  "captured_forearm_swing_deg": {
+   "hand.L": 112.2,
+   "hand.R": 36.1
+  },
+  "hip_line_error_deg": {
+   "median": 4.5,
+   "max": 14.71
+  },
+  "retarget_error_pct_height": 1.62,
+  "ground_datum_character_ankle_over_grid_pct": {
+   "median": 5.32,
+   "peak_to_peak": 0.0
+  },
+  "ground_datum_dz_vs_capture_pct": {
+   "median": 5.33,
+   "peak_to_peak": 3.75
+  },
+  "mesh_below_grid_pct": {
+   "median": 3.62,
+   "max": 9.57
+  },
+  "sole_tilt_deg": {
+   "foot.L": {
+    "median_deg": 39.18,
+    "max_deg": 86.62,
+    "n": 26
+   },
+   "foot.R": {
+    "median_deg": 45.21,
+    "max_deg": 71.3,
+    "n": 26
+   }
+  }
+ }
+}
