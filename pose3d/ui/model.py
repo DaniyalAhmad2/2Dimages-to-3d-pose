@@ -56,6 +56,7 @@ class ProjectModel(QObject):
         # set by upgrade_pipeline() when a legacy project is recomputed on open
         self.migration_note = ""
         self._stored_fitted3d = None
+        self._stored_version = None
 
     # --- pipeline version migration ---
     def upgrade_pipeline(self) -> str:
@@ -73,10 +74,15 @@ class ProjectModel(QObject):
         if not p.frames or p.pipeline_version >= PIPELINE_VERSION:
             return ""
         if self.rig is None:
-            p.pipeline_version = PIPELINE_VERSION
+            # Deliberately NOT stamped: nothing was recomputed, so this take
+            # still carries the old pipeline's pose and still needs the
+            # migration. Stamping it here would mark it corrected on the
+            # strength of a sentence the user may never act on, and once they
+            # loaded a calibration and saved, the offer would never come back.
             self.migration_note = (_NO_RIG_NOTE + _head_hint(p)).strip()
             return self.migration_note
         stored = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
+        self._stored_version = p.pipeline_version
         self.recompute_all()
         p.pipeline_version = PIPELINE_VERSION
         self._stored_fitted3d = stored
@@ -93,6 +99,13 @@ class ProjectModel(QObject):
         for f, pose in zip(self.project.frames, self._stored_fitted3d):
             f.fitted3d = pose.copy()
         self._stored_fitted3d = None
+        if self._stored_version is not None:
+            # What is on screen is the old pipeline's pose again, so the file
+            # must not go on claiming otherwise: saving now keeps this a legacy
+            # take, and the next open offers the correction (and the numbers)
+            # again instead of freezing the pose the client complained about.
+            self.project.pipeline_version = self._stored_version
+            self._stored_version = None
         self.migration_note = ""
         self.set_frame(self.current)
         self.statusMessage.emit(
@@ -147,7 +160,17 @@ class ProjectModel(QObject):
         from pose3d.pipeline import detect_project
         from pose3d.geometry.triangulate import triangulate_points
         self.statusMessage.emit("Re-detecting face points…")
-        detect_project(self.project, detector, load_image, fields="head")
+        wrote = detect_project(self.project, detector, load_image,
+                               fields="head")
+        if not wrote:
+            # A build whose detector has no face points (the manual detector,
+            # or an RTMPose bundle without the face model) writes nothing —
+            # saying "re-detected" here would be a success message for work
+            # that did not happen, and the head would go on riding the neck.
+            self.statusMessage.emit(
+                "This build's detector does not produce face points, so "
+                "nothing was changed — the head keeps its nose-pitch estimate")
+            return
         for f in self.project.frames:
             f.head3d = triangulate_points(
                 f.head2d[CAM_LEFT], f.head2d[CAM_RIGHT],

@@ -52,7 +52,7 @@ def _detector_keypoint_model(detector: KeypointDetector) -> str:
 
 def detect_project(project: ProjectData, detector: KeypointDetector,
                    load_image, on_frame=None, respect_corrections: bool = True,
-                   fields: str = "all") -> None:
+                   fields: str = "all") -> int:
     """Populate each frame's 2D keypoints/scores via the detector.
 
     load_image(path) -> BGR ndarray. Mutates project in place.
@@ -69,11 +69,17 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
     kp2d, scores and corrected untouched. That is the migration path for a
     project made before face keypoints existed: its body pose and its
     corrections survive, and the head stops riding the neck.
+
+    Returns how many (frame, camera) face-keypoint sets the detector actually
+    supplied — 0 when it returns none, which is the difference between "the
+    face points were re-detected" and "this build's detector has no face
+    points to give", and the caller must not report the first as the second.
     """
     if fields not in ("all", "head"):
         raise ValueError(f"fields must be 'all' or 'head', not {fields!r}")
     if fields == "all":
         project.keypoint_model = _detector_keypoint_model(detector)
+    heads = 0
     n = len(project.frames)
     for i, frame in enumerate(project.frames):
         for cam in (CAM_LEFT, CAM_RIGHT):
@@ -89,8 +95,10 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             if det.head_xy is not None:
                 frame.head2d[cam] = det.head_xy
                 frame.head_scores[cam] = det.head_scores
+                heads += 1
         if on_frame is not None:
             on_frame(i + 1, n)
+    return heads
 
 
 # Epipolar tolerance as a fraction of the image DIAGONAL. A flat 30 px was

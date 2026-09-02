@@ -278,8 +278,16 @@ def test_the_stored_pose_can_be_restored_in_session():
 
 def test_a_project_with_no_calibration_is_left_alone():
     """Recomputing needs a rig. Without one the stored pose is untouched and
-    the user is told why, rather than silently getting nothing."""
-    data, _ = _take()
+    the user is told why, rather than silently getting nothing.
+
+    And it must stay UNSTAMPED: the take still carries the old pipeline's
+    pose, so it still needs the migration. Stamping it on the strength of a
+    note the user may never act on would, the moment they loaded a calibration
+    and saved, freeze the lagged pose for good.
+    """
+    from pose3d.core.project import PIPELINE_VERSION
+
+    data, rig = _take()
     stored = [f.fitted3d.copy() for f in data.frames]
     data.pipeline_version = 0
 
@@ -289,6 +297,36 @@ def test_a_project_with_no_calibration_is_left_alone():
     assert "calibration" in note
     for f, pose in zip(data.frames, stored):
         assert np.allclose(f.fitted3d, pose)
+    assert data.pipeline_version == 0
+
+    # ... so once the calibration is loaded, the correction still happens
+    note = ProjectModel(data, rig).upgrade_pipeline()
+    assert "mm median" in note
+    assert data.pipeline_version == PIPELINE_VERSION
+
+
+def test_restoring_the_stored_pose_takes_the_version_stamp_back_with_it():
+    """Restore puts the previous build's pose back, so the file must stop
+    claiming to hold the new one — otherwise saving after a Restore freezes
+    the pose the client complained about and the offer never returns."""
+    from pose3d.core.project import PIPELINE_VERSION
+    from pose3d.geometry.bonefit import smooth_temporal
+
+    data, rig = _take()
+    lagged = smooth_temporal(np.stack([f.fitted3d for f in data.frames]), 0.6)
+    for f, pose in zip(data.frames, lagged):
+        f.fitted3d = pose.copy()
+    data.pipeline_version = 0
+
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    assert data.pipeline_version == PIPELINE_VERSION
+
+    assert model.restore_stored_pose()
+
+    assert data.pipeline_version == 0
+    # and a fresh open of that project offers the correction again
+    assert "mm median" in ProjectModel(data, rig).upgrade_pipeline()
 
 
 def test_upgrade_does_nothing_to_a_current_project():
@@ -331,3 +369,24 @@ def test_the_no_calibration_note_carries_the_hint_too():
     data.pipeline_version = 0
     note = ProjectModel(data, None).upgrade_pipeline()
     assert "calibration" in note and "Re-detect face points only" in note
+
+
+def test_redetect_face_points_says_nothing_happened_when_it_did_not():
+    """The migration action is the only route to face keypoints, so it must
+    not report success on a build whose detector has none to give — the head
+    would go on riding the neck while the status bar said it had been fixed.
+    """
+    data, rig = _take(n=2)
+    model = ProjectModel(data, rig)
+    said = []
+    model.statusMessage.connect(said.append)
+
+    # a detector with body keypoints only (Detection.head_xy defaults to None)
+    model.redetect_head(_ShiftedDetector(data.frames[0].kp2d[CAM_LEFT]),
+                        lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert "does not produce face points" in said[-1]
+    assert "re-detected" not in said[-1]
+    for f in data.frames:
+        for cam in CAMERAS:
+            assert np.isnan(f.head2d[cam]).all()

@@ -116,3 +116,26 @@ def test_detect_rejects_an_unknown_field_set():
     with pytest.raises(ValueError):
         detect_project(_one_frame_project(), _HeadDetector(),
                        lambda path: None, fields="body")
+
+
+def test_detect_project_reports_how_many_face_point_sets_it_wrote():
+    """A build whose detector has no face points writes none, and the caller
+    has to be able to tell that apart from a successful re-detection — the
+    head-only migration is the only route to face keypoints there is."""
+    from pose3d.core.project import CAMERAS
+    from pose3d.pipeline import detect_project
+
+    blank = np.zeros((4, 4, 3), np.uint8)
+
+    p = _one_frame_project()
+    assert detect_project(p, _HeadDetector(), lambda path: blank,
+                          fields="head") == len(CAMERAS)
+
+    class _NoFace(_HeadDetector):
+        def detect(self, image_bgr):
+            return Detection(xy=self.xy.copy(), scores=self.scores.copy())
+
+    q = _one_frame_project()
+    assert detect_project(q, _NoFace(), lambda path: blank, fields="head") == 0
+    for c in CAMERAS:
+        assert np.isnan(q.frames[0].head2d[c]).all()

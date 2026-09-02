@@ -90,17 +90,18 @@
     },
     {
       "id": "recompute_on_open",
-      "gate": "opening the client's project on the fixed build changes the pose with no button press and says why, with this take's own numbers",
+      "gate": "opening the client's project on the fixed build changes the pose with no button press and says why, with this take's own numbers; the version is stamped ONLY where the recompute actually ran, so a take that has not been corrected is never marked as if it had",
       "measured": "pose moves 4.96 mm median / 25.65 mm max (4 % / 21 % of the figure's height); banner states it and offers Restore; version stamped so it happens once",
       "status": "met",
-      "test": "tests/test_pipeline_fit.py::test_a_legacy_project_is_recomputed_on_open_and_says_what_moved, tests/test_io_project.py::test_version_stamp_round_trips"
+      "stamp_rule": "fix round 1x (second pass): the no-calibration branch no longer stamps (it recomputes nothing, so the take still needs the migration once a rig is loaded), and Restore puts the previous version back with the previous pose — otherwise Restore-then-Save would freeze the lagged pose behind a stamp that says it is current.",
+      "test": "tests/test_pipeline_fit.py::test_a_legacy_project_is_recomputed_on_open_and_says_what_moved, ::test_a_project_with_no_calibration_is_left_alone, ::test_restoring_the_stored_pose_takes_the_version_stamp_back_with_it, tests/test_io_project.py::test_version_stamp_round_trips"
     },
     {
       "id": "face_point_migration_prompt",
       "gate": "ADDED by the controller (fix round 1x, concern 4): when the take has no face keypoints the recompute banner names the one action that fixes the head",
-      "measured": "banner appends the Tools > \"Re-detect face points only\" hint iff every frame's head2d is NaN in both cameras",
+      "measured": "banner appends the Tools > \"Re-detect face points only\" hint iff every frame's head2d is NaN in both cameras; the action itself reports honestly when the build's detector has no face points to give (detect_project returns how many it wrote)",
       "status": "met",
-      "test": "tests/test_pipeline_fit.py::test_the_recompute_banner_names_the_face_point_migration"
+      "test": "tests/test_pipeline_fit.py::test_the_recompute_banner_names_the_face_point_migration, ::test_redetect_face_points_says_nothing_happened_when_it_did_not, tests/test_detect.py::test_detect_project_reports_how_many_face_point_sets_it_wrote"
     },
     {
       "id": "corrections_survive_a_redetect",
@@ -121,6 +122,10 @@
       "before": 7.60,
       "after": 9.27,
       "note": "+22 % (the audit predicted +17 % for a refit without the gap fill; the two filled joint-frames add the rest). That 22 % is the entirety of what the smoother was buying."
+    },
+    "view_export_dropout_rule": {
+      "value": "identical for every per-joint dropout",
+      "note": "Phase 2's reviewer handed the plan's item 9 ('gaps do not silently inherit: the same rule in view and export') to whichever phase owns the NaN states, i.e. this one. The `filled` array is read by both the 3D view and blender_export._character_bone_frames, so a one-frame fill is posed in both and a longer hole is absent from both (tests/test_gap_fill.py::test_view_and_export_agree_on_which_joints_are_posed). The one case left is a frame with NO valid joint: blender_job holds the previous whole pose while the view draws nothing. That is inherent — omitting the keyframes holds the previous pose too — so it is documented in blender_export._character_bone_frames rather than fixed."
     },
     "jitter_probe_P2_mm": {
       "value": 0.32,

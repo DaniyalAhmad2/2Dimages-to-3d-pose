@@ -47,6 +47,13 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
     absent here — which is what keeps Blender's hold-the-last-known-pose rule
     from quietly papering over a dropout the app is telling the user about.
 
+    One case is left where view and export still differ, and it is inherent:
+    a frame with NO valid joint at all yields None here, and `blender_job`
+    then holds the previous whole pose (`last`) while the 3D view draws
+    nothing. An animation format has no way to express "no pose this frame" —
+    omitting the keyframes holds the previous pose too — so this is stated
+    rather than fixed.
+
     Returns (bone_frames, bone_names) or (None, None) if the character asset is
     unavailable — the Blender job then falls back to its aim-only retarget.
     """
