@@ -152,11 +152,12 @@ def point_line_distances(pt_left, pt_right, F) -> tuple[float, float]:
     is a constant of the rig and rebuilding it per pair is 388 matrix
     inversions on the client take.
 
-    The same formula as `pose3d.quality._point_line_px` — the gate and the
-    metric that reports on the gate must not be able to disagree about what
-    "how far apart are these two views" means, and
+    The ONE implementation: `pose3d.quality._point_line_px` is a thin alias
+    for this (it used to be a verbatim copy) — the gate and the metric that
+    reports on the gate must not be able to disagree about what "how far
+    apart are these two views" means, and
     test_cross_view.py::test_the_gate_and_the_metric_measure_the_same_thing
-    pins them together.
+    is the guard on that.
     """
     pt_left = np.asarray(pt_left, float).reshape(2)
     pt_right = np.asarray(pt_right, float).reshape(2)
@@ -222,6 +223,91 @@ def epipolar_threshold(rig: CalibratedRig,
     return epipolar_gate(float(np.median(dists)), ceiling)
 
 
+def cross_view_verdict(pt_left, pt_right, rig: CalibratedRig, F,
+                       epi_thr: float, allow: dict[str, float],
+                       ) -> tuple[float, bool]:
+    """THE cross-view test for one pair of observations: `(sampson_px, bad)`.
+
+    Two halves — the Sampson distance against the take's gate, and the
+    point-to-line distance in EACH image against 1.4 % of that image's own
+    diagonal — and `bad` is True when EITHER is exceeded. Never both: d_R is
+    systematically the smaller of the two (median 5.57 px vs 10.21 px on the
+    client rig), so requiring both to exceed their own 1.4 % would need
+    d_R > 35.8 px when its measured maximum is 33.8 — strictly more permissive
+    than the rule it replaces, which is the opposite of the intent.
+
+    One function because three callers ask the same question and a fourth
+    reports on the answer: `validate_cross_view` writes the mask,
+    `revalidate_joint` re-derives one entry of it after a drag, and
+    `ui.model.joint_states` explains a joint the mask has not caught up with
+    yet. When those disagree the user is told a joint was rejected for a
+    reason it was not, or shown a green dot on a joint the next recompute
+    will refuse. The Sampson distance is returned as well as the verdict
+    because the tooltip names the number.
+    """
+    pt_left = np.asarray(pt_left, float)
+    pt_right = np.asarray(pt_right, float)
+    if np.isnan(pt_left).any() or np.isnan(pt_right).any():
+        return float("nan"), False
+    e = epipolar_distance(pt_left, pt_right,
+                          rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                          rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    d_l, d_r = point_line_distances(pt_left, pt_right, F)
+    bad = bool((np.isfinite(e) and e > epi_thr)
+               or (np.isfinite(d_l) and d_l > allow[CAM_LEFT])
+               or (np.isfinite(d_r) and d_r > allow[CAM_RIGHT]))
+    return float(e), bad
+
+
+def _judge(frame, j: int, rig: CalibratedRig, F, epi_thr: float,
+           allow: dict[str, float]) -> int:
+    """Write `frame.rejected[*][j]` from this frame's current 2D. 0 or 1.
+
+    The caller has already cleared both flags for `j`; this only ever sets
+    one, on the view that loses.
+    """
+    e, bad = cross_view_verdict(frame.kp2d[CAM_LEFT][j],
+                                frame.kp2d[CAM_RIGHT][j], rig, F, epi_thr,
+                                allow)
+    if not bad:
+        return 0
+    sl = frame.scores[CAM_LEFT][j]
+    sr = frame.scores[CAM_RIGHT][j]
+    # drop the worse (lower-confidence) view, unless it was hand-corrected
+    drop_left = np.nan_to_num(sl) <= np.nan_to_num(sr)
+    cam = CAM_LEFT if drop_left else CAM_RIGHT
+    if frame.corrected[cam][j]:
+        cam = CAM_RIGHT if drop_left else CAM_LEFT      # try the other view
+        if frame.corrected[cam][j]:
+            return 0                                    # both corrected: keep
+    frame.rejected[cam][j] = True
+    return 1
+
+
+def revalidate_joint(frame, joint: int, rig: CalibratedRig,
+                     epi_thr: float) -> None:
+    """Re-derive the mask for ONE joint of ONE frame, after its 2D moved.
+
+    The live re-solve's half of `validate_cross_view`, and it exists so the
+    live path and the batch path cannot reach different poses from the same
+    2D. `ui.model._retriangulate` calls this before triangulating: a drag
+    that reconciles the two views clears the flag on both, a drag that does
+    not leaves the pair refused exactly as the next recompute would refuse
+    it, and a hand-placed point still wins because `frame.corrected` is
+    never auto-rejected.
+
+    The gate `epi_thr` is the take-wide one the caller is holding: a median
+    over every pair in the take, which one dragged point cannot move.
+    """
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    for c in (CAM_LEFT, CAM_RIGHT):
+        frame.rejected[c][joint] = False
+    if np.isfinite(epi_thr):
+        _judge(frame, int(joint), rig, F, float(epi_thr),
+               per_image_allowances(rig))
+
+
 def validate_cross_view(project: ProjectData, rig: CalibratedRig,
                         epi_thr: float | None = None) -> int:
     """Mask 2D observations that are geometrically inconsistent across views.
@@ -229,11 +315,12 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
     When a joint is occluded/out-of-frame in one camera, the detector often
     hallucinates it (e.g. an ankle collapsed onto the knee). Such a point can
     never correspond to the same 3D location the other camera sees, so its
-    epipolar distance is large. For every joint present in BOTH views, two
-    tests are applied — the Sampson distance against `epi_thr`, and the
-    point-to-line distance in EACH image against 1.4 % of that image's own
-    diagonal — and if EITHER is exceeded the observation in the LOWER-
-    confidence view is marked `frame.rejected[cam][j] = True`. It is then not
+    epipolar distance is large. Every joint present in BOTH views is put
+    through `cross_view_verdict` (the Sampson distance against `epi_thr`, and
+    the point-to-line distance in EACH image against 1.4 % of that image's
+    own diagonal, rejected when EITHER is exceeded) and the loser is the
+    observation in the LOWER-confidence view, marked
+    `frame.rejected[cam][j] = True`. It is then not
     triangulated (the 3D point drops out too, since a joint needs both views),
     but it is still drawn, still draggable, and still in the file.
     User-corrected joints are trusted and never auto-rejected.
@@ -261,33 +348,7 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
         for c in (CAM_LEFT, CAM_RIGHT):
             frame.rejected[c][:] = False
         for j in range(NUM_JOINTS):
-            pl = frame.kp2d[CAM_LEFT][j]
-            pr = frame.kp2d[CAM_RIGHT][j]
-            if np.isnan(pl).any() or np.isnan(pr).any():
-                continue
-            e = epipolar_distance(pl, pr, rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
-                                  rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
-            d_l, d_r = point_line_distances(pl, pr, F)
-            # EITHER, never both: d_R is systematically the smaller of the two
-            # (median 5.57 px vs 10.21 px on the client rig), so requiring
-            # both to exceed their own 1.4 % would need d_R > 35.8 px when its
-            # measured maximum is 33.8 — strictly more permissive than the
-            # rule it replaces, which is the opposite of the intent.
-            if not ((np.isfinite(e) and e > epi_thr)
-                    or (np.isfinite(d_l) and d_l > allow[CAM_LEFT])
-                    or (np.isfinite(d_r) and d_r > allow[CAM_RIGHT])):
-                continue
-            sl = frame.scores[CAM_LEFT][j]
-            sr = frame.scores[CAM_RIGHT][j]
-            # drop the worse (lower-confidence) view, unless it was hand-corrected
-            drop_left = np.nan_to_num(sl) <= np.nan_to_num(sr)
-            cam = CAM_LEFT if drop_left else CAM_RIGHT
-            if frame.corrected[cam][j]:
-                cam = CAM_RIGHT if drop_left else CAM_LEFT  # try the other view
-                if frame.corrected[cam][j]:
-                    continue                                 # both corrected: keep
-            frame.rejected[cam][j] = True
-            dropped += 1
+            dropped += _judge(frame, j, rig, F, epi_thr, allow)
     return dropped
 
 
@@ -297,9 +358,13 @@ def gated_kp2d(frame) -> dict[str, np.ndarray]:
     The gate's verdict applied to the arithmetic and nowhere else: everything
     that reads `Frame.kp2d` keeps seeing what the detector and the user put
     there, and only triangulation is denied the observations the gate objects
-    to. A rejected point still triangulates in the LIVE path when the user
-    drags it (`ui.model._retriangulate`), because a drag is the user
-    overruling the gate — and `Frame.set_kp` clears its mask when they do.
+    to. The LIVE path goes through here too (`ui.model._retriangulate` calls
+    `revalidate_joint` and then this), so a drag and a recompute cannot reach
+    different 3D from the same 2D. What a drag buys the user is not an
+    exemption from the gate but a re-judgement of the pair: `Frame.set_kp`
+    clears the mask, `frame.corrected` protects the point they placed, and
+    the view they did not touch is the one that loses if the two still
+    disagree.
     """
     out = {}
     for cam in (CAM_LEFT, CAM_RIGHT):
@@ -339,6 +404,14 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     the 2D the user can see and drag. Returns how many were rejected, so
     callers can tell the user: a bad calibration rejects good detections
     wholesale, which looks exactly like a detection failure.
+
+    `validate=False` means "do not RE-derive the mask", not "do not gate":
+    whatever mask the frames already carry is still applied, because it is
+    part of the frame and `gated_kp2d` is the only route to the arithmetic.
+    On a project loaded from disk that mask was written by a previous
+    session's rig, so pass False only when you know the mask is current or
+    empty (the tests that use it triangulate freshly loaded fixtures, which
+    carry none).
     """
     dropped = 0
     for frame in project.frames:

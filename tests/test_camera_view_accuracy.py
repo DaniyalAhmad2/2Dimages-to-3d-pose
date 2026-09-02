@@ -343,3 +343,128 @@ def test_the_gate_the_dot_quotes_is_the_gate_the_gate_used(qapp):
     m = ProjectModel(project, rig)
     assert m.epipolar_gate() == pytest.approx(
         pipeline.epipolar_threshold(rig, project))
+
+
+def _hallucinated_ankle(project):
+    """The gate's own example: the LEFT view's ankle detected on the knee.
+
+    Written straight into `kp2d` with a low score, which is what the detector
+    does — not through `set_joint_2d`, which would flag it `corrected` and
+    make the gate protect it.
+    """
+    from pose3d.core.skeleton import Joint
+    j = int(Joint.LEFT_ANKLE)
+    f = project.frames[0]
+    f.kp2d[CAM_LEFT][j] = f.kp2d[CAM_LEFT][int(Joint.LEFT_KNEE)]
+    f.scores[CAM_LEFT][j] = 0.3
+    return j
+
+
+def test_the_live_re_solve_agrees_with_the_batch_path():
+    """A drag must not smuggle a rejected observation into the 3D view.
+
+    The gate masks the LEFT ankle; dragging the RIGHT view of the same joint
+    used to triangulate `f.kp2d` directly — the still-rejected left point
+    included — so the joint came back with a 3D position that reached the
+    view and the export while the tooltip went on saying "it was not
+    triangulated", and the next recompute deleted it again. Live and batch
+    now run the same verdict (`pipeline.revalidate_joint` -> `gated_kp2d`)
+    over the same 2D, which the project's constraints require of every manual
+    correction.
+    """
+    project = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    j = _hallucinated_ankle(project)
+    m = ProjectModel(project, rig)
+    m.recompute_all()
+    f = m.frame()
+    assert f.rejected[CAM_LEFT][j], "the hallucination must be rejected first"
+    assert np.isnan(f.pose3d[j]).all()
+
+    # drag the OTHER view of the same joint by a couple of px
+    x, y = f.kp2d[CAM_RIGHT][j]
+    m.set_joint_2d(CAM_RIGHT, j, float(x) + 2.0, float(y) + 2.0)
+    live = np.array(f.pose3d, copy=True)
+    states = m.joint_states(0)
+
+    m.recompute_all()                     # the batch path over the same 2D
+    assert np.array_equal(live, f.pose3d, equal_nan=True)
+    assert np.isnan(live[j]).all(), "a rejected pair triangulated anyway"
+    # ...and what the dot says matches what the arithmetic did
+    assert states[CAM_LEFT][j] == STATE_REJECTED
+
+
+def test_a_drag_does_not_split_the_gate_in_two():
+    """The tooltip's gate and the sidebar's gate are the same number.
+
+    `set_joint_2d` drops the take-wide quality (the sidebar recomputes it) and
+    deliberately keeps the cached gate, on the argument that one dragged point
+    cannot move a median over every pair in the take. This is that argument,
+    measured — if it ever stops holding, the two readouts start disagreeing
+    about the threshold a purple dot was judged against.
+    """
+    project = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    m = ProjectModel(project, rig)
+    m.recompute_all()
+    before = m.epipolar_gate()
+
+    f = m.frame()
+    j = int(np.flatnonzero(np.isfinite(f.kp2d[CAM_RIGHT]).all(1))[0])
+    x, y = f.kp2d[CAM_RIGHT][j]
+    m.set_joint_2d(CAM_RIGHT, j, float(x) + 3.0, float(y) + 3.0)
+
+    assert m.epipolar_gate() == before             # cached, deliberately
+    sidebar = m.quality().epipolar["threshold_px"]
+    assert sidebar == pytest.approx(before, abs=0.5), (sidebar, before)
+
+
+def test_an_unflagged_per_image_failure_still_reads_as_rejected():
+    """`joint_states` runs the WHOLE gate, not the Sampson half of it.
+
+    Between a hand edit and the next recompute the mask is stale for whatever
+    the edit touched, so the state is inferred from the 2D — and the inference
+    used to test only the Sampson distance. Sampson is below BOTH per-image
+    distances by construction, so once the gate is at its ceiling (1.4 % of
+    the smaller image's diagonal, 35.84 px here) the per-image half is the
+    only one that can fire: this pair sits 36.00 px off its epipolar line in
+    the right image, 0.16 px over that image's own allowance, at a Sampson
+    distance of 31.4 px the ceiling waves through. It used to read as OK on a
+    joint the next recompute refuses.
+
+    The take is the fixture with every right-view point pushed 8 px off, which
+    is what puts the gate on its ceiling (median 4.91 -> 5.97+ px).
+    """
+    from pose3d.geometry.triangulate import fundamental_matrix
+    from pose3d.pipeline import per_image_allowances, point_line_distances
+
+    project = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    for f in project.frames:
+        f.kp2d[CAM_RIGHT][:, 1] += 8.0
+    m = ProjectModel(project, rig)
+    m.recompute_all()
+    f = m.frame()
+    thr, allow = m.epipolar_gate(), per_image_allowances(rig)
+    assert thr == pytest.approx(allow[CAM_RIGHT]), "the gate must be on its cap"
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+
+    j = int(np.flatnonzero(np.isfinite(f.pose3d).all(1))[0])
+    base = f.kp2d[CAM_RIGHT][j].copy()
+    for step in np.arange(1.0, 400.0, 1.0):
+        f.kp2d[CAM_RIGHT][j] = base + (0.0, step)
+        e = pipeline.epipolar_distance(
+            f.kp2d[CAM_LEFT][j], f.kp2d[CAM_RIGHT][j],
+            rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+            rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+        _, d_r = point_line_distances(f.kp2d[CAM_LEFT][j],
+                                      f.kp2d[CAM_RIGHT][j], F)
+        if d_r > allow[CAM_RIGHT]:
+            break
+    else:                                            # pragma: no cover
+        pytest.fail("could not push the point past its own image's allowance")
+    assert e <= thr, (e, thr)          # the Sampson half does NOT fire: 31.4 px
+
+    assert not f.rejected[CAM_LEFT][j] and not f.rejected[CAM_RIGHT][j]
+    assert m.joint_states(0)[CAM_RIGHT][j] == STATE_REJECTED
