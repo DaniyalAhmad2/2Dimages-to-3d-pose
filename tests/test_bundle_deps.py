@@ -148,6 +148,17 @@ def test_the_release_workflow_runs_the_audit_before_the_self_test():
 VC_RUNTIME = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
 
 
+def _is_pe(entry):
+    """What PyInstaller's classifier concludes about a collected file.
+
+    The real one opens the file: on Windows an MZ/PE header means 'BINARY'
+    whatever the hook called it (PyInstaller/depend/bindepend.py,
+    `_classify_binary_vs_data`). The synthetic entries here have no content, so
+    go by the extension, which is the same answer for every file involved.
+    """
+    return entry[0].lower().endswith((".dll", ".pyd", ".exe"))
+
+
 def _eval_spec(hook_datas=()):
     """Run pose3d.spec with PyInstaller's build classes stubbed out.
 
@@ -156,14 +167,25 @@ def _eval_spec(hook_datas=()):
     it is the only way to check the decision rather than the source text.
 
     `hook_datas` stands in for what PyInstaller's hooks add to Analysis's data
-    list during a real build; the spec filters that list afterwards.
+    list during a real build — hook-OpenGL.py collects the whole OpenGL/DLLS
+    folder into `datas` on Windows. Analysis does not hand that list back
+    untouched, though: it reclassifies every collected file by content just
+    before returning (build_main.py, "binary vs. data reclassification"), so on
+    Windows the DLLs arrive in `binaries` instead. The stub reclassifies too,
+    or the spec's filter would be tested against a list layout no real Windows
+    build produces.
     """
     import types
 
     def analysis(scripts, **kw):
+        # the VC runtime the spec names is real PE, so it stays in `binaries`
+        # on either platform; only the collected data is in question.
+        datas, binaries = [], list(kw["binaries"])
+        for entry in list(kw["datas"]) + list(hook_datas):
+            reclassified = _is_pe(entry) and sys.platform.startswith("win")
+            (binaries if reclassified else datas).append(entry)
         return types.SimpleNamespace(scripts=scripts, pure=[],
-                                     datas=list(kw["datas"]) + list(hook_datas),
-                                     binaries=list(kw["binaries"]))
+                                     datas=datas, binaries=binaries)
 
     def stub(*args, **kw):
         return types.SimpleNamespace()
@@ -249,7 +271,14 @@ def test_the_windows_build_drops_the_pyopengl_dlls_that_can_never_load(
     and 64-bit. The vc9 and vc10 ones import msvcr90.dll / msvcr100.dll, which
     neither the bundle nor Windows provides — they were the only unsatisfiable
     imports in the shipped bundle — and OpenGL.platform.win32 would never open
-    any of them but the 64-bit vc14 pair."""
+    any of them but the 64-bit vc14 pair.
+
+    Asserted over both TOC lists, because which one holds them is PyInstaller's
+    choice, not ours: the hook files them under `datas` and Analysis's content
+    check moves them to `binaries` before the spec ever sees them. A filter
+    that only cleaned `datas` would pass a test that looked only at `datas`
+    while shipping every one of these.
+    """
     _as_windows(monkeypatch, tmp_path)
     for name in VC_RUNTIME:
         (tmp_path / name).write_bytes(b"")
@@ -260,8 +289,12 @@ def test_the_windows_build_drops_the_pyopengl_dlls_that_can_never_load(
     hook = [("OpenGL\\DLLS\\" + name, "/wherever/OpenGL/DLLS/" + name, "DATA")
             for name in collected]
 
-    datas = _eval_spec(hook).datas
-    kept = [entry[0] for entry in datas if "DLLS" in entry[0]]
+    a = _eval_spec(hook)
+    kept = sorted(entry[0] for entry in a.datas + a.binaries
+                  if "DLLS" in entry[0])
 
     assert kept == ["OpenGL\\DLLS\\freeglut64.vc14.dll",
                     "OpenGL\\DLLS\\gle64.vc14.dll"]
+    # and the reclassification really did happen, so the assertion above is
+    # not passing for the wrong reason
+    assert not [entry for entry in a.datas if "DLLS" in entry[0]]

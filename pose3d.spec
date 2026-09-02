@@ -147,9 +147,20 @@ if IS_WINDOWS:
     # PyOpenGL would never open. Nothing here imports OpenGL.GLUT or OpenGL.GLE
     # in the first place; keeping the vc14 pair means that stays a source
     # decision rather than a packaging one.
-    a.datas = [entry for entry in a.datas
-               if "opengl/dlls/" not in entry[0].replace("\\", "/").lower()
-               or entry[0].lower().endswith("64.vc14.dll")]
+    #
+    # Both lists have to be filtered. The hook files these under `datas`
+    # (`if is_win: datas = collect_data_files('OpenGL')`), but Analysis
+    # reclassifies every collected file by content before it returns
+    # (build_main.py, "binary vs. data reclassification"), and on Windows
+    # anything that opens as a PE is moved to `binaries` — so by the time this
+    # runs, every freeglut/gle DLL is in `a.binaries` and filtering `a.datas`
+    # alone would drop nothing at all.
+    def keep(dest):
+        dest = dest.replace("\\", "/").lower()
+        return "opengl/dlls/" not in dest or dest.endswith("64.vc14.dll")
+
+    a.datas = [entry for entry in a.datas if keep(entry[0])]
+    a.binaries = [entry for entry in a.binaries if keep(entry[0])]
 
 pyz = PYZ(a.pure)
 
