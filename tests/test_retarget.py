@@ -45,6 +45,24 @@ def _poses():
     return out
 
 
+_FIXTURE = (Path(__file__).resolve().parents[1]
+            / "workspace" / "pose3d_projects" / "Imported_Session")
+
+
+def fixture_poses():
+    """The client take's de-tilted poses, or None when it is not checked out.
+
+    The take is gitignored (it is client data), so anything that wants real
+    capture noise has to degrade to the synthetic poses instead of failing.
+    """
+    if not (_FIXTURE / "project.json").is_file():
+        return None
+    from pose3d.core.io_project import load_project
+    from pose3d.geometry.orient import de_tilt_matrix, sequence_up
+    poses = np.stack([f.fitted3d for f in load_project(_FIXTURE).frames])
+    return poses @ de_tilt_matrix(sequence_up(poses)).T
+
+
 def _height(p):
     v = p[~np.isnan(p).any(1)]
     return float(v[:, 2].max() - v[:, 2].min())
@@ -571,3 +589,173 @@ def test_rig_proportions_are_human():
     # anatomy, so the band has to admit both conventions while still rejecting
     # a stylised rig — the one we replaced was 0.83.
     assert 0.90 <= upper / fore <= 1.40, f"upper_arm:forearm = {upper / fore:.3f}"
+
+
+# --- roll: the bone's spin about its own aim -------------------------------
+# `_align` gives the MINIMAL rotation, which leaves a bone's spin about its own
+# aim axis as a numerical accident. These pin it to anatomy instead: the limb's
+# captured bend plane for the arms and legs, the captured hip and shoulder
+# lines for the torso. The defect is purely angular — every positional metric
+# in this file is blind to it — so these tests are the only net it has.
+
+def _roll_gauge(ch, pose, role, gauge=None):
+    """(roll error vs the captured bend plane, roll angle off `gauge`), in deg.
+
+    Both are measured the way the audit did: project the bone's carried rest
+    reference and the target perpendicular to the POSED bone axis and take the
+    signed angle between them about that axis.
+    """
+    from pose3d.geometry.character import _BEND_REF, Character, _proj_perp
+    valid = ~np.isnan(pose).any(1)
+    skin, _, _, Rz = ch._skin_matrices(pose, valid)
+    b = ch.role[role]
+    R = skin[b][:3, :3]
+    ax = R @ (ch.tail[b] - ch.head[b])
+    ax = ax / np.linalg.norm(ax)
+    cur = _proj_perp(R @ ch._rest_ref[b], ax)
+
+    def signed(x):
+        return np.degrees(np.arctan2(float(np.dot(np.cross(x, cur), ax)),
+                                     float(np.dot(x, cur))))
+
+    ja, jm, jb, line = _BEND_REF[role]
+    tgt = Character._hemisphere(
+        Rz @ np.cross(pose[int(jm)] - pose[int(ja)], pose[int(jb)] - pose[int(jm)]),
+        Rz @ (pose[int(line[1])] - pose[int(line[0])]))
+    tgt = None if tgt is None else _proj_perp(tgt, ax)
+    err = None if tgt is None else -signed(tgt)
+    return err, (None if gauge is None else signed(_proj_perp(gauge, ax)))
+
+
+def _bent_left_arm(ch, bend_deg, twist_deg):
+    """A subject with the rig's own proportions whose left elbow is bent
+    `bend_deg` off straight, in a plane rolled `twist_deg` about the upper arm.
+    """
+    from pose3d.geometry.character import _perp
+    sub = _subject_from_rig(ch)
+    sh, el = sub[int(Joint.LEFT_SHOULDER)], sub[int(Joint.LEFT_ELBOW)]
+    wr = sub[int(Joint.LEFT_WRIST)]
+    axis = (el - sh) / np.linalg.norm(el - sh)
+    side = _rot_about(axis, twist_deg) @ _perp(axis)
+    a = np.radians(bend_deg)
+    sub[int(Joint.LEFT_WRIST)] = el + np.linalg.norm(wr - el) * (
+        np.cos(a) * axis + np.sin(a) * side)
+    return sub
+
+
+def test_limb_roll_matches_the_captured_bend_plane():
+    """The upper arm's spin is a MEASUREMENT: the elbow is a hinge, so the
+    plane the arm bends in fixes it. Bend the synthetic elbow 40 deg in a plane
+    rolled 60 deg about the upper arm and the posed bone must carry its rest
+    bend reference onto that plane."""
+    ch = _ch()
+    sub = _bent_left_arm(ch, 40.0, 60.0)
+    ch.fit_to_subject(sub[None])
+    err, _ = _roll_gauge(ch, sub, "upper_arm.L")
+    assert abs(err) < 2.0, f"roll is {err:.1f} deg off the captured bend plane"
+
+
+def test_roll_is_continuous_across_a_straightening_limb():
+    """A limb that straightens loses its bend plane, so the roll must FADE, not
+    switch off. Sweeping 60 -> 0 deg of bend one degree at a time, no step may
+    move the roll more than 15 deg; the unweighted correction jumps 55.1."""
+    ch = _ch()
+    ch.fit_to_subject(_subject_from_rig(ch)[None])
+    gauge = np.array([0.0, 0.0, 1.0])
+    rolls = [_roll_gauge(ch, _bent_left_arm(ch, float(d), 60.0),
+                         "upper_arm.L", gauge)[1]
+             for d in range(60, -1, -1)]
+    step = np.abs(np.diff(np.degrees(np.unwrap(np.radians(rolls)))))
+    assert step.max() <= 15.0, f"roll jumps {step.max():.1f} deg in one degree of bend"
+
+
+def test_roll_does_not_move_the_canonical_joints(monkeypatch):
+    """What makes the limb roll safe to ship: it spins each bone about its own
+    aim, and every limb child's head sits ON that aim, so not one canonical
+    joint moves. (The TORSO reference deliberately does move the hip line —
+    that is the point of it — so it stays on in both halves here.)"""
+    import pose3d.geometry.character as C
+    with_roll = [_ch().posed_joints(p, ~np.isnan(p).any(1)) for p in _poses()]
+    monkeypatch.setattr(C, "_BEND_REF", {})
+    without = [_ch().posed_joints(p, ~np.isnan(p).any(1)) for p in _poses()]
+    for a, b in zip(with_roll, without):
+        assert np.allclose(a, b, atol=1e-9, equal_nan=True), \
+            f"limb roll moved a joint by {np.nanmax(np.abs(a - b)):.2e}"
+
+
+def test_roll_weight_zero_restores_the_minimal_rotation(monkeypatch):
+    """The documented rollback: setting the weight to 0 must reproduce the
+    pre-roll matrices exactly, not approximately."""
+    import pose3d.geometry.character as C
+    monkeypatch.setattr(C, "_ROLL_WEIGHT", 0.0)
+    off = _ch()
+    monkeypatch.setattr(C, "_BEND_REF", {})
+    monkeypatch.setattr(C, "_LINE_REF", {})
+    bare = _ch()
+    for p in _poses():
+        valid = ~np.isnan(p).any(1)
+        assert np.abs(off._skin_matrices(p, valid)[0]
+                      - bare._skin_matrices(p, valid)[0]).max() == 0.0
+
+
+def test_hip_line_follows_capture(monkeypatch):
+    """The pelvis used to keep whatever spin the torso aim left it with, so the
+    character's hips faced the rig's way, not the subject's."""
+    import pose3d.geometry.character as C
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    pelvis = sub[int(Joint.PELVIS)]
+    twist = _rot_about([0, 0, 1.0], 25.0)
+    for j in (Joint.LEFT_HIP, Joint.RIGHT_HIP, Joint.LEFT_KNEE, Joint.RIGHT_KNEE,
+              Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE):
+        sub[int(j)] = twist @ (sub[int(j)] - pelvis) + pelvis
+
+    def hip_error(c):
+        got = c.posed_joints(sub, ~np.isnan(sub).any(1))
+        a = got[int(Joint.RIGHT_HIP)] - got[int(Joint.LEFT_HIP)]
+        b = sub[int(Joint.RIGHT_HIP)] - sub[int(Joint.LEFT_HIP)]
+        return np.degrees(np.arccos(np.clip(float(
+            np.dot(a / np.linalg.norm(a), b / np.linalg.norm(b))), -1, 1)))
+
+    assert hip_error(ch) <= 2.0                 # measured 0.0 deg
+    monkeypatch.setattr(C, "_LINE_REF", {})
+    assert hip_error(_ch()) > 15.0, "the test cannot see the hip reference"
+
+
+def test_align_is_deterministic_near_180():
+    """At exactly 180 deg every axis perpendicular to the bone maps it onto its
+    target, so the arbitrary pick flipped the roll by 163.8 deg for a 1 deg
+    wobble. With a reference the choice is the same on both sides."""
+    from pose3d.geometry.character import _align, _proj_perp
+    a = np.array([0.0, 0.0, 1.0])
+    ref = np.array([0.0, 1.0, 0.0])            # a rest roll reference
+    gauge = np.array([1.0, 0.0, 0.0])
+    rolls = []
+    for deg in (179.0, 180.0, 181.0):
+        b = _rot_about([1.0, 0, 0], deg) @ a
+        cur = _proj_perp(_align(a, b, ref=ref) @ ref, b)
+        g = _proj_perp(gauge, b)
+        rolls.append(np.degrees(np.arctan2(
+            float(np.dot(np.cross(g, cur), b)), float(np.dot(g, cur)))))
+    step = np.abs(np.diff(np.degrees(np.unwrap(np.radians(rolls)))))
+    assert step.max() < 5.0, f"roll flips {step.max():.1f} deg across 180"
+
+
+# --- one skinning for the view and the export ------------------------------
+
+def test_view_and_export_share_one_skinning():
+    """`pose_bone_matrices` is what Blender is driven with; run it back through
+    Blender's own deform (matrix @ rest^-1) and it must reproduce the joints the
+    3D view draws. Anything else and the export stops matching the preview."""
+    ch = _ch()
+    fx = fixture_poses()
+    for p in list(_poses()) + ([] if fx is None else list(fx)):
+        valid = ~np.isnan(p).any(1)
+        mats = ch.pose_bone_matrices(p, valid)
+        skin = np.array([np.array(mats[n]) @ np.linalg.inv(ch.rest[b])
+                         for b, n in enumerate(ch.bone_names)])
+        _, pelvis, scale, Rz = ch._skin_matrices(p, valid)
+        got = ch._from_rig(ch._joints_from_skin(skin), pelvis, scale, Rz)
+        want = ch.posed_joints(p, valid)
+        assert np.allclose(got, want, atol=1e-9, equal_nan=True)

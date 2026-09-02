@@ -5,8 +5,9 @@ capsules along the bones + spheres at the joints) with the coloured skeleton
 (joints + bones) overlaid on top — matching the mockup's grey mannequin.
 
 The pose stands ON the grid (grid = ground): the world up-axis is detected from
-the skeleton (head vs ankles), mapped to view +Z, centred horizontally, and its
-lowest joint dropped to z = 0. Unit-agnostic (metres or centimetres).
+the skeleton (head vs ankles), mapped to view +Z, centred horizontally, and the
+sole beneath the lower ankle dropped to z = 0 (see `ground_datum`).
+Unit-agnostic (metres or centimetres).
 """
 from __future__ import annotations
 
@@ -16,6 +17,30 @@ from pyqtgraph import Vector
 
 from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
 from pose3d.geometry.orient import detect_vertical, upright_matrix
+
+
+def ground_datum(verts, joints, drop):
+    """View-space z of the ground plane under a posed character.
+
+    The SOLE beneath the lower ANKLE, not the lowest mesh vertex. Which vertex
+    is lowest changes from frame to frame — a foot, a knee, a fingertip — so
+    the old rule slid the ground plane about under the figure and it bobbed
+    against the grid by up to 11 % of body height. The ankles are tracked
+    joints, so this datum moves only when the subject does. `drop` is the rig's
+    rest ankle-to-sole height in these same units (`Character.ground_drop`).
+    Falls back to the old rule when neither ankle could be posed.
+
+    The sole is deliberately NOT levelled onto the plane: the shin of this
+    rigid-footed mannequin genuinely tilts 16-86 deg, and flattening the foot
+    would replace a measurement with a convention.
+    """
+    if joints is not None:
+        z = [joints[int(j)][2]
+             for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
+        z = [q for q in z if np.isfinite(q)]
+        if z:
+            return float(min(z)) - float(drop)
+    return float(verts[:, 2].min())
 
 
 class View3D(gl.GLViewWidget):
@@ -152,8 +177,9 @@ class View3D(gl.GLViewWidget):
         cx, cy = vv[:, 0].mean(), vv[:, 1].mean()
         v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= vv[:, 2].min()
 
-        # pose the character, then ground on ITS lowest vertex (the sole) so the
-        # feet rest ON the plane instead of the ankle (feet would pierce it).
+        # pose the character, then ground it on the sole under its lower ankle
+        # so the feet rest ON the plane instead of the ankle (feet would pierce
+        # it) without the ground sliding about frame to frame.
         vpose = np.where(valid[:, None], v, np.nan)
         # Same world->view rotation as the pose; the grounding translation is
         # deliberately NOT applied, because only a direction basis is read off
@@ -161,7 +187,8 @@ class View3D(gl.GLViewWidget):
         vhead = self._to_view(head3d) if head3d is not None else None
         verts, faces, cj = self._skin(vpose, vhead)
         if verts is not None and len(verts):
-            dz = float(verts[:, 2].min())
+            dz = ground_datum(verts, cj,
+                              self._character.ground_drop(vpose, valid))
             verts = verts.copy(); verts[:, 2] -= dz
             v[:, 2] -= dz
             if cj is not None:

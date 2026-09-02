@@ -98,6 +98,67 @@ _IK_CHAINS = (
     ("thigh.R", "shin.R", Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
 )
 
+# --- roll references -------------------------------------------------------
+# A bone's aim fixes two of its three rotational degrees of freedom; the third
+# — its spin ABOUT that aim — used to be whatever `_align`'s minimal rotation
+# happened to give, which is a numerical accident rather than a measurement.
+# These tables say what each bone's roll is measured against instead.
+#
+# For `upper_arm` and `thigh` the roll IS a measurement: the elbow and the knee
+# are hinges, so the plane the limb bends in genuinely fixes the parent bone's
+# spin. For `forearm` and `shin` it is a CONVENTION — forearm pronation and
+# shin twist are never observed (there are no hand or foot keypoints), so those
+# bones simply carry the hinge plane on. A future reader must not read a small
+# roll error on a forearm as accuracy.
+_SHOULDER_LINE = (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)
+_HIP_LINE = (Joint.LEFT_HIP, Joint.RIGHT_HIP)
+
+# role -> (root, mid, end, torso line). cross(mid - root, end - mid) is the
+# limb's bend-plane normal; the torso line pins it to a repeatable hemisphere
+# (a cross product's sign does not follow from joint order alone).
+_BEND_REF = {
+    "upper_arm.L": (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW,
+                    Joint.LEFT_WRIST, _SHOULDER_LINE),
+    "forearm.L":   (Joint.LEFT_SHOULDER, Joint.LEFT_ELBOW,
+                    Joint.LEFT_WRIST, _SHOULDER_LINE),
+    "upper_arm.R": (Joint.RIGHT_SHOULDER, Joint.RIGHT_ELBOW,
+                    Joint.RIGHT_WRIST, _SHOULDER_LINE),
+    "forearm.R":   (Joint.RIGHT_SHOULDER, Joint.RIGHT_ELBOW,
+                    Joint.RIGHT_WRIST, _SHOULDER_LINE),
+    "thigh.L":     (Joint.LEFT_HIP, Joint.LEFT_KNEE,
+                    Joint.LEFT_ANKLE, _HIP_LINE),
+    "shin.L":      (Joint.LEFT_HIP, Joint.LEFT_KNEE,
+                    Joint.LEFT_ANKLE, _HIP_LINE),
+    "thigh.R":     (Joint.RIGHT_HIP, Joint.RIGHT_KNEE,
+                    Joint.RIGHT_ANKLE, _HIP_LINE),
+    "shin.R":      (Joint.RIGHT_HIP, Joint.RIGHT_KNEE,
+                    Joint.RIGHT_ANKLE, _HIP_LINE),
+}
+
+# role -> the captured line the bone's roll follows directly. The pelvis and
+# the spine follow the HIP line, the chest the SHOULDER line: that is what
+# makes the character's hips face where the subject's do instead of inheriting
+# whatever spin the torso aim left behind.
+#
+# `neck`/`head` get no reference (the face basis already gives the head a full
+# measured orientation, and a roll would double-drive it); `clavicle.*`,
+# `hand.*` and `foot.*` get none either — they have no keypoints of their own,
+# so once the parent's roll is right theirs is inherited right.
+_LINE_REF = {"hips": _HIP_LINE, "spine": _HIP_LINE, "chest": _SHOULDER_LINE}
+
+# Straight-limb fallback. Near full extension the bend plane is undefined, so
+# the roll fades out CONTINUOUSLY instead of switching off at a threshold: the
+# left elbow's minimum bend on the client take is 22.7 deg — above any sane
+# guard, so a guard would never fire — while its bend normal still jumps
+# 55.7 deg between neighbouring frames there. At 22.7 deg this ramp gives
+# w = 0.14, which is what suppresses the pop.
+_ROLL_BEND_MIN_DEG = 20.0       # below this the roll term vanishes
+_ROLL_BEND_FULL_DEG = 40.0      # at and above this it applies in full
+# Rollback switch: every roll angle is multiplied by this, so 0.0 restores the
+# pre-roll minimal-rotation matrices bit for bit.
+_ROLL_WEIGHT = 1.0
+
+
 # Where each canonical joint is read off the posed rig. Heads are preferred:
 # a bone's head is the exact FK position carried by its parent, so the reported
 # skeleton is guaranteed consistent with the mesh. Fallbacks are used when the
@@ -128,14 +189,23 @@ _SCALE_WEIGHTS = {Joint.LEFT_KNEE: 2.0, Joint.RIGHT_KNEE: 2.0,
                   Joint.LEFT_ANKLE: 2.0, Joint.RIGHT_ANKLE: 2.0}
 
 
-def _align(a, b):
-    """3x3 rotation taking unit vector a to unit vector b."""
+def _align(a, b, ref=None):
+    """3x3 rotation taking unit vector a to unit vector b.
+
+    At (near) 180 deg the minimal rotation is undefined — every axis
+    perpendicular to `a` maps it onto `b` — and the arbitrary pick used to flip
+    the bone's roll by 163.8 deg for a 1 deg wobble. Given `ref`, the bone's
+    rest roll reference, spin about the axis that defines instead: it is the
+    same choice on either side of 180 deg, so the branch stops deciding
+    anything.
+    """
     a = a / (np.linalg.norm(a) + 1e-12)
     b = b / (np.linalg.norm(b) + 1e-12)
     v = np.cross(a, b); c = float(np.dot(a, b))
     if c < -0.999999:
-        perp = np.array([1.0, 0, 0]) if abs(a[0]) < 0.9 else np.array([0, 1.0, 0])
-        axis = np.cross(a, perp); axis /= np.linalg.norm(axis)
+        axis = _unit(np.cross(a, ref)) if ref is not None else None
+        if axis is None:
+            axis = _perp(a)
         return 2 * np.outer(axis, axis) - np.eye(3)  # 180° about axis
     s = np.linalg.norm(v)
     if s < 1e-12:
@@ -149,6 +219,38 @@ def _perp(u):
     a = np.array([1.0, 0, 0]) if abs(u[0]) < 0.9 else np.array([0, 1.0, 0])
     v = np.cross(u, a)
     return v / (np.linalg.norm(v) + 1e-12)
+
+
+def _unit(v):
+    """v normalised, or None if it is too short (or not finite) to have a
+    direction — every roll reference is a direction, so this is the one place
+    that decides a reference is unusable."""
+    v = np.asarray(v, float)
+    n = float(np.linalg.norm(v))
+    return v / n if n > 1e-9 and np.isfinite(n) else None
+
+
+def _proj_perp(v, axis):
+    """Unit component of v perpendicular to the unit vector `axis`, or None
+    when v is (near) parallel to it and carries no roll information."""
+    w = v - float(np.dot(v, axis)) * axis
+    n = float(np.linalg.norm(w))
+    return w / n if n > 1e-6 else None
+
+
+def _rot(axis, ang):
+    """Rotation of `ang` radians about the unit vector `axis` (Rodrigues)."""
+    K = np.array([[0, -axis[2], axis[1]],
+                  [axis[2], 0, -axis[0]],
+                  [-axis[1], axis[0], 0]])
+    return np.eye(3) + np.sin(ang) * K + (1 - np.cos(ang)) * (K @ K)
+
+
+def _bend_weight(bend_deg):
+    """How much roll authority a limb bent `bend_deg` off straight has."""
+    return float(np.clip(
+        (bend_deg - _ROLL_BEND_MIN_DEG)
+        / (_ROLL_BEND_FULL_DEG - _ROLL_BEND_MIN_DEG), 0.0, 1.0))
 
 
 class Character:
@@ -212,6 +314,11 @@ class Character:
         n = np.linalg.norm(d)
         self._rest_torso = (d / n if n > 1e-9 and not np.isnan(d).any()
                             else self.tail[self.hips_idx] - self.head[self.hips_idx])
+        self._rest_ref = self._rest_roll_refs(rj)
+        # The rig's rest ankle-to-sole height, which is what the 3D view drops
+        # the ankle by to stand the character on the ground. 0.71217 rig units
+        # on the bundled rig = 4.94 % of its 14.4228 height.
+        self.ankle_sole_drop = self._rest_ankle_sole_drop(rj)
         self._rest_head = self._rest_head_basis()
         # The neck BONE's rest angle off the torso line, for the legacy
         # no-face-keypoints fallback: _bone_fk aims the bone axis at the
@@ -284,6 +391,57 @@ class Character:
             nv = np.linalg.norm(v)
             poles[ub] = v / nv if nv > 1e-9 else _perp(u)
         return poles
+
+    @staticmethod
+    def _hemisphere(n, line):
+        """`n` as a unit vector on `line`'s side, or None if either is unusable.
+
+        The sign of a bend normal does not follow from joint order alone, so it
+        is pinned to the torso's medial-lateral axis — where a limb hinge's
+        normal anatomically lies. Doing that from the torso of the SAME frame,
+        rather than from the previous frame's answer, is what keeps posing a
+        pure function of one frame and so keeps the 3D view and the Blender
+        export identical for free.
+        """
+        n = _unit(n)
+        line = _unit(line) if line is not None else None
+        if n is None or line is None:
+            return None
+        return -n if float(np.dot(n, line)) < 0.0 else n
+
+    def _rest_roll_refs(self, rj):
+        """{bone: unit roll reference} measured on the rig at REST.
+
+        Built exactly as the captured references in `_roll_targets` are,
+        hemisphere fix included, so the two live in the same half-space and the
+        angle between them is the bone's roll error. A bone whose reference is
+        degenerate at rest (a limb the rig holds straight) simply gets none and
+        keeps the minimal rotation.
+        """
+        out = {}
+        for role, (ja, jm, jb, line) in _BEND_REF.items():
+            b = self.role.get(role)
+            if b is None:
+                continue
+            n = self._hemisphere(
+                np.cross(rj[int(jm)] - rj[int(ja)], rj[int(jb)] - rj[int(jm)]),
+                rj[int(line[1])] - rj[int(line[0])])
+            if n is not None:
+                out[b] = n
+        for role, (jl, jr) in _LINE_REF.items():
+            b = self.role.get(role)
+            if b is None:
+                continue
+            d = _unit(rj[int(jr)] - rj[int(jl)])
+            if d is not None:
+                out[b] = d
+        return out
+
+    def _rest_ankle_sole_drop(self, rj):
+        """How far the rig's rest ankles sit above its soles, in rig units."""
+        z = [rj[int(j)][2] for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
+        z = [q for q in z if np.isfinite(q)]
+        return float(min(z) - self.verts0[:, 2].min()) if z else 0.0
 
     def _resolve_joint_sources(self):
         """{canonical joint: (bone index, 'head'|'tail'|'mid')} for this rig."""
@@ -471,12 +629,80 @@ class Character:
         M[:3, 3] = head - R @ self.head[b]
         return M
 
-    def _bone_fk(self, b, base, end):
+    def _roll(self, b, R, aim, ref_target, weight):
+        """Spin `R` about `aim` so bone b's carried rest reference meets the
+        captured one, by `weight` of the way.
+
+        This is a PURE roll: the bone still aims exactly where it did, and
+        because each limb child's head sits ON its parent's axis, rolling a
+        limb bone moves no canonical joint at all. `weight` fades the term out
+        as a limb straightens and its bend plane stops being defined.
+        """
+        r0 = self._rest_ref.get(b)
+        if r0 is None or ref_target is None or weight <= 0.0:
+            return R
+        cur = _proj_perp(R @ r0, aim)
+        tgt = _proj_perp(ref_target, aim)
+        if cur is None or tgt is None:
+            return R                    # a reference parallel to the aim
+        ang = np.arctan2(float(np.dot(np.cross(cur, tgt), aim)),
+                         float(np.dot(cur, tgt)))
+        return _rot(aim, weight * ang) @ R
+
+    def _roll_targets(self, up_pose, valid, Rz):
+        """{bone: (captured roll reference, weight)} for one frame, RIG space.
+
+        References are directions, so `to_rig`'s uniform scale and translation
+        are irrelevant and only the yaw alignment `Rz` is applied.
+        """
+        def line(pair):
+            jl, jr = pair
+            if not (valid[int(jl)] and valid[int(jr)]):
+                return None
+            return _unit(Rz @ (up_pose[int(jr)] - up_pose[int(jl)]))
+
+        out = {}
+        if _ROLL_WEIGHT <= 0.0:
+            return out                  # the rollback switch, thrown
+        for role, (ja, jm, jb, pair) in _BEND_REF.items():
+            b = self.role.get(role)
+            if b is None or b not in self._rest_ref:
+                continue
+            if not all(valid[int(x)] for x in (ja, jm, jb)):
+                continue
+            v1 = _unit(up_pose[int(jm)] - up_pose[int(ja)])
+            v2 = _unit(up_pose[int(jb)] - up_pose[int(jm)])
+            if v1 is None or v2 is None:
+                continue
+            bend = np.degrees(np.arccos(np.clip(float(np.dot(v1, v2)), -1.0, 1.0)))
+            w = _ROLL_WEIGHT * _bend_weight(bend)
+            if w <= 0.0:
+                continue                # straight limb: no bend plane to follow
+            n = self._hemisphere(Rz @ np.cross(v1, v2), line(pair))
+            if n is not None:
+                out[b] = (n, w)
+        # The torso lines get full weight. The hip line is only a 16.3 mm
+        # segment, but at this take's own 2-3 px noise a Monte-Carlo moves it by
+        # just 2.3-3.4 deg against an 11.8 deg error, and its frame-to-frame
+        # coherence matches the shoulder line's: signal, not jitter.
+        for role, pair in _LINE_REF.items():
+            b = self.role.get(role)
+            if b is None or b not in self._rest_ref:
+                continue
+            d = line(pair)
+            if d is not None:
+                out[b] = (d, _ROLL_WEIGHT)
+        return out
+
+    def _bone_fk(self, b, base, end, *, ref_target=None, weight=1.0):
         """Skin matrix for bone b, hanging off its already-posed parent.
 
         The head is carried by the parent, so joined bones can never separate,
         and the bone then rotates about that head to aim at `end`. Rotation
-        only — the bone keeps its rest length, so the mesh cannot deform.
+        only — the bone keeps its rest length, so the mesh cannot deform. The
+        aim leaves the bone's spin about its own axis free; `ref_target` (in
+        rig space) is what it is set from, instead of the numerical accident
+        the minimal rotation happens to give.
         """
         head = base[:3, :3] @ self.head[b] + base[:3, 3]
         rest_d = self.tail[b] - self.head[b]
@@ -485,7 +711,9 @@ class Character:
         n_want = float(np.linalg.norm(d_want))
         if n_rest < 1e-9 or n_want < 1e-9:
             return base
-        R = _align(rest_d / n_rest, d_want / n_want)
+        aim = d_want / n_want
+        R = _align(rest_d / n_rest, aim, ref=self._rest_ref.get(b))
+        R = self._roll(b, R, aim, ref_target, weight)
         M = np.eye(4)
         M[:3, :3] = R
         M[:3, 3] = head - R @ self.head[b]      # pin the head in place
@@ -527,6 +755,15 @@ class Character:
         knee = root + L1 * (cos_a * u + sin_a * w)
         return knee, root + u * dc
 
+    def _frame_scale(self, up_pose, valid):
+        """The uniform scale for one frame: the take-wide fit once
+        `fit_to_subject` has run, else this frame's own height ratio."""
+        if self._scale is not None:
+            return self._scale
+        vpts = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[valid]
+        our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
+        return self.rig_h / our_h
+
     def _skin_matrices(self, up_pose, valid, head_pts=None):
         """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
@@ -551,12 +788,7 @@ class Character:
                 return None, None, None, None
             pelvis = np.mean(hips, axis=0)
 
-        if self._scale is not None:
-            scale = self._scale
-        else:
-            vpts = up_pose[valid]
-            our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
-            scale = self.rig_h / our_h
+        scale = self._frame_scale(up_pose, valid)
 
         ls, rs = J(j.LEFT_SHOULDER), J(j.RIGHT_SHOULDER)
         Rz = np.eye(3)
@@ -569,6 +801,8 @@ class Character:
                       - np.arctan2(our_right[1], our_right[0]))
                 ca, sa = np.cos(dt), np.sin(dt)
                 Rz = np.array([[ca, -sa, 0], [sa, ca, 0], [0, 0, 1.0]])
+
+        roll = self._roll_targets(up_pose, valid, Rz)
 
         def to_rig(p):
             return self.hips_world + (Rz @ (p - pelvis)) * scale
@@ -614,9 +848,15 @@ class Character:
         R_hips = np.eye(3)
         mid = resolve(_MID)
         if mid is not None:
-            want = mid - hips_pos
-            if np.linalg.norm(want) > 1e-9:
-                R_hips = _align(self._rest_torso, want)
+            n_want = float(np.linalg.norm(mid - hips_pos))
+            if n_want > 1e-9:
+                # the pelvis aims up the torso; the captured HIP line then says
+                # which way it faces about that aim (F12)
+                aim = (mid - hips_pos) / n_want
+                ref0 = self._rest_ref.get(self.hips_idx)
+                R_hips = _align(self._rest_torso, aim, ref=ref0)
+                tgt, w = roll.get(self.hips_idx, (None, 0.0))
+                R_hips = self._roll(self.hips_idx, R_hips, aim, tgt, w)
         skin[self.hips_idx][:3, :3] = R_hips
         skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
 
@@ -663,8 +903,11 @@ class Character:
 
             if b == head_bone and head_R is not None:
                 skin[b] = self._bone_rot(b, base, head_R)
+            elif end is None:
+                skin[b] = base
             else:
-                skin[b] = base if end is None else self._bone_fk(b, base, end)
+                tgt, w = roll.get(b, (None, 0.0))
+                skin[b] = self._bone_fk(b, base, end, ref_target=tgt, weight=w)
         return skin, pelvis, scale, Rz
 
     # --- outputs -----------------------------------------------------------
@@ -672,6 +915,15 @@ class Character:
         """Rig space -> the pose space the caller supplied."""
         pts = np.atleast_2d(np.asarray(pts, float))
         return pelvis + (Rz.T @ (pts - self.hips_world).T).T / scale
+
+    def ground_drop(self, up_pose, valid) -> float:
+        """The rig's rest ankle-to-sole height in the CALLER's pose units.
+
+        Grounding on the sole beneath the ankle, rather than on whichever mesh
+        vertex is lowest this frame, is what stops the figure bobbing against
+        the grid; see `pose3d.ui.view3d.ground_datum`.
+        """
+        return self.ankle_sole_drop / self._frame_scale(up_pose, valid)
 
     def pose_and_joints(self, up_pose, valid, head_pts=None):
         """(verts, faces, joints) — mesh and canonical joints of the posed rig.
