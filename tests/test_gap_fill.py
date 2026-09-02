@@ -276,8 +276,14 @@ def test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame():
 
     poses, n = fill_gaps(project)
 
-    # every value the fill wrote is flagged, and every flag has a value
-    assert n == 2                                    # 0012 R_KNEE, 0021 L_ANKLE
+    # every value the fill wrote is flagged, and every flag has a value.
+    # Phase 5b: the COCO-17 detection of this take dropped two joint-frames
+    # (0012 R_KNEE, 0021 L_ANKLE); the Halpe-26 one the app now runs drops
+    # none, so the real-data case here is the EMPTY one — the fill must leave a
+    # hole-free take exactly as it found it. The fill's own behaviour is
+    # measured on synthetic holes above; what is still real data below is the
+    # comparison of midpoint against hold-previous.
+    assert n == 0
     for t, (f, before) in enumerate(zip(project.frames, raw)):
         written = np.isnan(before).any(1) & ~np.isnan(poses[t]).any(1)
         assert np.array_equal(written, np.asarray(f.filled, bool))
@@ -288,8 +294,8 @@ def test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame():
     # measured on the take as it was DETECTED (before the fill), so every
     # sample has an observation to be right or wrong about
     mid, hold = _fill_errors_pct_of_height(raw, height)
-    assert mid.size == 354
-    # today: midpoint 4.40 median / 13.29 p90, hold-previous 8.04 / 23.19
+    assert mid.size == 360                   # 24 interior frames x 15 joints
+    # today: midpoint 4.21 median / 12.45 p90, hold-previous 7.27 / 20.57
     assert np.median(mid) < np.median(hold)
     assert np.percentile(mid, 90) < np.percentile(hold, 90)
-    assert np.median(mid) <= 5.1, f"{np.median(mid):.2f} % of height"
+    assert np.median(mid) <= 4.8, f"{np.median(mid):.2f} % of height"

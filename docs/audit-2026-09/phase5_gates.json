@@ -1,0 +1,171 @@
+{
+  "generated_by": "tests/test_head_source.py::measure_gate_table_on_fixture + tools/measure_head_gates.gate_table",
+  "reproduce": "QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/test_head_source.py -k gate_table",
+  "what_this_is": "The SHIPPING gate table for the Halpe-26 skull HEAD (Phase 5b), measured on the committed fixture tests/fixtures/client_take, reconstructed from its 2D by the shipped pipeline \u2014 the client's 26-frame take, re-detected with Halpe-26 on 2026-09-03 \u2014 so every number here is re-derivable in CI without the client's photographs. The pre-registered table, the COCO-17 baseline column and the run that produced them are docs/audit-2026-09/phase5_metrics.json, which is evidence and is unedited: it still records the verdict as 6 of 7, because that is what the table fixed in advance said.",
+  "take": "tests/fixtures/client_take (Imported_Session, 26 frames)",
+  "frames": 26,
+  "detected_with": "rtmpose-balanced-feet (Halpe-26), skull HEAD, derived NECK/PELVIS",
+  "switch": {
+    "constant": "pose3d.detect.rtmpose.USE_HALPE26",
+    "ships_on": true
+  },
+  "restated_gate": {
+    "key": "neck_lshoulder_bone_cv_pct",
+    "pre_registered_rule": "<= 5.15 % (the COCO-17 baseline)",
+    "rule": "<= 6.5 %",
+    "measured": 5.98202343512588,
+    "decided_by": "controller ruling, 2026-09-03, after the measurement",
+    "reason": "The 5.15 % bar was the COCO-17 measurement itself, not a tolerance anybody had derived: it made the rule 'no worse than today, at all, on this one bone'. The 0.83 pp it moves is about 0.13 mm on a 16 mm bone and roughly one standard error of a coefficient of variation at n=26, set against an ~11 pp improvement (12.73 -> 1.54 % of body height) on the most visible joint in the take. Restated to 6.5 %, which leaves the measured 5.98 % a real margin to regress into before the gate is silent.",
+    "cost_if_wrong": "The neck-shoulder bone length wobbles 0.8 pp more frame to frame than it did under COCO-17. It is a RAW-measurement statistic: the bone fit holds that length rigid, so the delivered pose and the exported file do not inherit the wobble; what it can cost is a slightly noisier quality readout on that bone.",
+    "what_would_reopen_it": "neck-Lshoulder CV above 6.5 % on the fixture, or the derived NECK showing the same spread in the DELIVERED pose rather than the raw one."
+  },
+  "gates": [
+    {
+      "gate": "HEAD retarget, no face points",
+      "key": "head_retarget_no_face_pct",
+      "rule": "<= 4.0 % of body height",
+      "baseline": 12.733440611004376,
+      "measured": 1.539167712174258,
+      "pass": true,
+      "unit": "%",
+      "source": "tests/fixtures/client_take (re-measured)"
+    },
+    {
+      "gate": "HEAD retarget, with face points",
+      "key": "head_retarget_with_face_pct",
+      "rule": "<= 3.0 % of body height",
+      "baseline": 9.027670299476386,
+      "measured": 1.668198562479525,
+      "pass": true,
+      "unit": "%",
+      "source": "tests/fixtures/client_take (re-measured)"
+    },
+    {
+      "gate": "neck-head bone CV",
+      "key": "neck_head_bone_cv_pct",
+      "rule": "<= 4.0 %",
+      "baseline": 9.525882972703029,
+      "measured": 3.125237262141566,
+      "pass": true,
+      "unit": "%",
+      "source": "tests/fixtures/client_take (re-measured)"
+    },
+    {
+      "gate": "neck-Lshoulder bone CV",
+      "key": "neck_lshoulder_bone_cv_pct",
+      "rule": "<= 6.5 %",
+      "baseline": 5.1466792932557555,
+      "measured": 5.98202343512588,
+      "pass": true,
+      "unit": "%",
+      "restated": true,
+      "source": "tests/fixtures/client_take (re-measured)"
+    },
+    {
+      "gate": "worst body-joint regression (LEFT_WRIST)",
+      "key": "worst_body_joint_regression_pct",
+      "rule": "<= 0.5 % of body height",
+      "baseline": 0.0,
+      "measured": 0.22739728613774157,
+      "pass": true,
+      "unit": "% of height",
+      "source": "tests/fixtures/client_take vs the COCO-17 column of phase5_metrics.json"
+    },
+    {
+      "gate": "head aim error, nose path off",
+      "key": "head_aim_error_deg",
+      "rule": "< 5 deg with the nose path disabled",
+      "baseline": 38.56650581013973,
+      "measured": 1.192801246687554,
+      "pass": true,
+      "unit": "deg",
+      "source": "tests/fixtures/client_take (re-measured)"
+    },
+    {
+      "gate": "body epipolar median",
+      "key": "epipolar_median_px",
+      "rule": "no regression on the COCO-17 baseline",
+      "baseline": 4.899798209156523,
+      "measured": 4.674843034187729,
+      "pass": true,
+      "unit": "px",
+      "source": "tests/fixtures/client_take (re-measured)"
+    }
+  ],
+  "passed": 7,
+  "of": 7,
+  "fixture_run": {
+    "label": "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)",
+    "head_source": "skull",
+    "n_frames": 26,
+    "height_m": 0.1301881226497098,
+    "scale": 111.41704894412584,
+    "retarget_median_pct": {
+      "no_face": 1.4900200400656474,
+      "with_face": 1.4700458150849294
+    },
+    "head_aim_no_face": {
+      "n": 26,
+      "median_deg": 1.192801246687554,
+      "max_deg": 3.825722589710069
+    },
+    "head_aim_with_face": {
+      "n": 26,
+      "median_deg": 3.7830029883458853,
+      "max_deg": 22.947506505381615
+    },
+    "bone_cv_median_pct": 5.295913281051814,
+    "bone_cv_max_pct": 7.86503605240381,
+    "epipolar_median_px": 4.674843034187729,
+    "bone_cv_pct": {
+      "spine (pelvis-neck)": 4.693364438855113,
+      "neck-head": 3.125237262141566,
+      "neck-Lshoulder": 5.98202343512588,
+      "neck-Rshoulder": 5.878094918339925,
+      "L upper arm": 5.126575520950959,
+      "R upper arm": 5.608925782203686,
+      "L forearm": 4.7265678923939545,
+      "R forearm": 5.46525104115267,
+      "pelvis-Lhip": 6.289173218632489,
+      "pelvis-Rhip": 6.258856167740718,
+      "L thigh": 4.809193725183839,
+      "R thigh": 5.002811247250891,
+      "L shin": 4.579126096771872,
+      "R shin": 7.86503605240381
+    },
+    "retarget_no_face_pct": {
+      "HEAD": 1.539167712174258,
+      "NECK": 4.252912178713489,
+      "LEFT_SHOULDER": 0.38299889347829846,
+      "RIGHT_SHOULDER": 0.3980375577247108,
+      "LEFT_ELBOW": 1.9054978005491485,
+      "RIGHT_ELBOW": 1.9102571964660129,
+      "LEFT_WRIST": 1.3568607067426002,
+      "RIGHT_WRIST": 0.5086710516863345,
+      "PELVIS": 0.0,
+      "LEFT_HIP": 1.7089381094632046,
+      "RIGHT_HIP": 2.7942761680192842,
+      "LEFT_KNEE": 1.1385880343709744,
+      "RIGHT_KNEE": 3.2528241693413595,
+      "LEFT_ANKLE": 1.3560126282910017,
+      "RIGHT_ANKLE": 0.9197792013040282
+    },
+    "retarget_with_face_pct": {
+      "HEAD": 1.668198562479525,
+      "NECK": 4.252912178713489,
+      "LEFT_SHOULDER": 0.38299889347829846,
+      "RIGHT_SHOULDER": 0.3980375577247108,
+      "LEFT_ELBOW": 1.9054978005491485,
+      "RIGHT_ELBOW": 1.9102571964660129,
+      "LEFT_WRIST": 1.3568607067426002,
+      "RIGHT_WRIST": 0.5086710516863345,
+      "PELVIS": 0.0,
+      "LEFT_HIP": 1.7089381094632046,
+      "RIGHT_HIP": 2.7942761680192842,
+      "LEFT_KNEE": 1.1385880343709744,
+      "RIGHT_KNEE": 3.2528241693413595,
+      "LEFT_ANKLE": 1.3560126282910017,
+      "RIGHT_ANKLE": 0.9197792013040282
+    }
+  }
+}

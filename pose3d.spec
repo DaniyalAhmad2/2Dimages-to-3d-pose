@@ -34,7 +34,7 @@ datas = [
 # otherwise they are shipped beside the exe and found at run time. Either way
 # the app must not have to download them. See pose3d/detect/models.py.
 # The globs deliberately take EVERY staged checkpoint: BOTH pose models
-# (the COCO-17 one the app detects with today and the Halpe-26 one) plus the
+# (the Halpe-26 one the app detects with today and the COCO-17 one) plus the
 # shared YOLOX detector. Both are bundled whichever way detect.rtmpose's
 # USE_HALPE26 stands, so flipping that constant needs no build change and can
 # never produce a bundle that downloads a model on the client's machine.

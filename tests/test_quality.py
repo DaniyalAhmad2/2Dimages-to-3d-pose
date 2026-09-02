@@ -78,7 +78,16 @@ def test_bone_cv_responds_to_a_wrong_rig(baseline):
     This is the acceptance test for the whole phase: that error costs the
     reprojection gauge 2.9 points and never changes its band, so if nothing on
     screen moved for it, nothing on screen describes the reconstruction.
-    Today: 5.44 % -> 8.18 %, a 50 % rise.
+    Today: 5.30 % -> 6.66 %, a 26 % rise.
+
+    It read 5.44 % -> 8.18 % (a 50 % rise) while the fixture was detected with
+    COCO-17. Phase 5b re-detected it with Halpe-26: the INTACT take is
+    unchanged to two figures (5.30 %), while the DAMAGED one is markedly
+    steadier (8.18 % -> 6.66 %) because Halpe's keypoints survive the 15 deg
+    error better. So the signal shrinks while the gauge stays right, and the
+    bar follows the measurement down by the same 10-15 % margin the rest of
+    the suite uses — the gauge would have to stop responding almost entirely
+    to slip under it.
     """
     damaged = _measure(
         lambda rig: setattr(rig.ext["right"], "R",
@@ -86,7 +95,7 @@ def test_bone_cv_responds_to_a_wrong_rig(baseline):
     before = baseline.bone_cv["median_cv_pct"]
     after = damaged.bone_cv["median_cv_pct"]
     rise = after / before
-    assert rise >= 1.30, (                      # today 1.51
+    assert rise >= 1.12, (                      # today 1.26
         f"bone-length spread only moved {100 * (rise - 1):.0f} % for a 15 deg "
         f"camera error ({before:.2f} % -> {after:.2f} %)")
 

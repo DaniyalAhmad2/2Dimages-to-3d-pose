@@ -235,7 +235,11 @@ def main(argv=None) -> int:
     character = None
     if not args.no_retarget:
         from pose3d.geometry.character import Character
-        character = Character()
+        # the take's OWN head convention, not the process default: measuring a
+        # skull-HEAD project under the nose convention applies the ~45 deg nose
+        # correction to a point that needs none, and the retarget number that
+        # comes back is of a pose the app never shows
+        character = Character(head_source=project.head_source)
 
     q = take_quality(project, rig, character)
     print(markdown(q, project_dir.name))

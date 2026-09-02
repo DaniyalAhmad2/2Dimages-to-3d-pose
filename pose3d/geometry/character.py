@@ -17,6 +17,7 @@ matrices via `pose_bone_matrices`.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 
@@ -76,6 +77,33 @@ def set_default_head_source(source: str | None) -> None:
 def default_head_source() -> str:
     """The head convention a `Character()` built with no argument uses."""
     return _DEFAULT_HEAD_SOURCE
+
+
+@contextlib.contextmanager
+def head_source_default(source: str | None):
+    """Make `Character()` build with `source` for the duration of the block.
+
+    Setting the process-wide default is the UI's job: `main_window` sets it
+    once from the open project, and the 3D view and the Blender export — which
+    build their own `Character` and never see a `ProjectData` — follow it. A
+    batch tool has no such session, so anything that has to reach a `Character`
+    it does not construct itself (`export.blender_export.export_animation`
+    builds its own) sets the default only around that call and puts it back:
+
+        with head_source_default(project.head_source):
+            export_animation(...)
+
+    Anything that DOES construct the `Character` should pass
+    `head_source=project.head_source` instead — explicit beats ambient.
+    Restores the previous value even when the block raises, so a tool cannot
+    leave a "skull" default behind for whatever runs next in the process.
+    """
+    previous = _DEFAULT_HEAD_SOURCE
+    set_default_head_source(source)
+    try:
+        yield
+    finally:
+        set_default_head_source(previous)
 
 
 # Pipeline role -> candidate bone names, tried in order. Covers the legacy

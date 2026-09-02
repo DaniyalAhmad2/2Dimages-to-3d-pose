@@ -35,6 +35,14 @@ import numpy as np
 # The gate table, fixed BEFORE the run (PLAN.md Phase 5), as
 # {metric key: the rule it must satisfy}. The COCO-17 "today" column is
 # re-measured here rather than assumed.
+#
+# This is the PRE-REGISTERED table and it stays that way, so re-running this
+# script still prints "6/7 — STAYS OFF". That is not the shipping decision:
+# neck-Lshoulder was restated to <= 6.5 % on review and the switch ships ON.
+# The restatement, with its reasoning, is docs/audit-2026-09/phase5_gates.json,
+# and tests/test_head_source.py asserts the two files against each other and
+# against USE_HALPE26. Do not "fix" the disagreement by editing either the
+# table below or phase5_metrics.json.
 GATES: dict[str, str] = {
     "head_retarget_no_face_pct": "<= 4.0 % of body height",
     "head_retarget_with_face_pct": "<= 3.0 % of body height",

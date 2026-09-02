@@ -14,13 +14,19 @@ that shipped in August and could not notice a sign error in the DLT, a broken
 cross-view gate or a regressed bone fit, because no change to this repo can
 move a frozen array.
 
-The fixture's STORED `fitted3d` is kept for exactly one job: it is the pose the
-client was actually sent, and the last test pins that it still is, so the two
-gates that were `xfail(strict=True)` while Phase 1 was written stay meaningful.
+The pose the client was actually SENT is `fixtures/client_take/as_delivered.json`
+— the August build's own `fitted3d`, copied out of the source project and never
+recomputed. The last test measures against it, so the lag defect stays pinned
+even now that the fixture itself has been regenerated on a fixed build, and the
+two gates that were `xfail(strict=True)` while Phase 1 was written stay
+meaningful.
 
-Every threshold sits 10-15 % above the value measured on 2026-09-02, with that
+Every threshold sits 10-15 % above the value measured on 2026-09-03, with that
 value in a comment, so a threshold can never be met by having been set at the
-measurement.
+measurement. That date is Phase 5b: the app now detects with Halpe-26 (a skull
+HEAD instead of the nose — `detect.rtmpose.USE_HALPE26`), the fixture was
+re-detected with it, and the subject the DLT reconstructs is 9 % taller than
+the COCO-17 one, so every "% of body height" number moved with it.
 
 The numbers are `docs/audit-2026-09/wf_baseline.md`; the metric definitions are
 `pose3d.quality`.
@@ -28,6 +34,7 @@ The numbers are `docs/audit-2026-09/wf_baseline.md`; the metric definitions are
 from __future__ import annotations
 
 import copy
+import json
 from pathlib import Path
 
 import numpy as np
@@ -44,8 +51,10 @@ FIXTURE = Path(__file__).parent / "fixtures" / "client_take"
 
 @pytest.fixture(scope="module")
 def project():
-    """The fixture as committed — 2D keypoints, calibration, and the arrays the
-    OLD build stored. Only the last test reads its `fitted3d`."""
+    """The fixture as committed — the 2D keypoints and the calibration every
+    test below reconstructs from, plus the 3D the build that regenerated it
+    recorded. Only `test_the_reconstruction_is_measured_not_replayed` reads
+    that 3D, and only to check this build still produces it."""
     return load_project(FIXTURE)
 
 
@@ -79,19 +88,31 @@ def quality(delivered, rig):
 @pytest.fixture(scope="module")
 def quality_with_character(delivered, rig):
     from pose3d.geometry.character import Character
-    return take_quality(delivered, rig, Character())
+
+    # the take's OWN head convention. The fixture is a "skull" project, and
+    # measuring it under the default "nose" one would apply the 45 deg nose
+    # correction to a point that needs none — a retarget number for a pose the
+    # app never shows. Nothing outside the UI may rely on the process default.
+    return take_quality(delivered, rig,
+                        Character(head_source=delivered.head_source))
 
 
-def test_the_fixture_is_the_client_take(quality):
+def test_the_fixture_is_the_client_take(quality, delivered):
     """The denominator every other threshold is expressed in. If the fixture
     is truncated or re-detected, this is what says so."""
     assert quality.n_frames == 26
-    # today 0.11940 on the reconstructed pose. The audit's 0.1178 is the same
-    # measurement on the fixture's STORED pose: the smoother it was made with
-    # shrank the figure, which is the defect, not a change of subject.
-    assert quality.subject_height_m == pytest.approx(0.1194, abs=0.0014)
-    assert quality.figure_h_px["left"] == pytest.approx(776, rel=0.02)    # today 776
-    assert quality.figure_h_px["right"] == pytest.approx(407, rel=0.02)   # today 407
+    # and WHICH detector it was re-detected with: the "% of height" thresholds
+    # below are only comparable within one keypoint layout, and the retarget
+    # ones are only correct if the character is told the same thing
+    assert delivered.keypoint_model == "halpe26"
+    assert delivered.head_source == "skull"
+    # today 0.13019 on the reconstructed pose (0.11940 under COCO-17, whose
+    # HEAD is the nose: the skull vertex sits ~9 % of a body height higher, and
+    # the height is a z-extent). The audit's 0.1178 was the same measurement on
+    # the pose the client was sent, which the smoother had shrunk.
+    assert quality.subject_height_m == pytest.approx(0.1302, abs=0.0015)
+    assert quality.figure_h_px["left"] == pytest.approx(863, rel=0.02)    # today 863
+    assert quality.figure_h_px["right"] == pytest.approx(446, rel=0.02)   # today 446
 
 
 def test_the_reconstruction_is_measured_not_replayed(project, delivered):
@@ -100,24 +121,35 @@ def test_the_reconstruction_is_measured_not_replayed(project, delivered):
     The reconstructed `pose3d` must be the fixture's 2D put through today's
     triangulation — not the array the fixture happens to carry — so a sign or
     DLT regression shows up here first, as a pose that no longer matches what
-    the same calibration produced on 2026-09-01.
+    the same calibration produced on 2026-09-03.
+
+    The residual is not zero and must not be asserted to be: the fixture's 2D
+    is stored at 3 decimal places of a pixel (regen_client_take.KP_DECIMALS)
+    while its 3D was computed from the full-precision detections.
     """
     stored = np.stack([f.pose3d for f in project.frames])
     fresh = np.stack([f.pose3d for f in delivered.frames])
     assert np.array_equal(np.isnan(stored), np.isnan(fresh)), \
-        "a different set of joints reconstructs than on 2026-09-01"
+        "a different set of joints reconstructs than on 2026-09-03"
     worst = float(np.nanmax(np.abs(stored - fresh)))
-    assert worst <= 3e-7, f"triangulation moved by {worst:.2e} m"  # today 2.4e-7
+    assert worst <= 3e-7, f"triangulation moved by {worst:.2e} m"  # today 2.0e-7
 
 
 def test_an_interpolated_joint_is_not_counted_as_a_measurement(quality,
                                                                delivered):
     """The gap fill writes into the fit's INPUT, never into `pose3d`, so the
     bone-length CV, the symmetry and the "measured" reprojection above are all
-    computed on observations only. Two joint-frames on this take are filled
-    (0012 RIGHT_KNEE, 0021 LEFT_ANKLE) and they are counted, separately."""
-    assert quality.gaps["filled"] == 2
-    assert quality.gaps["n_missing"] == 2      # still holes in the measurement
+    computed on observations only.
+
+    The COCO-17 detection of this take left two holes (0012 RIGHT_KNEE, 0021
+    LEFT_ANKLE); the Halpe-26 one leaves none, so the count asserted here is
+    now zero and the loop below is a live invariant with nothing to check. That
+    is a real improvement and not a weakening of the net: `tests/test_gap_fill.py`
+    exercises the fill itself on synthetic holes, and a regression that starts
+    dropping joints on the client take fails the `== 0` here.
+    """
+    assert quality.gaps["filled"] == 0
+    assert quality.gaps["n_missing"] == 0      # no holes left in the measurement
     for f in delivered.frames:
         if f.filled.any():
             assert np.isnan(f.pose3d[f.filled]).all()
@@ -127,8 +159,8 @@ def test_an_interpolated_joint_is_not_counted_as_a_measurement(quality,
 def test_raw_bone_lengths_are_consistent_across_frames(quality):
     """The mannequin is rigid, so every bone length is constant by
     construction: all of this spread is pipeline error."""
-    assert quality.bone_cv["median_cv_pct"] <= 6.0    # today 5.27
-    assert quality.bone_cv["max_cv_pct"] <= 10.5      # today 9.52
+    assert quality.bone_cv["median_cv_pct"] <= 6.0    # today 5.30
+    assert quality.bone_cv["max_cv_pct"] <= 8.9       # today 7.86 (was 9.52)
 
 
 def test_left_and_right_limbs_measure_the_same(quality):
@@ -136,15 +168,15 @@ def test_left_and_right_limbs_measure_the_same(quality):
     difference is reconstruction error, not anatomy."""
     for label, *_ in SYMMETRY_PAIRS:
         asym = quality.symmetry[label]["asym_pct"]
-        # today: thigh 4.6, shin 0.7, upper arm 0.5, forearm 6.7
-        assert asym <= 7.5, f"{label} L/R asymmetry {asym:.1f} %"
+        # today: thigh 4.6, shin 2.2, upper arm 0.1, forearm 6.9
+        assert asym <= 7.8, f"{label} L/R asymmetry {asym:.1f} %"
 
 
 def test_the_two_views_agree_about_the_body_keypoints(quality):
     """Independent of the tags: the body keypoints play no part in the
     calibration, so this is the rig's own consistency."""
-    assert quality.epipolar["median_px"] <= 6.0   # today 4.9
-    assert quality.epipolar["p90_px"] <= 14.0     # today 12.5
+    assert quality.epipolar["median_px"] <= 5.3   # today 4.67
+    assert quality.epipolar["p90_px"] <= 14.5     # today 12.81
 
 
 @needs_character()
@@ -152,8 +184,9 @@ def test_the_character_follows_the_captured_pose(quality_with_character):
     """How faithfully the skinning reproduces its input — it cannot see error
     already in the input, which is why it is only one of these assertions."""
     median = quality_with_character.retarget_pct_height["median_pct_height"]
-    # today 1.65 on the reconstructed pose (1.62 on the fixture's stored one)
-    assert median <= 1.9, f"{median:.2f} % of body height"
+    # today 1.47 (1.65 under COCO-17: most of that was the nose HEAD, which the
+    # skull HEAD retires — 12.73 -> 1.54 % of height at HEAD alone)
+    assert median <= 1.65, f"{median:.2f} % of body height"
 
 
 def test_the_delivered_pose_reprojects_like_the_measurement(quality):
@@ -166,7 +199,9 @@ def test_the_delivered_pose_reprojects_like_the_measurement(quality):
     17.18 px. It is a live gate now."""
     for cam in CAMERAS:
         ratio = quality.reproj_ratio(cam)
-        # today 1.44 left / 1.44 right (7.37 / 4.02 px); was 4.24 / 6.17
+        # today 1.42 left / 1.40 right; was 4.24 / 6.17. Fixed at 1.5 by the
+        # audit rather than set 10-15 % above the measurement: it is one of the
+        # four promoted gates, and its bar is what the client was promised.
         assert ratio <= 1.5, f"{cam}: delivered reprojects {ratio:.2f}x worse"
 
 
@@ -187,22 +222,36 @@ def test_the_delivered_pose_is_the_pose_the_fit_produced(project, rig,
     fresh = np.stack([f.fitted3d for f in refit.frames])
     worst = float(np.nanmax(np.linalg.norm(shown - fresh, axis=2)))
     pct = 100.0 * worst / quality.subject_height_m
-    # today 0.0 % of body height (bit-identical); 21.8 % before Phase 1
+    # today 0.0 % of body height (bit-identical); 21.8 % before Phase 1. Fixed
+    # at 3.0 by the audit — a promoted gate, not a measured threshold.
     assert pct <= 3.0, f"delivered pose is {pct:.1f} % of height off the fit"
 
 
-def test_the_fixture_still_carries_the_pose_the_client_was_sent(project,
-                                                                delivered,
+def test_the_fixture_still_carries_the_pose_the_client_was_sent(delivered,
                                                                 quality):
-    """The two gates above are only worth something while the fixture holds
-    the OLD build's `fitted3d`. If it is ever regenerated from a fixed build
-    this fails, and says to re-baseline the two comments above rather than
-    quietly measuring a fixed pose against a fixed pose."""
-    stored = np.stack([f.fitted3d for f in project.frames])
+    """The two gates above are only worth something while SOMETHING still holds
+    the August build's `fitted3d` — the smoothed, lagging pose the client was
+    actually sent — to measure them against.
+
+    `project.json` stopped being that the moment the fixture was regenerated on
+    a fixed build (Phase 5b re-detected it with Halpe-26), so the delivered pose
+    was lifted into `as_delivered.json` first and is copied forward untouched by
+    every regeneration. If this number ever collapses towards zero, the two
+    gates above have started measuring a fixed pose against a fixed pose and
+    they, not this file, are what needs re-reading.
+    """
+    doc = json.loads((FIXTURE / "as_delivered.json").read_text())
+    # missing joints are null in the file, not NaN, so they cannot be handed
+    # straight to a float array
+    sent = np.array([[[np.nan if v is None else v for v in xyz]
+                      for xyz in doc["frames"][f.frame_id]]
+                     for f in delivered.frames], dtype=float)
     shown = np.stack([f.fitted3d for f in delivered.frames])
-    worst = float(np.nanmax(np.linalg.norm(stored - shown, axis=2)))
+    worst = float(np.nanmax(np.linalg.norm(sent - shown, axis=2)))
     pct = 100.0 * worst / quality.subject_height_m
-    # today 21.5 % of height: the lag the client complained about
+    # today 19.6 % of height: the lag the client complained about, now measured
+    # across a change of HEAD convention too (21.5 % before Phase 5b)
     assert pct >= 10.0, (
-        f"the fixture's stored pose is only {pct:.1f} % of height from what "
-        f"this build delivers — was it regenerated on a fixed build?")
+        f"the pose the client was sent is only {pct:.1f} % of height from what "
+        f"this build delivers — was as_delivered.json regenerated from a fixed "
+        f"build?")

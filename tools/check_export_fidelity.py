@@ -50,7 +50,8 @@ from pose3d.core.skeleton import JOINT_NAMES                       # noqa: E402
 from pose3d.export import bvh as bvh_util                          # noqa: E402
 from pose3d.export.blender_export import export_animation          # noqa: E402
 from pose3d.export.bvh import similarity                           # noqa: E402
-from pose3d.geometry.character import Character, take_pelvis_ref   # noqa: E402
+from pose3d.geometry.character import (                            # noqa: E402
+    Character, head_source_default, take_pelvis_ref)
 from pose3d.quality import de_tilt_rotation, subject_height        # noqa: E402
 
 DEFAULT_PROJECT = REPO / "tests" / "fixtures" / "client_take"
@@ -339,11 +340,16 @@ def main(argv=None) -> int:
     print(f"root motion {args.root_motion}, schedule "
           f"{'stepped' if args.stepped else 'one_per_pose'}\n")
 
-    res = export_animation(
-        poses, out_dir, name="fidelity", fps=30, render_video=False,
-        blender=blender, timeout=args.timeout, character=character,
-        keep_root_motion=args.root_motion,
-        schedule="stepped" if args.stepped else "one_per_pose")
+    # The tool has no UI session to set the head convention from, and
+    # `export_animation` builds its own `Character` internally, so the
+    # project's own convention is held only around the calls that need it —
+    # a tool must not leave a "skull" default behind in the process.
+    with head_source_default(project.head_source):
+        res = export_animation(
+            poses, out_dir, name="fidelity", fps=30, render_video=False,
+            blender=blender, timeout=args.timeout, character=character,
+            keep_root_motion=args.root_motion,
+            schedule="stepped" if args.stepped else "one_per_pose")
     if not res.ok or not res.bvh:
         print(res.stdout[-3000:])
         raise SystemExit(f"export failed (rc={res.returncode}):\n"
@@ -357,7 +363,9 @@ def main(argv=None) -> int:
     R = de_tilt_rotation(poses)
     up = poses @ R.T
     valid = ~np.isnan(up).any(2)
-    ch = Character()
+    # explicit beats ambient wherever the Character is ours to build: this is
+    # the same head convention the export above just ran under
+    ch = Character(head_source=project.head_source)
     ch.fit_to_subject(up)
     print(f"subject height {subject_height(poses):.4f} m, "
           f"character scale {ch._scale:.4f}\n")
@@ -394,7 +402,8 @@ def main(argv=None) -> int:
     print()
     report_placement(ch, up, valid, out)
     print()
-    report_fallback(poses, out_dir, blender, args.timeout, out)
+    with head_source_default(project.head_source):
+        report_fallback(poses, out_dir, blender, args.timeout, out)
 
     if args.metrics:
         import json
