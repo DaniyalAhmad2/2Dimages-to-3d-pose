@@ -188,6 +188,12 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     detections wholesale, which looks exactly like a detection failure.
     """
     dropped = 0
+    for frame in project.frames:
+        # A gap-fill flag describes the 3D that is about to be replaced. Reset
+        # before anything else touches the take, so a flag can never outlive
+        # the fill that set it (a joint recovered by a re-detect or a hand
+        # correction must come back as a measurement, not stay "interpolated").
+        frame.filled[:] = False
     if validate:
         dropped = validate_cross_view(project, rig)
     for frame in project.frames:
@@ -204,8 +210,16 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     return dropped
 
 
-def fill_gaps(project: ProjectData, max_gap: int = 1) -> int:
-    """Interpolate one-frame dropouts and FLAG them. Returns how many.
+def fill_gaps(project: ProjectData, max_gap: int = 1) -> tuple[np.ndarray, int]:
+    """The bone fit's INPUT: pose3d with one-frame dropouts interpolated.
+
+    Returns `(poses, n_filled)` — a (frames, joints, 3) COPY, never the
+    frames' own arrays — and flags what it invented in `Frame.filled`.
+    `Frame.pose3d` is not touched: it is the measurement, and it stays NaN
+    where the cameras saw nothing, so every "measured" number in
+    `pose3d.quality` (bone-length CV, symmetry, reprojection of the raw pose)
+    is computed on observations only. Interpolated joints reach the user
+    through `fitted3d`, flagged.
 
     A joint that is missing for a single frame but present either side is
     almost always a momentary detection failure, not the joint leaving the
@@ -213,23 +227,23 @@ def fill_gaps(project: ProjectData, max_gap: int = 1) -> int:
     max_gap=1, their midpoint) restores a continuous limb without inventing
     anything the take does not contain: the value is symmetric — no lag, no
     forward leak, unlike the stale value the old smoother carried across a
-    dropout — and it is recorded in `Frame.filled`, so the 3D view, the camera
-    views, the reconstructed-joint count and the export all know it was
-    interpolated. Gaps longer than `max_gap`, and gaps that run off either end
-    of the take, stay NaN — a visible hole is the honest answer there.
+    dropout — and the flag tells the 3D view, the camera views, the
+    reconstructed-joint count and the export it was interpolated. Gaps longer
+    than `max_gap`, and gaps that run off either end of the take, stay NaN — a
+    visible hole is the honest answer there.
 
-    Re-runnable: previously filled joints are cleared back to NaN first, so
-    the flags always describe the current 2D.
+    Re-runnable by construction: it reads only the raw measurement, so the
+    flags always describe the 2D as it is now.
     """
     frames = project.frames
     if not frames:
-        return 0
+        return np.zeros((0, NUM_JOINTS, 3)), 0
+    poses = np.stack([np.asarray(f.pose3d, float) for f in frames])
     for f in frames:
-        f.pose3d[f.filled] = np.nan
         f.filled[:] = False
     filled = 0
     for j in range(NUM_JOINTS):
-        present = [not np.isnan(f.pose3d[j]).any() for f in frames]
+        present = [not np.isnan(poses[t, j]).any() for t in range(len(frames))]
         t = 0
         while t < len(frames):
             if present[t]:
@@ -240,14 +254,41 @@ def fill_gaps(project: ProjectData, max_gap: int = 1) -> int:
                 run += 1
             # flanked by observations on both sides, and short enough?
             if t > 0 and run < len(frames) and (run - t) <= max_gap:
-                a, b = frames[t - 1].pose3d[j], frames[run].pose3d[j]
+                a, b = poses[t - 1, j], poses[run, j]
                 for k in range(t, run):
                     w = (k - t + 1) / (run - t + 1)
-                    frames[k].pose3d[j] = (1 - w) * a + w * b
+                    poses[k, j] = (1 - w) * a + w * b
                     frames[k].filled[j] = True
                     filled += 1
             t = run
-    return filled
+    return poses, filled
+
+
+def fill_frame_gaps(project: ProjectData, index: int) -> np.ndarray:
+    """The bone fit's input for ONE frame, and that frame's `filled` flags.
+
+    The live path's half of `fill_gaps`: a drag re-solves a single frame, so
+    the fill for that frame is recomputed here from its neighbours' raw
+    `pose3d` rather than left as whatever the last whole-take fill decided.
+    Same rule as the batch fill at the default `max_gap=1` — a joint missing
+    here and present in both neighbours becomes their midpoint — so a drag and
+    a recompute cannot disagree about which joints were invented.
+    """
+    frames = project.frames
+    f = frames[index]
+    poses = np.asarray(f.pose3d, float).copy()
+    f.filled[:] = False
+    if 0 < index < len(frames) - 1:
+        a = np.asarray(frames[index - 1].pose3d, float)
+        b = np.asarray(frames[index + 1].pose3d, float)
+        for j in range(NUM_JOINTS):
+            if not np.isnan(poses[j]).any():
+                continue
+            if np.isnan(a[j]).any() or np.isnan(b[j]).any():
+                continue
+            poses[j] = 0.5 * (a[j] + b[j])
+            f.filled[j] = True
+    return poses
 
 
 @dataclass
@@ -309,13 +350,19 @@ def fit_frame(pose3d: np.ndarray, bone_lengths: dict) -> np.ndarray:
 
 def fit_project(project: ProjectData, bone_lengths=None,
                 smooth: bool = False, alpha: float = 0.6) -> FitReport:
-    """Fill one-frame gaps, then bone-length fit every frame.
+    """Bone-length fit every frame, over the gap-filled input.
+
+    The fit's input is `fill_gaps`'s copy, so a one-frame dropout is posed
+    (and flagged) in `fitted3d` while `pose3d` keeps the hole the cameras
+    actually left. Bone targets are measured from the RAW pose for the same
+    reason: an interpolated joint is not an observation of a bone length.
 
     Smoothing is OFF by default and opt-in per project: see
     `bonefit.smooth_temporal` for what a temporal filter costs on a take of
     discrete hand-posed frames.
     """
-    report = FitReport(gaps_filled=fill_gaps(project))
+    infill, n_filled = fill_gaps(project)
+    report = FitReport(gaps_filled=n_filled)
     if bone_lengths is None:
         bone_lengths, report.fallback_bones = bone_length_targets(project)
 
@@ -324,13 +371,13 @@ def fit_project(project: ProjectData, bone_lengths=None,
     # except, so anything raised here used to surface as "Import failed" with
     # every other frame's work discarded.
     per_frame = []
-    for f in project.frames:
+    for i in range(len(project.frames)):
         try:
-            per_frame.append(fit_frame(f.pose3d, bone_lengths))
+            per_frame.append(fit_frame(infill[i], bone_lengths))
         except Exception as e:
             report.failed += 1
             report.first_error = report.first_error or f"{type(e).__name__}: {e}"
-            per_frame.append(np.asarray(f.pose3d, float))
+            per_frame.append(np.asarray(infill[i], float))
     fitted = np.stack(per_frame) if per_frame \
         else np.zeros((0, NUM_JOINTS, 3))
     if smooth and len(fitted) > 1:

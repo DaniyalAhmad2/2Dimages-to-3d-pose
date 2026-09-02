@@ -33,14 +33,47 @@ def test_one_frame_gap_is_filled_to_the_midpoint_and_flagged():
         project.frames[3].pose3d[WRIST].copy()
     project.frames[2].pose3d[WRIST] = np.nan
 
-    n = fill_gaps(project)
+    poses, n = fill_gaps(project)
 
     assert n == 1
-    assert np.allclose(project.frames[2].pose3d[WRIST], 0.5 * (before + after))
+    assert np.allclose(poses[2, WRIST], 0.5 * (before + after))
     assert project.frames[2].filled[WRIST]
     # nothing else is touched
     assert not project.frames[2].filled[int(Joint.HEAD)]
     assert not project.frames[1].filled.any()
+
+
+def test_the_fill_never_writes_into_the_measurement():
+    """`pose3d` is what the cameras gave us. An interpolated joint reaches the
+    user through `fitted3d` (flagged) and nowhere else, so every "measured"
+    number in pose3d.quality is computed on observations only."""
+    project = _sequence()
+    project.frames[2].pose3d[WRIST] = np.nan
+
+    poses, n = fill_gaps(project)
+    assert n == 1
+    assert np.isnan(project.frames[2].pose3d[WRIST]).all()
+    assert not np.isnan(poses[2, WRIST]).any()
+
+    # and it stays NaN through the whole fit
+    fit_project(project)
+    assert np.isnan(project.frames[2].pose3d[WRIST]).all()
+    assert not np.isnan(project.frames[2].fitted3d[WRIST]).any()
+    assert project.frames[2].filled[WRIST]
+
+
+def test_bone_targets_are_measured_without_the_invented_joints():
+    """The fit's own targets are medians of MEASURED bone lengths: a filled
+    joint is a midpoint of two frames, not an observation of a bone."""
+    from pose3d.pipeline import bone_length_targets
+
+    project = _sequence()
+    clean, _ = bone_length_targets(project)
+    project.frames[2].pose3d[WRIST] = np.nan
+    fit_project(project)
+    after, _ = bone_length_targets(project)
+
+    assert after == clean         # unchanged: the fill never entered pose3d
 
 
 def test_a_two_frame_gap_stays_a_hole():
@@ -48,10 +81,11 @@ def test_a_two_frame_gap_stays_a_hole():
     for t in (2, 3):
         project.frames[t].pose3d[WRIST] = np.nan
 
-    assert fill_gaps(project, max_gap=1) == 0
+    poses, n = fill_gaps(project, max_gap=1)
+    assert n == 0
 
     for t in (2, 3):
-        assert np.isnan(project.frames[t].pose3d[WRIST]).all()
+        assert np.isnan(poses[t, WRIST]).all()
         assert not project.frames[t].filled[WRIST]
 
 
@@ -61,10 +95,11 @@ def test_a_gap_at_the_end_of_the_take_stays_a_hole():
     project.frames[0].pose3d[WRIST] = np.nan
     project.frames[-1].pose3d[WRIST] = np.nan
 
-    assert fill_gaps(project) == 0
+    poses, n = fill_gaps(project)
+    assert n == 0
 
-    assert np.isnan(project.frames[0].pose3d[WRIST]).all()
-    assert np.isnan(project.frames[-1].pose3d[WRIST]).all()
+    assert np.isnan(poses[0, WRIST]).all()
+    assert np.isnan(poses[-1, WRIST]).all()
 
 
 def test_fill_is_re_runnable():
@@ -72,16 +107,36 @@ def test_fill_is_re_runnable():
     2D as it is now."""
     project = _sequence()
     project.frames[2].pose3d[WRIST] = np.nan
-    assert fill_gaps(project) == 1
-    assert fill_gaps(project) == 1                    # idempotent
-    filled_value = project.frames[2].pose3d[WRIST].copy()
+    poses, n = fill_gaps(project)
+    assert n == 1
+    filled_value = poses[2, WRIST].copy()
+    assert fill_gaps(project)[1] == 1                 # idempotent
 
     # the joint next door goes missing too: now it is a wider hole
     project.frames[3].pose3d[WRIST] = np.nan
-    assert fill_gaps(project) == 0
-    assert np.isnan(project.frames[2].pose3d[WRIST]).all()
+    poses, n = fill_gaps(project)
+    assert n == 0
+    assert np.isnan(poses[2, WRIST]).all()
     assert not project.frames[2].filled[WRIST]
     assert not np.isnan(filled_value).any()           # it really had been filled
+
+
+def test_a_recovered_joint_is_a_measurement_again():
+    """A re-triangulation that finds the joint the fill had invented must give
+    the observation back and clear the flag — the flags can never be stale,
+    because they are derived from the raw 3D every time."""
+    project = _sequence()
+    truth = project.frames[2].pose3d[WRIST].copy()
+    project.frames[2].pose3d[WRIST] = np.nan
+    fit_project(project)
+    assert project.frames[2].filled[WRIST]
+
+    # the joint comes back (a hand correction, a re-detect, a re-triangulation)
+    project.frames[2].pose3d[WRIST] = truth
+    fit_project(project)
+
+    assert not project.frames[2].filled[WRIST]
+    assert np.allclose(project.frames[2].pose3d[WRIST], truth)
 
 
 def test_the_fit_treats_a_filled_joint_as_observed():
@@ -219,14 +274,16 @@ def test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame():
     height = subject_height(
         np.stack([np.asarray(f.fitted3d, float) for f in project.frames]))
 
-    n = fill_gaps(project)
+    poses, n = fill_gaps(project)
 
     # every value the fill wrote is flagged, and every flag has a value
     assert n == 2                                    # 0012 R_KNEE, 0021 L_ANKLE
-    for f, before in zip(project.frames, raw):
-        written = np.isnan(before).any(1) & ~np.isnan(f.pose3d).any(1)
+    for t, (f, before) in enumerate(zip(project.frames, raw)):
+        written = np.isnan(before).any(1) & ~np.isnan(poses[t]).any(1)
         assert np.array_equal(written, np.asarray(f.filled, bool))
-        assert np.isfinite(f.pose3d[f.filled]).all()
+        assert np.isfinite(poses[t][f.filled]).all()
+        # and the measurement is untouched
+        assert np.array_equal(np.isnan(f.pose3d), np.isnan(before))
 
     # measured on the take as it was DETECTED (before the fill), so every
     # sample has an observation to be right or wrong about

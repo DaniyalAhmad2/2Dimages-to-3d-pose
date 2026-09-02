@@ -29,6 +29,10 @@ from dataclasses import dataclass
 import numpy as np
 
 from pose3d import pipeline as pl
+# Re-exported, not reimplemented: `from pose3d.quality import load_rig` goes on
+# working for the CLI and the tests, and there is now ONE loader —
+# `pose3d.app._load_rig` used to be a second copy of the same folder contract.
+from pose3d.calib.rigio import load_rig            # noqa: F401  (re-export)
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
 from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, Joint
 from pose3d.geometry.bonefit import measure_bone_lengths
@@ -108,33 +112,6 @@ def _pct(v, total) -> float:
     return (float(100.0 * v / total)
             if np.isfinite(v) and np.isfinite(total) and total > 1e-12
             else float("nan"))
-
-
-# ---------------------------------------------------------------------------
-# loading
-# ---------------------------------------------------------------------------
-def load_rig(calib_dir):
-    """`pipeline.CalibratedRig` from a calibration folder.
-
-    Deliberately the same body as `pose3d.app._load_rig`, duplicated rather
-    than imported: `pose3d.app` pulls in PySide6 at module scope, and this
-    module has to stay importable from a headless CLI and from pytest.
-    """
-    import json
-    from pathlib import Path
-
-    from pose3d.calib.extrinsics import Extrinsics
-    from pose3d.calib.intrinsics import Intrinsics
-
-    calib_dir = Path(calib_dir)
-    il = Intrinsics.load(calib_dir / "left_intrinsics.json")
-    ir = Intrinsics.load(calib_dir / "right_intrinsics.json")
-    ext = json.loads((calib_dir / "extrinsics.json").read_text())
-    el = Extrinsics(R=np.array(ext["left"]["R"], float),
-                    t=np.array(ext["left"]["t"], float))
-    er = Extrinsics(R=np.array(ext["right"]["R"], float),
-                    t=np.array(ext["right"]["t"], float))
-    return pl.CalibratedRig(il, ir, el, er)
 
 
 # ---------------------------------------------------------------------------
@@ -238,20 +215,22 @@ def bone_length_stats(poses: np.ndarray) -> dict:
     }
 
 
-def _point_line_px(pt_left, pt_right, rig) -> tuple[float, float]:
+def _point_line_px(pt_left, pt_right, F) -> tuple[float, float]:
     """Per-image point-to-epipolar-line distances (d_L, d_R) in px.
 
     Sampson is one number for the pair; these two say how far the observation
     sits from its partner's epipolar line IN EACH IMAGE, which is the only form
     comparable across an asymmetric rig once each is divided by its own
     image diagonal.
+
+    `F` is the rig's fundamental matrix, passed in: it is a constant of the
+    rig, and rebuilding it per (joint, frame) pair — 388 times on the client
+    take — is work this will not afford if it ever runs behind the UI.
     """
     pt_left = np.asarray(pt_left, float).reshape(2)
     pt_right = np.asarray(pt_right, float).reshape(2)
     if np.isnan(pt_left).any() or np.isnan(pt_right).any():
         return float("nan"), float("nan")
-    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
-                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
     xl = np.array([pt_left[0], pt_left[1], 1.0])
     xr = np.array([pt_right[0], pt_right[1], 1.0])
     num = abs(float(xr @ F @ xl))
@@ -272,6 +251,8 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
     """
     L = np.asarray(kp2d[CAM_LEFT], float)
     R = np.asarray(kp2d[CAM_RIGHT], float)
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
     per, allv = {}, []
     d_left, d_right = [], []
     for j in range(NUM_JOINTS):
@@ -282,7 +263,7 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
                                   rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
             if np.isfinite(e):
                 vals.append(e)
-                dl, dr = _point_line_px(L[t, j], R[t, j], rig)
+                dl, dr = _point_line_px(L[t, j], R[t, j], F)
                 d_left.append(dl)
                 d_right.append(dr)
         allv.extend(vals)
@@ -370,8 +351,12 @@ def gap_stats(project: ProjectData) -> dict:
 
     `rejected` counts 2D observations that are absent from the stored project
     (the cross-view gate NaNs them in place, so a dropped observation and one
-    the detector never found look the same afterwards). `filled` counts joints
-    a gap fill invented; it is 0 until Phase 1 adds `Frame.filled`.
+    the detector never found look the same afterwards).
+
+    `missing` is counted on `pose3d`, the measurement, so a gap-filled joint
+    still counts as missing HERE — it is a hole the cameras left — while
+    `filled` says how many of those holes the fit was nonetheless given a
+    value for. The two are meant to be read together.
     """
     missing, rejected, filled = [], 0, 0
     for f in project.frames:
@@ -599,6 +584,11 @@ class TakeQuality:
 
     `measured` always means the raw triangulation (`Frame.pose3d`) and
     `delivered` the pose the app actually shows and exports (`Frame.fitted3d`).
+    The two are different populations of joints, deliberately: a joint the gap
+    fill interpolated exists only in `delivered` (`pipeline.fill_gaps` fits a
+    COPY and leaves the measurement NaN), so no bone-length CV, symmetry or
+    "measured" reprojection figure is ever computed over an invented point.
+    How many were invented is `gaps["filled"]`.
     """
     n_frames: int
     frame_ids: list[str]
@@ -673,7 +663,10 @@ def take_quality(project: ProjectData, rig, character=None) -> TakeQuality:
     figure_h = {c: figure_height_px(kp2d[c]) for c in CAMERAS}
     rep_m = reprojection(measured, kp2d, rig, figure_h)
     rep_d = reprojection(delivered, kp2d, rig, figure_h)
-    blen = bone_length_stats(measured)          # RAW: the fit flattens this
+    # RAW, and raw means observed: the fit flattens bone lengths, and a
+    # gap-filled joint is not an observation of one either (it never reaches
+    # `pose3d` — see `pipeline.fill_gaps`).
+    blen = bone_length_stats(measured)
 
     q = TakeQuality(
         n_frames=len(project.frames),

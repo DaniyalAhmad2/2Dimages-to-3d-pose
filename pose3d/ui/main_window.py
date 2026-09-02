@@ -398,8 +398,14 @@ class MainWindow(QMainWindow):
         import numpy as np
         from pose3d.core.skeleton import NUM_JOINTS
         frames = self.model.project.frames
-        # how many 3D joints actually reconstructed, on average?
-        per_frame = [int((~np.isnan(f.fitted3d).any(1)).sum()) for f in frames]
+        # How many 3D joints actually RECONSTRUCTED, on average — a joint the
+        # gap fill interpolated is posed and exported, but it is not something
+        # the cameras saw, so it does not count towards "the two views gave us
+        # a figure". Counting it here would let a take whose every other frame
+        # is an interpolation report a full skeleton.
+        per_frame = [int((~np.isnan(f.fitted3d).any(1)
+                          & ~np.asarray(f.filled, bool)).sum())
+                     for f in frames]
         total = sum(per_frame)
         if not frames or total == 0:
             QMessageBox.warning(

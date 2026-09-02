@@ -53,6 +53,18 @@ def needs_panoptic():
                  "CMU Panoptic sample data not downloaded")
 
 
+def needs_ffmpeg():
+    """Frame extraction from the Panoptic HD videos shells out to ffmpeg.
+
+    Having the dataset does not imply having ffmpeg, and a machine with one
+    and not the other used to get a test ERROR (FileNotFoundError out of
+    subprocess.run) where it previously had a script it simply never ran.
+    """
+    import shutil
+    return _gate(shutil.which("ffmpeg") is not None, "POSE3D_REQUIRE_FFMPEG",
+                 "ffmpeg not on PATH")
+
+
 def needs_character():
     from pose3d.config import character_blend
     return _gate(character_blend() is not None, "POSE3D_REQUIRE_ASSETS",

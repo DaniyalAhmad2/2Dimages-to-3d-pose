@@ -29,7 +29,7 @@ from pose3d.datasets.panoptic import (
 )
 from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS
 from pose3d.geometry.triangulate import triangulate_points
-from tests.gates import needs_panoptic, needs_weights
+from tests.gates import needs_ffmpeg, needs_panoptic, needs_weights
 from tests.synth import project
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -37,7 +37,6 @@ SEQ = "171204_pose1_sample"
 CALIB = DATA / f"calibration_{SEQ}.json"
 POSE_DIR = DATA / "hdPose3d" / "hdPose3d_stage1_coco19"
 VIDEOS = DATA / "hdVideos"
-FRAMES_DIR = DATA / "frames"
 CAM_L, CAM_R = "00_00", "00_12"
 
 
@@ -60,8 +59,20 @@ def project_gt(gt3d, cam):
     return out
 
 
-def main(num_frames: int = 6):
+def main(num_frames: int = 6, out_dir: Path = DATA) -> list[dict]:
+    """Run the validation; write frames, overlays and the summary JSON under
+    `out_dir`, and return the per-frame results.
+
+    `out_dir` is a parameter because pytest collects this: with the dataset
+    present, a plain `pytest tests/` would otherwise extract frames and rewrite
+    summaries inside the repo working tree on every run. The artefacts under
+    data/ are the __main__ path's job.
+    """
     from pose3d.detect.rtmpose import RTMPoseDetector
+
+    out_dir = Path(out_dir)
+    frames_dir = out_dir / "frames"
+    overlay_dir = out_dir / "overlays"
 
     cam_l = load_camera(CALIB, CAM_L)
     cam_r = load_camera(CALIB, CAM_R)
@@ -78,8 +89,8 @@ def main(num_frames: int = 6):
         gt = load_pose3d(pf)
         if np.isnan(gt).all():
             continue
-        img_l = FRAMES_DIR / f"{CAM_L}_{fi:08d}.jpg"
-        img_r = FRAMES_DIR / f"{CAM_R}_{fi:08d}.jpg"
+        img_l = frames_dir / f"{CAM_L}_{fi:08d}.jpg"
+        img_r = frames_dir / f"{CAM_R}_{fi:08d}.jpg"
         extract_frame(VIDEOS / f"hd_{CAM_L}.mp4", fi, img_l)
         extract_frame(VIDEOS / f"hd_{CAM_R}.mp4", fi, img_r)
         if not (img_l.exists() and img_r.exists()):
@@ -106,7 +117,7 @@ def main(num_frames: int = 6):
         })
         # save an overlay for visual evidence
         _save_overlay(bgr_l, det_l.xy, pgt_l,
-                      DATA / "overlays" / f"{CAM_L}_{fi:08d}.jpg")
+                      overlay_dir / f"{CAM_L}_{fi:08d}.jpg")
         print(f"frame {fi}: sync={d:5.1f}px  mean3D={np.nanmean(err)*10:6.1f}mm  "
               f"median3D={np.nanmedian(err)*10:6.1f}mm  det={results[-1]['detected']}/15")
 
@@ -117,8 +128,10 @@ def main(num_frames: int = 6):
         print(f"  frames: {len(results)}")
         print(f"  mean 3D error across frames:   {mm.mean():.1f} mm")
         print(f"  median 3D error across frames: {np.median(med):.1f} mm")
-        (DATA / "rtmpose_validation_summary.json").write_text(
+        out_dir.mkdir(parents=True, exist_ok=True)
+        (out_dir / "rtmpose_validation_summary.json").write_text(
             json.dumps(results, indent=2))
+    return results
 
 
 def _save_overlay(bgr, det_xy, gt_xy, out: Path):
@@ -134,14 +147,18 @@ def _save_overlay(bgr, det_xy, gt_xy, out: Path):
 
 
 @needs_panoptic()
+@needs_ffmpeg()
 @needs_weights()
-def test_panoptic_rtmpose():
+def test_panoptic_rtmpose(tmp_path):
     """The whole product path on real images. No accuracy threshold here — the
     error depends on the detector weights, and the client take's own thresholds
     live in test_client_regression.py — but the detector must find every joint
-    of a clearly visible person in both views, or the numbers above are noise."""
-    main()
-    results = json.loads((DATA / "rtmpose_validation_summary.json").read_text())
+    of a clearly visible person in both views, or the numbers above are noise.
+
+    Into tmp_path: collecting this test must not extract frames or rewrite
+    summaries inside the repo.
+    """
+    results = main(out_dir=tmp_path)
     assert results, "no frames were evaluated"
     assert all(r["detected"] == NUM_JOINTS for r in results), results
 

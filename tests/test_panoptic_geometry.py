@@ -51,7 +51,14 @@ def _project(pts3d, cam):
     return out
 
 
-def main():
+def main(out_dir: Path = DATA) -> dict:
+    """Run the validation; write the summary JSON into `out_dir`, return it.
+
+    `out_dir` is a parameter because pytest collects this: writing into the
+    repo's data/ (where the summary is git-TRACKED) means a plain test run can
+    dirty the working tree the day a detector, a weights file or numpy's last
+    bits change. The committed artefact is the __main__ path's job.
+    """
     cam_l = load_camera(CALIB, CAM_L)
     cam_r = load_camera(CALIB, CAM_R)
     print(f"Loaded Panoptic cameras {CAM_L} & {CAM_R}")
@@ -139,18 +146,24 @@ def main():
         "ideal_mean_mm": float(np.nanmean(errs) * 10),
         "ideal_max_mm": float(np.nanmax(errs) * 10),
     }
-    out = DATA / "geometry_validation_summary.json"
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    out = out_dir / "geometry_validation_summary.json"
     out.write_text(json.dumps(summary, indent=2))
     print(f"\nWrote {out}")
+    return summary
 
 
 @needs_panoptic()
-def test_panoptic_geometry():
+def test_panoptic_geometry(tmp_path):
     """Run the whole validation and hold it to the one thing that admits no
     tolerance: with a perfect detector, two-view triangulation against real
-    Panoptic calibration must return the ground truth exactly."""
-    main()
-    summary = json.loads((DATA / "geometry_validation_summary.json").read_text())
+    Panoptic calibration must return the ground truth exactly.
+
+    Into tmp_path: collecting this test must not rewrite the tracked summary
+    under data/.
+    """
+    summary = main(out_dir=tmp_path)
     assert summary["frames"] > 0
     # today 2.7e-5 mm — pure float noise on a 4 m dome. The bound is a micron
     # rather than 15 % above the measurement because what varies here is the

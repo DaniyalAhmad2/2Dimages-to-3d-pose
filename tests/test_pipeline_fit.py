@@ -83,6 +83,75 @@ def test_zero_pixel_drag_is_a_no_op():
     assert worst < 5e-5, f"{1000 * worst:.4f} mm"      # < 0.05 mm
 
 
+def _with_a_one_frame_dropout(t=2, joint=int(Joint.LEFT_WRIST)):
+    """A take where one joint of frame `t` is unseen in the LEFT view, so it
+    cannot triangulate and the gap fill invents it from frames t-1 and t+1."""
+    data, rig = _take()
+    data.frames[t].kp2d[CAM_LEFT][joint] = np.nan
+    data.frames[t].scores[CAM_LEFT][joint] = 0.0
+    triangulate_project(data, rig)
+    fit_project(data)
+    assert np.isnan(data.frames[t].pose3d[joint]).all()   # the measurement
+    assert data.frames[t].filled[joint]                   # the fit's input
+    return data, rig
+
+
+def test_a_drag_elsewhere_keeps_the_filled_joint():
+    """The fill lives in the fit's INPUT, not in `pose3d`, so the live path has
+    to rebuild it. Editing any other joint used to be able to drop it and move
+    the whole pose."""
+    t, joint = 2, int(Joint.LEFT_WRIST)
+    data, rig = _with_a_one_frame_dropout(t, joint)
+    model = ProjectModel(data, rig)
+    model.set_frame(t)
+    f = model.frame()
+    before = f.fitted3d[joint].copy()
+
+    xy = f.kp2d[CAM_LEFT][int(Joint.LEFT_ANKLE)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.LEFT_ANKLE),
+                       float(xy[0]), float(xy[1]))
+
+    assert f.filled[joint]
+    assert np.isnan(f.pose3d[joint]).all()                # still no measurement
+    assert np.allclose(f.fitted3d[joint], before, atol=1e-9)
+
+
+def test_the_live_path_fills_the_gap_exactly_as_the_batch_path_does():
+    """The same computation, gap fill included: a zero-pixel drag on the frame
+    with the dropout must reproduce the batch fit bit for bit."""
+    t, joint = 2, int(Joint.LEFT_WRIST)
+    data, rig = _with_a_one_frame_dropout(t, joint)
+    batch = data.frames[t].fitted3d.copy()
+
+    model = ProjectModel(data, rig)
+    model.set_frame(t)
+    f = model.frame()
+    xy = f.kp2d[CAM_RIGHT][int(Joint.HEAD)]
+    model.set_joint_2d(CAM_RIGHT, int(Joint.HEAD), float(xy[0]), float(xy[1]))
+
+    assert np.allclose(f.fitted3d, batch, atol=1e-9, equal_nan=True)
+
+
+def test_placing_the_missing_point_by_hand_makes_it_a_measurement_again():
+    """A correction that gives the joint back must clear the interpolated flag:
+    it is an observation now, and the accuracy panel, the 3D view and the
+    export all read that flag."""
+    t, joint = 2, int(Joint.LEFT_WRIST)
+    data, rig = _with_a_one_frame_dropout(t, joint)
+    model = ProjectModel(data, rig)
+    model.set_frame(t)
+    f = model.frame()
+
+    # the user puts the point back in the view that lost it (roughly where the
+    # neighbouring frame had it — a hand correction, not a re-detection)
+    xy = data.frames[t - 1].kp2d[CAM_LEFT][joint]
+    model.set_joint_2d(CAM_LEFT, joint, float(xy[0]), float(xy[1]))
+
+    assert not f.filled[joint]                     # an observation again
+    assert np.isfinite(f.pose3d[joint]).all()
+    assert np.isfinite(f.fitted3d[joint]).all()
+
+
 def test_a_drag_lands_on_the_same_pose_the_batch_path_would():
     """F10 by construction: one fit function, one set of targets."""
     data, rig = _take()

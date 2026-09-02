@@ -40,7 +40,11 @@ def test_triangulation_perfect_data(rig):
     intr_l, intr_r, ext_l, ext_r, gt, pl, pr = rig
     xyz = triangulate_points(pl, pr, intr_l, intr_r, ext_l, ext_r)
     err = np.linalg.norm(xyz - gt, axis=1)
-    assert np.nanmax(err) < 1e-6 * _height(gt), f"max err {np.nanmax(err)}"
+    # 6e-7, not 1e-6: the bound went relative when the close-range rig was
+    # added, and 1e-6 x the 1.62 m symmetric figure would have LOOSENED the
+    # exactness assertion that rig already had by 1.6x. Both rigs land at
+    # ~1e-15 m — this is float noise, not geometry.
+    assert np.nanmax(err) < 6e-7 * _height(gt), f"max err {np.nanmax(err)}"
 
 
 def test_triangulation_with_pixel_noise(rig):
@@ -74,7 +78,7 @@ def test_reprojection_error_small(rig):
 def test_triangulate_one_matches_batch(rig):
     intr_l, intr_r, ext_l, ext_r, gt, pl, pr = rig
     one = triangulate_one(pl[5], pr[5], intr_l, intr_r, ext_l, ext_r)
-    assert np.linalg.norm(one - gt[5]) < 1e-6 * _height(gt)
+    assert np.linalg.norm(one - gt[5]) < 6e-7 * _height(gt)   # as above
 
 
 def test_epipolar_distance_consistent_vs_hallucinated(rig):

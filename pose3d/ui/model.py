@@ -16,7 +16,9 @@ from pose3d.core.project import (
 )
 from pose3d.core.skeleton import Joint, NUM_JOINTS
 from pose3d.geometry.triangulate import reprojection_error, triangulate_one
-from pose3d.pipeline import CalibratedRig, bone_length_targets, fit_frame
+from pose3d.pipeline import (
+    CalibratedRig, bone_length_targets, fill_frame_gaps, fit_frame,
+)
 
 HEAD_JOINT = int(Joint.HEAD)
 
@@ -57,6 +59,12 @@ class ProjectModel(QObject):
         self.migration_note = ""
         self._stored_fitted3d = None
         self._stored_version = None
+        # bone targets for the live re-solve: the median of every bone over the
+        # whole take, which is O(frames x bones) to measure and cannot change
+        # between two drags (a drag moves ONE joint of one frame; the median
+        # over 26 frames does not follow it). Measured once per recompute and
+        # dropped whenever the take's 3D changes underneath it.
+        self._bone_targets = None
 
     # --- pipeline version migration ---
     def upgrade_pipeline(self) -> str:
@@ -99,6 +107,7 @@ class ProjectModel(QObject):
         for f, pose in zip(self.project.frames, self._stored_fitted3d):
             f.fitted3d = pose.copy()
         self._stored_fitted3d = None
+        self._bone_targets = None
         if self._stored_version is not None:
             # What is on screen is the old pipeline's pose again, so the file
             # must not go on claiming otherwise: saving now keeps this a legacy
@@ -121,6 +130,7 @@ class ProjectModel(QObject):
             return
         from pose3d.pipeline import (
             fit_project, rejection_note, triangulate_project)
+        self._bone_targets = None
         dropped = triangulate_project(self.project, self.rig)
         smoothing = self.project.smoothing
         report = fit_project(self.project, smooth=smoothing != "none",
@@ -246,6 +256,9 @@ class ProjectModel(QObject):
         """
         if self.rig is None:
             return
+        # measured BEFORE the edit, so a drag and its undo fit against the
+        # same targets and land in the same place
+        self._targets()
         f = self.frame()
         if joint >= NUM_JOINTS:
             k = joint - NUM_JOINTS
@@ -299,34 +312,59 @@ class ProjectModel(QObject):
         if np.isnan(pa).any() or np.isnan(pb).any():
             return []
         f.kp2d[cam][derived] = (pa + pb) / 2.0
-        f.scores[cam][derived] = min(f.scores[cam][a], f.scores[cam][b])
+        # nanmin, not min: min(nan, 0.5) is nan while min(0.5, nan) is 0.5, so
+        # a plain min made the derived point's confidence depend on which
+        # parent happens to be listed first. Both parents unscored leaves it
+        # NaN — the 2D above is real either way.
+        pair = np.array([f.scores[cam][a], f.scores[cam][b]], float)
+        f.scores[cam][derived] = (float(np.nanmin(pair))
+                                  if np.isfinite(pair).any() else np.nan)
         return [derived]
 
     def _retriangulate(self, f, joint: int) -> None:
-        xyz = triangulate_one(
+        # pose3d is the MEASUREMENT: it takes whatever the two views now say,
+        # NaN included. An interpolated value never lives here — _refit_frame
+        # rebuilds the fill (and the flag) from the neighbouring frames right
+        # after, so a joint only one view can see still reaches the fit.
+        f.pose3d[joint] = triangulate_one(
             f.kp2d[CAM_LEFT][joint], f.kp2d[CAM_RIGHT][joint],
             self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
             self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
-        if np.isnan(xyz).any() and f.filled[joint]:
-            # Only one view has this joint, so there is nothing to triangulate
-            # — and the interpolated value from the neighbouring frames is
-            # still the best 3D estimate there is. Dropping it here would make
-            # editing any other joint in the frame move the whole pose.
-            return
-        f.pose3d[joint] = xyz
-        # this point now comes from its own two observations, whatever it was
-        f.filled[joint] = False
+
+    def _targets(self) -> dict:
+        """Bone-length targets for the live re-solve, measured once per
+        recompute.
+
+        The target is the MEDIAN of one bone over the whole take, so moving
+        one joint of one frame cannot legitimately move it — and re-measuring
+        14 bones across every frame on every mouse release, undo and redo made
+        the answer depend on the order the edits arrived in (a drag and its
+        undo fitted against fractionally different targets). Dropped whenever
+        the take's 3D is recomputed underneath it.
+        """
+        if self._bone_targets is None:
+            self._bone_targets, _ = bone_length_targets(self.project)
+        return self._bone_targets
 
     def _refit_frame(self, f) -> None:
-        """The SAME fit the batch path runs, on one frame."""
-        targets, _ = bone_length_targets(self.project)
+        """The SAME fit the batch path runs, on one frame.
+
+        Including the gap fill: the batch path fits `fill_gaps`'s copy, so the
+        live path fits this frame's copy from `fill_frame_gaps`, or a drag
+        would silently drop a joint the recompute poses.
+        """
+        targets = self._targets()
+        # by identity: Frame is a dataclass full of arrays, so list.index()
+        # would compare them elementwise and raise
+        idx = next(i for i, g in enumerate(self.project.frames) if g is f)
+        infill = fill_frame_gaps(self.project, idx)
         try:
-            f.fitted3d = fit_frame(f.pose3d, targets)
+            f.fitted3d = fit_frame(infill, targets)
         except Exception as e:
             # Qt swallows exceptions raised in a slot, so a fit that failed on
             # a sparse frame would make the drag look like it did nothing.
             # Showing the raw triangulation is better than showing nothing.
-            f.fitted3d = np.asarray(f.pose3d, float)
+            f.fitted3d = np.asarray(infill, float)
             self.statusMessage.emit(
                 f"Bone fit failed on this frame ({type(e).__name__}); "
                 f"showing the raw triangulation")

@@ -84,21 +84,13 @@ def build_model(project_folder: str | None):
 
 
 def _load_rig(calib_dir: Path):
-    """Load a CalibratedRig from a calibration folder if fully present."""
-    from pose3d.calib.extrinsics import Extrinsics
-    from pose3d.calib.intrinsics import Intrinsics
-    from pose3d.pipeline import CalibratedRig
-    import json
-    try:
-        il = Intrinsics.load(calib_dir / "left_intrinsics.json")
-        ir = Intrinsics.load(calib_dir / "right_intrinsics.json")
-        ext = json.loads((calib_dir / "extrinsics.json").read_text())
-        import numpy as np
-        el = Extrinsics(R=np.array(ext["left"]["R"]), t=np.array(ext["left"]["t"]))
-        er = Extrinsics(R=np.array(ext["right"]["R"]), t=np.array(ext["right"]["t"]))
-        return CalibratedRig(il, ir, el, er)
-    except Exception:
-        return None
+    """Load a CalibratedRig from a calibration folder if fully present.
+
+    The body lives in `pose3d.calib.rigio` so the headless callers (the CLI,
+    `pose3d.quality`, the tests) can load a rig without importing PySide6.
+    """
+    from pose3d.calib.rigio import load_rig_or_none
+    return load_rig_or_none(calib_dir)
 
 
 def open_project_window(project_folder: str | None):
