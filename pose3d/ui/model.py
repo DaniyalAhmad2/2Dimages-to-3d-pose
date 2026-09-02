@@ -16,9 +16,10 @@ from pose3d.core.project import (
 )
 from pose3d.core.skeleton import Joint, NUM_JOINTS
 from pose3d.geometry.triangulate import (
-    epipolar_distance, reprojection_error, triangulate_one)
+    fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
-    CalibratedRig, bone_length_targets, fill_frame_gaps, fit_frame,
+    CalibratedRig, bone_length_targets, cross_view_rejection, fill_frame_gaps,
+    fit_frame, gated_kp2d, per_image_allowances, revalidate_joint,
 )
 
 HEAD_JOINT = int(Joint.HEAD)
@@ -33,6 +34,26 @@ _QUALITY_FAILED = object()
 STATE_OK = "ok"
 STATE_NOT_MEASURED = "not_measured"
 STATE_REJECTED = "rejected"
+
+
+class RejectedState(str):
+    """`STATE_REJECTED`, carrying the two numbers that make it a diagnosis.
+
+    It IS the string — every `== STATE_REJECTED`, every `RAG_COLORS[...]`
+    lookup and every `in HOLLOW_STATES` goes on working — with the measured
+    disagreement and the gate it failed attached, so the camera view can name
+    them in the tooltip. A purple dot the user cannot get a number out of is
+    just a new kind of silence; a second channel from the model to the view
+    would be a signature change in every caller in between.
+    """
+    __slots__ = ("px", "gate")
+
+    def __new__(cls, px: float, gate: float):
+        self = super().__new__(cls, STATE_REJECTED)
+        self.px = float(px)
+        self.gate = float(gate)
+        return self
+
 
 # Joints the detector does not see but derives as a midpoint of two it does
 # (skeleton.derive_joints). Dragging a shoulder therefore has to move the neck
@@ -84,6 +105,7 @@ class ProjectModel(QObject):
         self.rig_error = ""
         self._figure_h_px = None
         self._quality = None
+        self._epi_thr = None
 
     # --- pipeline version migration ---
     def upgrade_pipeline(self) -> str:
@@ -396,9 +418,13 @@ class ProjectModel(QObject):
         f = self.frame()
         # the take-wide numbers now describe a 2D that no longer exists; drop
         # them so the next reader recomputes rather than showing a stale row.
-        # (The figure height is a median over the whole take and one dragged
-        # point cannot move it, so it deliberately survives — recomputing it
-        # per drag would make every correction cost a pass over the take.)
+        # (The figure height and the cross-view gate `_epi_thr` are medians
+        # over the WHOLE take and one dragged point cannot move them, so they
+        # deliberately survive — recomputing the gate per drag costs a pass
+        # over every pair in the take, 15 ms on the 26-frame client take and
+        # linear in its length. The row the sidebar recomputes and the number
+        # the tooltip has cached therefore still agree; test_cross_view.py::
+        # test_a_drag_does_not_split_the_gate_in_two is the guard.)
         self._quality = None
         self.stack.apply(f.frame_id, cam, joint, x, y)
         self.joint2dChanged.emit(cam, joint)
@@ -497,12 +523,27 @@ class ProjectModel(QObject):
         return [derived]
 
     def _retriangulate(self, f, joint: int) -> None:
+        # THE CROSS-VIEW GATE APPLIES HERE TOO, or the live re-solve and the
+        # batch recompute reach different poses from the same 2D. It is
+        # re-derived for this joint first (the drag may have reconciled the
+        # two views, or created the disagreement), then applied to the pair
+        # that gets triangulated, which is exactly what triangulate_project
+        # does with the whole take. Without it a drag in one view revived a
+        # joint whose OTHER view the gate had already refused: the 3D view and
+        # the export got a point the tooltip was calling "not triangulated",
+        # and the next recompute deleted it again.
+        #
+        # A hand-placed point still wins: `validate_cross_view` never rejects
+        # a `corrected` view, so the loser of a disagreement the user created
+        # is the view they did not touch.
+        revalidate_joint(f, joint, self.rig, self.epipolar_gate())
+        kp = gated_kp2d(f)
         # pose3d is the MEASUREMENT: it takes whatever the two views now say,
         # NaN included. An interpolated value never lives here — _refit_frame
         # rebuilds the fill (and the flag) from the neighbouring frames right
         # after, so a joint only one view can see still reaches the fit.
         f.pose3d[joint] = triangulate_one(
-            f.kp2d[CAM_LEFT][joint], f.kp2d[CAM_RIGHT][joint],
+            kp[CAM_LEFT][joint], kp[CAM_RIGHT][joint],
             self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
             self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
 
@@ -572,6 +613,7 @@ class ProjectModel(QObject):
         every correction O(take)."""
         self._figure_h_px = None
         self._quality = None
+        self._epi_thr = None
 
     def quality(self):
         """`pose3d.quality.TakeQuality` for the whole take, or None.
@@ -637,35 +679,74 @@ class ProjectModel(QObject):
             out[cam] = per
         return out
 
+    def epipolar_gate(self) -> float:
+        """The cross-view gate this take is being judged by, in px.
+
+        Cached with the other take-wide numbers and dropped by
+        `invalidate_readouts`: the camera views ask for it on every frame
+        change, and it must be the SAME number the gate itself used or a
+        purple dot would quote a threshold nothing was measured against.
+
+        NaN without a calibration: there is no gate, because nothing was
+        gated.
+        """
+        if self.rig is None:
+            return float("nan")
+        if self._epi_thr is None:
+            from pose3d.pipeline import epipolar_threshold
+            self._epi_thr = float(
+                epipolar_threshold(self.rig, self.project))
+        return self._epi_thr
+
     def joint_states(self, idx: int) -> dict[str, list[str]]:
         """Per-camera, per-joint state: why a joint has no number.
 
         "not measured" and "rejected by the cross-view check" are different
-        facts and used to be drawn the same. There is no per-observation
-        rejection flag on `Frame` — the gate NaNs the losing 2D in place — so
-        the distinction is drawn from what is on the frame NOW: both views
-        holding a point that still disagrees beyond the epipolar threshold is
-        a rejection (which is the state a hand-drag lands in); one view having
-        no point at all is simply not measured.
+        facts and used to be drawn the same. A rejection is now a flag the
+        gate wrote (`Frame.rejected`, re-derived on every recompute), so this
+        reports what actually happened rather than inferring it. It ALSO
+        rejects a pair the gate would refuse but carries no flag yet — the
+        same verdict the next recompute will record, from the same
+        `pipeline.cross_view_rejection` — because between a hand edit and a
+        recompute the mask is stale for whatever the edit touched, and a joint
+        may still be holding 3D built from a point that has since moved. It
+        is that ONE function and not a paraphrase of it, so the dot cannot
+        call a joint rejected that the gate has decided to keep.
+
+        A rejected state carries the numbers (`RejectedState.px` / `.gate`) so
+        the tooltip can name them.
         """
         f = self.project.frames[idx]
         states = {c: [STATE_OK] * NUM_JOINTS for c in CAMERAS}
         if self.rig is None:
             return states
-        from pose3d.pipeline import epipolar_threshold
-        thr = epipolar_threshold(self.rig)
+        thr = self.epipolar_gate()
+        F = fundamental_matrix(
+            self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
+            self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+        allow = per_image_allowances(self.rig)
         for j in range(NUM_JOINTS):
-            if not np.isnan(f.pose3d[j]).any():
-                continue                    # it has 3D: nothing to explain
-            seen = {c: not np.isnan(f.kp2d[c][j]).any() for c in CAMERAS}
-            state = STATE_NOT_MEASURED
-            if all(seen.values()):
-                e = epipolar_distance(
-                    f.kp2d[CAM_LEFT][j], f.kp2d[CAM_RIGHT][j],
-                    self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
-                    self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
-                if np.isfinite(e) and e > thr:
-                    state = STATE_REJECTED
+            flagged = {c: bool(f.rejected[c][j]) for c in CAMERAS}
+            # No short-circuit on "it already has 3D": that 3D can be older
+            # than the 2D under it. With auto-recalc off, a drag (or an undo)
+            # moves a keypoint and clears its flag while `pose3d` keeps the
+            # value the old point produced, and the joint read OK right up to
+            # the recompute that refused it. 15 verdicts per frame change is
+            # under a millisecond.
+            # The WHOLE rule, not part of it: `cross_view_rejection` is the
+            # function that writes the mask, asked without letting it write.
+            # Checking the Sampson distance alone missed the per-image half
+            # 6.2 added; checking `cross_view_verdict` alone missed the other
+            # end of the rule, that a pair corrected in BOTH views is kept —
+            # so the joints the user had already fixed by hand were painted
+            # "not triangulated" while their 3D sat in the export.
+            e, loser = cross_view_rejection(f, j, self.rig, F, thr, allow)
+            if any(flagged.values()) or loser is not None:
+                state = RejectedState(e, thr)
+            elif np.isnan(f.pose3d[j]).any():
+                state = STATE_NOT_MEASURED
+            else:
+                continue
             for c in CAMERAS:
                 states[c][j] = state
         return states

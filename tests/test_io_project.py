@@ -206,3 +206,49 @@ def test_halpe_frame_loses_nothing(tmp_path):
         # nothing was dropped off the end of either array
         assert g.kp2d[cam].shape == (NUM_JOINTS, 2)
         assert g.head2d[cam].shape == (NUM_HEAD_KP, 2)
+
+
+def test_the_raw_2d_and_the_gate_mask_survive_a_round_trip(tmp_path):
+    """`kp2d_raw`/`scores_raw`/`rejected` are the difference between a
+    rejection you can undo by recalibrating and one you cannot."""
+    p = _make_project()
+    f = p.frames[0]
+    f.kp2d_raw[CAM_LEFT][Joint.HEAD] = (101.5, 201.5)
+    f.scores_raw[CAM_LEFT][Joint.HEAD] = 0.95
+    f.rejected[CAM_RIGHT][Joint.HEAD] = True
+    save_project(p, tmp_path)
+    q = load_project(tmp_path)
+
+    g = q.frames[0]
+    assert np.allclose(g.kp2d_raw[CAM_LEFT][Joint.HEAD], (101.5, 201.5))
+    assert g.scores_raw[CAM_LEFT][Joint.HEAD] == 0.95
+    assert g.rejected[CAM_RIGHT][Joint.HEAD]
+    assert not g.rejected[CAM_LEFT][Joint.HEAD]
+    # the raw arrays are NaN-aware like every other per-joint array
+    assert np.isnan(g.kp2d_raw[CAM_RIGHT][Joint.LEFT_KNEE]).all()
+    # and the working 2D is NOT overwritten by them
+    assert np.allclose(g.kp2d[CAM_LEFT][Joint.HEAD], (100.5, 200.5))
+
+
+def test_a_project_written_before_the_raw_arrays_still_loads(tmp_path):
+    """Back-filled from `kp2d`, with an empty mask: that is the truthful
+    reading of a file that has one copy of its 2D and no record of the gate."""
+    import json
+
+    p = _make_project()
+    save_project(p, tmp_path)
+    doc = json.loads((tmp_path / "project.json").read_text())
+    for fd in doc["frames"]:
+        for key in ("kp2d_raw", "scores_raw", "rejected"):
+            del fd[key]
+    (tmp_path / "project.json").write_text(json.dumps(doc))
+
+    q = load_project(tmp_path)
+    g = q.frames[0]
+    for c in (CAM_LEFT, CAM_RIGHT):
+        assert np.array_equal(g.kp2d_raw[c], g.kp2d[c], equal_nan=True)
+        assert np.array_equal(g.scores_raw[c], g.scores[c], equal_nan=True)
+        assert not g.rejected[c].any()
+    # back-filled, not aliased: writing one must not write the other
+    g.kp2d_raw[CAM_LEFT][Joint.HEAD] = (0.0, 0.0)
+    assert np.allclose(g.kp2d[CAM_LEFT][Joint.HEAD], (100.5, 200.5))

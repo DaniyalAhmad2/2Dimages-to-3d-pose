@@ -65,10 +65,30 @@ class Frame:
         default_factory=lambda: {c: _nan_xy() for c in CAMERAS})
     scores: dict[str, np.ndarray] = field(
         default_factory=lambda: {c: _nan_scores() for c in CAMERAS})
+    # The detector's own output for this frame, before any correction and
+    # before any gate: the copy nothing downstream is allowed to write to.
+    # `kp2d` is the WORKING 2D (detector output plus the user's corrections);
+    # this is where it came from, so a step that damages `kp2d` can never be
+    # holding the only copy of what the cameras saw. Back-filled from `kp2d`
+    # when a project written before these arrays existed is loaded.
+    kp2d_raw: dict[str, np.ndarray] = field(
+        default_factory=lambda: {c: _nan_xy() for c in CAMERAS})
+    scores_raw: dict[str, np.ndarray] = field(
+        default_factory=lambda: {c: _nan_scores() for c in CAMERAS})
     pose3d: np.ndarray = field(default_factory=_nan_xyz)          # (NUM_JOINTS,3)
     fitted3d: np.ndarray = field(default_factory=_nan_xyz)        # bone-fit result
     # per-(cam,joint) flag: True if the point was hand-corrected by the user.
     corrected: dict[str, np.ndarray] = field(
+        default_factory=lambda: {c: np.zeros(NUM_JOINTS, bool) for c in CAMERAS})
+    # per-(cam,joint) flag: True if the cross-view gate ruled this observation
+    # inconsistent with the other view (pipeline.validate_cross_view). A MASK,
+    # never a deletion: the point stays in `kp2d`, drawn and draggable, and the
+    # mask is re-derived from scratch on every recompute — so fixing the
+    # calibration genuinely reinstates the observation. The gate used to write
+    # NaN into `kp2d` and 0.0 into `scores` instead, which destroyed the
+    # detector's output in the file and made a bad rig indistinguishable from
+    # a detection failure.
+    rejected: dict[str, np.ndarray] = field(
         default_factory=lambda: {c: np.zeros(NUM_JOINTS, bool) for c in CAMERAS})
     # per-joint flag: True if this frame's 3D point was interpolated across a
     # one-frame dropout rather than measured (see pipeline.fill_gaps). Drawn
@@ -89,6 +109,11 @@ class Frame:
         self.kp2d[cam][joint] = (x, y)
         self.scores[cam][joint] = score
         self.corrected[cam][joint] = corrected
+        # A hand-placed point is the user's answer to the gate; keeping the
+        # old mask would go on painting it rejected on the strength of a
+        # measurement of the point it replaced. The next recompute re-derives
+        # the mask anyway — this is just so the view does not lie until then.
+        self.rejected[cam][joint] = False
 
     def set_head_kp(self, cam: str, k: int, x: float, y: float,
                     score: float = 1.0) -> None:

@@ -107,7 +107,11 @@ def test_validate_cross_view_drops_bad_observation(rig):
     proj = ProjectData(frames=[f])
     dropped = validate_cross_view(proj, calibrated)
     assert dropped >= 1
-    assert np.isnan(f.kp2d[CAM_LEFT][13]).all()      # bad view dropped
-    assert not np.isnan(f.kp2d[CAM_RIGHT][13]).any()  # good view kept
+    # the bad view is MASKED, not deleted: the keypoint stays where the
+    # detector put it (drawn, draggable, saved) and only the arithmetic is
+    # denied it — see tests/test_cross_view.py for why that matters
+    assert f.rejected[CAM_LEFT][13]                   # bad view rejected
+    assert not f.rejected[CAM_RIGHT][13]              # good view kept
+    assert not np.isnan(f.kp2d[CAM_LEFT][13]).any()
     triangulate_project(proj, calibrated)
     assert np.isnan(f.pose3d[13]).all()               # 3D point dropped too

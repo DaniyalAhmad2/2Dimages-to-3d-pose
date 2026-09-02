@@ -40,8 +40,13 @@ RAG_COLORS = {
     # whatsoever was drawn green.
     "unmeasured": COL_GREY,
     # both views have a point but they disagree about where the joint is by
-    # more than the geometry allows, so the pair was not triangulated.
-    "rejected": COL_RED,
+    # more than the geometry allows, so the pair was not triangulated. PURPLE,
+    # not red: red is "measured, and badly" — a whole band of the accuracy
+    # scale — and this joint has no measurement to be bad. It is the same
+    # colour as a hand-corrected point because both are the geometry being
+    # overruled, and the two are never confusable: corrected is a filled dot,
+    # rejected a hollow ring.
+    "rejected": COL_PURPLE,
 }
 
 # States drawn as a hollow ring rather than a filled dot: none of them is a
@@ -261,9 +266,21 @@ class CameraView(QGraphicsView):
 
         if state == STATE_REJECTED:
             status = "rejected"
-            detail = ("rejected by the cross-view check — the two views "
-                      "disagree about where this joint is by more than the "
-                      "calibration allows, so it was not triangulated")
+            # The NUMBER is the diagnosis. A purple dot on its own is a new
+            # kind of silence: the user cannot tell a hallucinated ankle from
+            # a rig that is 12 deg out, and those want opposite responses
+            # (drag the point vs recalibrate). `px`/`gate` ride on the state
+            # itself (ui.model.RejectedState); a state without them still
+            # renders, it just cannot say how far apart the views were.
+            px, gate = getattr(state, "px", None), getattr(state, "gate", None)
+            how_far = (f"by {px:.0f} px (gate {gate:.0f} px)"
+                       if px is not None and gate is not None
+                       and np.isfinite(px) and np.isfinite(gate)
+                       else "by more than the calibration allows")
+            detail = (f"rejected by the cross-view check — the two views "
+                      f"disagree about where this joint is {how_far}, so it "
+                      f"was not triangulated. The keypoints are still here: "
+                      f"drag either one, or recalibrate")
         elif state == STATE_NOT_MEASURED or not np.isfinite(err):
             status = "unmeasured"
             detail = ("not measured — no 3D was reconstructed for this joint, "
