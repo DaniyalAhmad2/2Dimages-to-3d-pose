@@ -138,3 +138,49 @@ def test_splitter_handles_are_styled():
            / "pose3d" / "ui" / "dark.qss").read_text()
     assert "QSplitter::handle" in qss, "splitter handles are unstyled"
     assert "QSplitter::handle:hover" in qss, "no hover cue on the drag handle"
+
+
+def test_the_gauge_shows_one_number_per_camera(light_host):
+    """Phase 4: the gauge stopped averaging the two cameras into one figure.
+
+    Averaging hid the case that matters — one view agreeing and the other not
+    — and the two views of this rig are 2:1 apart in resolution, so they were
+    never commensurable in the first place. Two arcs, two numbers, and the
+    word underneath is the WORSE band.
+    """
+    from pose3d.ui.panels import PoseAccuracyGauge, acc_label
+
+    g = PoseAccuracyGauge()
+    g.set_cameras({"left": 92.0, "right": 55.0})
+    img = _render(g)
+
+    assert g._worst() == 55.0
+    assert acc_label(g._worst()) == "Low"
+    # still opaque and dark whatever the host theme is doing
+    corners = [_luma(img, 2, 2), _luma(img, img.width() - 3, 2),
+               _luma(img, 2, img.height() - 3)]
+    assert max(corners) < 90, f"gauge background is light ({corners})"
+    # and both arcs are painted: the green one and the red one are both there
+    seen = {(img.pixelColor(x, y).red(), img.pixelColor(x, y).green(),
+             img.pixelColor(x, y).blue())
+            for x in range(0, img.width(), 2)
+            for y in range(0, img.height(), 2)}
+    from pose3d.ui.panels import COL_GREEN, COL_RED
+    for col in (COL_GREEN, COL_RED):
+        assert any(abs(r - col.red()) < 30 and abs(gr - col.green()) < 30
+                   and abs(b - col.blue()) < 30 for r, gr, b in seen), (
+            f"{col.name()} arc was not painted")
+
+
+def test_a_missing_camera_leaves_its_arc_empty_rather_than_zero(light_host):
+    """A camera with no number must not be drawn as 0 % — that is a red arc
+    claiming a measurement nobody made."""
+    import numpy as np
+
+    from pose3d.ui.panels import PoseAccuracyGauge
+
+    g = PoseAccuracyGauge()
+    g.set_cameras({"left": 90.0, "right": float("nan")})
+    _render(g)
+    assert np.isnan(g._pct["right"])
+    assert g._worst() == 90.0

@@ -26,6 +26,17 @@ from pose3d.core.skeleton import BONES, Joint, NUM_HEAD_KP, NUM_JOINTS
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
+
+class PoseUnavailable(Exception):
+    """This frame's pose cannot drive the rig: it has no usable pelvis.
+
+    Raised (rather than returned as `None`) so a caller can tell "this one
+    frame had no hips" apart from "the character asset is broken" — the two
+    used to arrive at `View3D._skin` as the same blanket `except Exception`,
+    and a missing rig file was reported to the user as an empty 3D view.
+    """
+
+
 _MID = "MID"        # midpoint(pelvis, neck) — the torso split point
 _EAR_MID = "EAR_MID"  # midpoint of the ears — a real point on the skull axis
 
@@ -1039,10 +1050,14 @@ class Character:
         Both are returned in the SAME space as `up_pose`, so the joints can be
         drawn straight over the mesh. `joints` is (NUM_JOINTS,3); entries the
         rig cannot supply are NaN.
+
+        Raises `PoseUnavailable` when the frame has no usable pelvis.
         """
         skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid, head_pts)
         if skin is None:
-            return None, None, None
+            raise PoseUnavailable(
+                "no usable pelvis in this frame: neither PELVIS nor either "
+                "hip was reconstructed, so the rig has no root to stand on")
 
         out = np.zeros((len(self.verts0), 3))
         for k in range(self.w_idx.shape[1]):

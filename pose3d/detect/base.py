@@ -4,7 +4,7 @@ The rest of the pipeline (triangulation, fit, export) depends only on this
 interface, so the detection method can change (markerless model today, red-dot
 marker detector later, a fine-tuned model in v2) without touching downstream
 layers. Detectors emit results in the canonical Joint order already, with a
-RAG status per joint.
+confidence per joint.
 """
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS, rag_status
+from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS
 
 
 @dataclass
@@ -26,10 +26,6 @@ class Detection:
     # notion of a face (e.g. the manual one). See skeleton.extract_head.
     head_xy: np.ndarray | None = None       # (NUM_HEAD_KP, 2)
     head_scores: np.ndarray | None = None   # (NUM_HEAD_KP,)
-
-    def rag(self) -> list[str]:
-        return [rag_status(float(s)) if not np.isnan(s) else "red"
-                for s in self.scores]
 
     def __post_init__(self):
         assert self.xy.shape == (NUM_JOINTS, 2), self.xy.shape

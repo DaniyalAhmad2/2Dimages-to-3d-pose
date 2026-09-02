@@ -15,10 +15,17 @@ from pose3d.core.project import (
     CAM_LEFT, CAM_RIGHT, CAMERAS, PIPELINE_VERSION, ProjectData,
 )
 from pose3d.core.skeleton import Joint, NUM_JOINTS
-from pose3d.geometry.triangulate import reprojection_error, triangulate_one
+from pose3d.geometry.triangulate import (
+    epipolar_distance, reprojection_error, triangulate_one)
 from pose3d.pipeline import CalibratedRig, bone_length_targets, fit_frame
 
 HEAD_JOINT = int(Joint.HEAD)
+
+# Per-joint states the camera views paint. A joint with no 3D is not a joint
+# with a poor one, and the two used to be drawn identically.
+STATE_OK = "ok"
+STATE_NOT_MEASURED = "not_measured"
+STATE_REJECTED = "rejected"
 
 # Joints the detector does not see but derives as a midpoint of two it does
 # (skeleton.derive_joints). Dragging a shoulder therefore has to move the neck
@@ -39,7 +46,9 @@ class ProjectModel(QObject):
     joint2dChanged = Signal(str, int)          # cam, joint (after edit)
     # fitted pose, face keypoints, per-joint gap-filled flags
     pose3dChanged = Signal(object, object, object)
-    accuracyChanged = Signal(object)           # (NUM_JOINTS,) reproj error px
+    # {cam: {"measured"|"delivered": (NUM_JOINTS,) residual / figure height}}
+    accuracyChanged = Signal(object)
+    qualityChanged = Signal()                  # take-wide numbers moved
     historyChanged = Signal()                  # undo/redo availability
 
     statusMessage = Signal(str)                # user-facing status text
@@ -57,6 +66,11 @@ class ProjectModel(QObject):
         self.migration_note = ""
         self._stored_fitted3d = None
         self._stored_version = None
+        # why there is no rig, when the folder held one but it could not be
+        # used. Empty for "genuinely uncalibrated" (see app._load_rig).
+        self.rig_error = ""
+        self._figure_h_px = None
+        self._quality = None
 
     # --- pipeline version migration ---
     def upgrade_pipeline(self) -> str:
@@ -99,6 +113,7 @@ class ProjectModel(QObject):
         for f, pose in zip(self.project.frames, self._stored_fitted3d):
             f.fitted3d = pose.copy()
         self._stored_fitted3d = None
+        self.invalidate_readouts()
         if self._stored_version is not None:
             # What is on screen is the old pipeline's pose again, so the file
             # must not go on claiming otherwise: saving now keeps this a legacy
@@ -133,11 +148,129 @@ class ProjectModel(QObject):
 
             from pose3d.calib.resolve import finalize_world_up
             finalize_world_up(self.project, Path(self.project_dir) / "calibration")
+        self.invalidate_readouts()
         self.set_frame(self.current)
+        # pulled, not pushed: measuring the whole take is not free, and it is
+        # wasted work when nothing is listening
+        self.qualityChanged.emit()
         msg = f"Recalculated 3D for {len(self.project.frames)} frames"
         notes = [n for n in (rejection_note(dropped, len(self.project.frames)),
                              report.note()) if n]
         self.statusMessage.emit(" — ".join([msg, *notes]))
+
+    # --- scale ---
+    def measured_subject_height(self) -> float:
+        """Height of the reconstructed subject, in the calibration's units.
+
+        The same definition as everywhere else in the repo: the median
+        vertical extent of the de-tilted delivered pose
+        (`pose3d.quality.subject_height`).
+        """
+        from pose3d.quality import subject_height
+        frames = self.project.frames
+        if not frames:
+            return float("nan")
+        return subject_height(np.stack([f.fitted3d for f in frames]))
+
+    def set_scale_from_height(self, real_height_m: float) -> float | None:
+        """Rescale the calibration so the subject comes out `real_height_m`.
+
+        The reconstruction is only as correctly SIZED as the marker edge
+        length that was typed in at import: get that wrong and every distance,
+        every export and the bundled character's fit are wrong by one common
+        factor, while every consistency check in the app still reads perfect
+        (a similarity transform changes no reprojection, no epipolar distance
+        and no bone-length spread). Nothing in the pipeline can detect it, so
+        the only fix is a distance the client measures.
+
+        Scaling the world by `s` means `t -> s*t` for both cameras: a point
+        `X` images at `R X + t`, so `R (sX) + s t = s (R X + t)` is the same
+        ray. Every reconstructed point therefore scales by exactly `s` and no
+        image measurement changes. The marker length is scaled with it so a
+        later recalibration from the same tags reproduces this size rather
+        than silently reverting to the old one.
+
+        Returns the factor applied, or None when there is nothing to scale.
+        """
+        current = self.measured_subject_height()
+        if not (np.isfinite(current) and current > 1e-9):
+            self.statusMessage.emit(
+                "No reconstructed pose to measure — cannot set the scale")
+            return None
+        if not (np.isfinite(real_height_m) and real_height_m > 1e-9):
+            self.statusMessage.emit("Enter a real distance greater than zero")
+            return None
+        factor = float(real_height_m) / float(current)
+        self.rescale_calibration(factor)
+        self.statusMessage.emit(
+            f"Rescaled the calibration by {factor:.4f}x: the subject now "
+            f"reconstructs {100.0 * float(real_height_m):.1f} cm tall "
+            f"(was {100.0 * current:.1f} cm)")
+        return factor
+
+    def rescale_calibration(self, factor: float) -> None:
+        """Multiply the rig's translations (and marker length) by `factor`.
+
+        Re-persists the calibration folder and recomputes, so the 3D view,
+        the export and the next open all agree about the new size.
+        """
+        if self.rig is None:
+            self.statusMessage.emit("No calibration loaded — nothing to scale")
+            return
+        factor = float(factor)
+        for cam in CAMERAS:
+            self.rig.ext[cam].t = np.asarray(
+                self.rig.ext[cam].t, float) * factor
+        self._persist_rig(factor)
+        self.recompute_all()
+
+    def _persist_rig(self, factor: float) -> None:
+        """Write the rescaled rig back, keeping the calibration's provenance.
+
+        `save_rig` alone would drop report.json's evidence and the recorded
+        vertical, so the report is read, its one length-valued field scaled,
+        and handed back; the vertical is a DIRECTION, which a scale cannot
+        touch, so it is restored verbatim if the rewrite dropped it.
+        """
+        if not self.project_dir:
+            self.statusMessage.emit(
+                "No project folder set — the new scale was applied to this "
+                "session only. Use Save As to keep it.")
+            return
+        import json
+        from pathlib import Path
+
+        from pose3d.calib.resolve import save_rig
+        calib_dir = Path(self.project_dir) / "calibration"
+        ext_path = calib_dir / "extrinsics.json"
+        try:
+            before = json.loads(ext_path.read_text())
+        except Exception:
+            before = {}
+        report = None
+        try:
+            report = json.loads((calib_dir / "report.json").read_text())
+        except Exception:
+            report = None                 # calibrated before report.json
+        if report is not None and report.get("marker_length_m") is not None:
+            report["marker_length_m"] = float(
+                report["marker_length_m"]) * factor
+            report["marker_length_source"] = (
+                f"rescaled in-app by {factor:.4f}x from a measured distance")
+        try:
+            save_rig(self.rig, calib_dir, report)
+            doc = json.loads(ext_path.read_text())
+            restored = False
+            for key in ("world_up", "world_up_source", "world_up_spread_deg"):
+                if key not in doc and key in before:
+                    doc[key] = before[key]
+                    restored = True
+            if restored:
+                ext_path.write_text(json.dumps(doc, indent=2))
+        except Exception as e:
+            self.statusMessage.emit(
+                f"Could not save the rescaled calibration "
+                f"({type(e).__name__}: {e})")
 
     def redetect_all(self, detector, load_image) -> None:
         """Re-run the detector on every frame, then recompute 3D."""
@@ -147,7 +280,7 @@ class ProjectModel(QObject):
         from pose3d.pipeline import detect_project
         self.statusMessage.emit("Running detection…")
         detect_project(self.project, detector, load_image)
-        self.recompute_all()
+        self.recompute_all()          # invalidates the take-wide readouts
         self.statusMessage.emit(
             f"Detection complete ({len(self.project.frames)} frames); "
             f"hand-corrected points were kept")
@@ -215,6 +348,12 @@ class ProjectModel(QObject):
     # --- editing ---
     def set_joint_2d(self, cam: str, joint: int, x: float, y: float) -> None:
         f = self.frame()
+        # the take-wide numbers now describe a 2D that no longer exists; drop
+        # them so the next reader recomputes rather than showing a stale row.
+        # (The figure height is a median over the whole take and one dragged
+        # point cannot move it, so it deliberately survives — recomputing it
+        # per drag would make every correction cost a pass over the take.)
+        self._quality = None
         self.stack.apply(f.frame_id, cam, joint, x, y)
         self.joint2dChanged.emit(cam, joint)
         if self.auto_recalc:
@@ -331,18 +470,122 @@ class ProjectModel(QObject):
                 f"Bone fit failed on this frame ({type(e).__name__}); "
                 f"showing the raw triangulation")
 
-    def _accuracy(self, idx: int) -> np.ndarray:
-        f = self.project.frames[idx]
+    # --- readouts ---
+    def figure_h_px(self) -> dict[str, float]:
+        """Each camera's median figure height in pixels, over the whole take.
+
+        THE denominator for every residual this class reports. A pixel is not
+        a unit anyone can compare: the subject stands 776 px tall in the left
+        image of the client's take and 407 px in the right, so the same error
+        reads 1.9x worse on the right, and a different phone changes both.
+        Computed once per take and invalidated whenever the 2D changes.
+        """
+        if self._figure_h_px is None:
+            from pose3d.quality import figure_height_px
+            frames = self.project.frames
+            self._figure_h_px = {
+                c: (figure_height_px(np.stack([f.kp2d[c] for f in frames]))
+                    if frames else float("nan"))
+                for c in CAMERAS}
+        return self._figure_h_px
+
+    def invalidate_readouts(self) -> None:
+        """Drop the cached take-wide numbers (figure height, take quality).
+
+        Called wherever the 2D or the 3D changes wholesale. A single joint drag
+        does NOT invalidate the figure height: it is a median over 26 frames
+        and one point cannot move it, and recomputing it per drag would make
+        every correction O(take)."""
+        self._figure_h_px = None
+        self._quality = None
+
+    def quality(self):
+        """`pose3d.quality.TakeQuality` for the whole take, or None.
+
+        Computed once per recompute — it is a take-wide measurement, not a
+        per-frame one — and cached, because the sidebar reads it on every
+        refresh and it walks every frame twice.
+        """
+        if self.rig is None or not self.project.frames:
+            return None
+        if self._quality is None:
+            from pose3d.quality import take_quality
+            try:
+                self._quality = take_quality(self.project, self.rig)
+            except Exception as e:      # never let a readout break the app
+                self.statusMessage.emit(
+                    f"Could not measure this take ({type(e).__name__}: {e})")
+                return None
+        return self._quality
+
+    def _accuracy(self, idx: int) -> dict:
+        """Per-camera, per-stage normalised reprojection residual for a frame.
+
+        `{cam: {"measured": (NUM_JOINTS,), "delivered": (NUM_JOINTS,)}}`, each
+        divided by that camera's own `figure_h_px`.
+
+        Two stages, never averaged over cameras:
+          "measured"  — `Frame.pose3d`, the raw triangulation: do the two views
+                        agree? This is the only one a keypoint drag can move.
+          "delivered" — `Frame.fitted3d`, the pose the 3D view shows and the
+                        export writes: what you are actually looking at.
+        Their ratio is the permanent regression detector. The build the client
+        complained about delivered a pose 4.2x/6.2x further from the keypoints
+        than the measurement and no readout in the app could say so, because
+        this function scored only `pose3d` and then averaged the two cameras
+        into one number that hid which view disagreed.
+        """
+        blank = np.full(NUM_JOINTS, np.nan)
         if self.rig is None:
-            return np.full(NUM_JOINTS, np.nan)
-        errs = []
+            return {c: {"measured": blank.copy(), "delivered": blank.copy()}
+                    for c in CAMERAS}
+        f = self.project.frames[idx]
+        fh = self.figure_h_px()
+        out = {}
         for cam in CAMERAS:
-            errs.append(reprojection_error(
-                f.pose3d, f.kp2d[cam], self.rig.intr[cam], self.rig.ext[cam]))
-        import warnings
-        with warnings.catch_warnings():   # all-NaN joint -> quiet nanmean
-            warnings.simplefilter("ignore", RuntimeWarning)
-            return np.nanmean(np.stack(errs), axis=0)
+            denom = fh.get(cam, float("nan"))
+            denom = denom if np.isfinite(denom) and denom > 1e-9 else np.nan
+            per = {}
+            for stage, pose in (("measured", f.pose3d),
+                                ("delivered", f.fitted3d)):
+                err = reprojection_error(pose, f.kp2d[cam],
+                                         self.rig.intr[cam], self.rig.ext[cam])
+                per[stage] = np.asarray(err, float) / denom
+            out[cam] = per
+        return out
+
+    def joint_states(self, idx: int) -> dict[str, list[str]]:
+        """Per-camera, per-joint state: why a joint has no number.
+
+        "not measured" and "rejected by the cross-view check" are different
+        facts and used to be drawn the same. There is no per-observation
+        rejection flag on `Frame` — the gate NaNs the losing 2D in place — so
+        the distinction is drawn from what is on the frame NOW: both views
+        holding a point that still disagrees beyond the epipolar threshold is
+        a rejection (which is the state a hand-drag lands in); one view having
+        no point at all is simply not measured.
+        """
+        f = self.project.frames[idx]
+        states = {c: [STATE_OK] * NUM_JOINTS for c in CAMERAS}
+        if self.rig is None:
+            return states
+        from pose3d.pipeline import epipolar_threshold
+        thr = epipolar_threshold(self.rig)
+        for j in range(NUM_JOINTS):
+            if not np.isnan(f.pose3d[j]).any():
+                continue                    # it has 3D: nothing to explain
+            seen = {c: not np.isnan(f.kp2d[c][j]).any() for c in CAMERAS}
+            state = STATE_NOT_MEASURED
+            if all(seen.values()):
+                e = epipolar_distance(
+                    f.kp2d[CAM_LEFT][j], f.kp2d[CAM_RIGHT][j],
+                    self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
+                    self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+                if np.isfinite(e) and e > thr:
+                    state = STATE_REJECTED
+            for c in CAMERAS:
+                states[c][j] = state
+        return states
 
 
 _NO_RIG_NOTE = (

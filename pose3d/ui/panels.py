@@ -11,14 +11,39 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal, QRectF
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
-    QCheckBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QPushButton, QVBoxLayout, QWidget,
+    QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QListWidget,
+    QListWidgetItem, QPushButton, QScrollArea, QVBoxLayout, QWidget,
 )
 
+from pose3d.core.project import CAM_LEFT, CAM_RIGHT
 from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS
 
-# accuracy banding (percent) -> colour, matching the mockup legend
-ACC_HIGH, ACC_MED = 85.0, 70.0
+# The accuracy scale, as (residual / figure height, percent) anchors.
+#
+# Reprojection error in RAW PIXELS is not comparable between the two cameras of
+# this rig — the subject stands 776 px tall in the left image and 407 px in the
+# right, so the same physical error reads 1.9x worse on the right — and it is
+# not comparable between takes at all. Every band is therefore a fraction of
+# THAT camera's figure height (`pose3d.quality.figure_height_px`).
+#
+# The old map was 100*exp(-err_px/6): green needed <= 0.98 px on a 3072x4080
+# frame, which no real take reaches, so 70.6 % of the client take's joint dots
+# were red, its timeline was 21 red frames out of 26 with no green one, and the
+# colour said nothing. These anchors put 0.4 % of figure height at the green
+# cut and 1.0 % at the amber cut, which is where a good two-camera
+# reconstruction of this subject actually sits (it reads 30.7 % red, and the
+# delivered pose bands amber at 71 % / 70 %).
+ACC_ANCHORS: tuple[tuple[float, float], ...] = (
+    (0.000, 100.0),
+    (0.004, 85.0),
+    (0.010, 70.0),
+    (0.030, 0.0),
+)
+# The two anchors that ARE the band edges, kept named so the timeline and the
+# legend cannot drift from `acc_band`.
+ACC_GREEN_FRAC = ACC_ANCHORS[1][0]
+ACC_AMBER_FRAC = ACC_ANCHORS[2][0]
+
 COL_GREEN = QColor(78, 214, 122)
 COL_AMBER = QColor(240, 190, 74)
 COL_RED = QColor(235, 92, 92)
@@ -30,11 +55,23 @@ COL_PANEL = QColor(15, 18, 25)
 COL_TEXT = QColor(235, 238, 245)
 
 
-def accuracy_pct(err_px: float) -> float:
-    """Map a reprojection error (px) to a 0-100 accuracy percentage."""
-    if np.isnan(err_px):
-        return float("nan")
-    return float(np.clip(100.0 * np.exp(-err_px / 6.0), 0.0, 100.0))
+def accuracy_pct(err_px, figure_h_px=1.0):
+    """Map a reprojection error to a 0-100 accuracy percentage.
+
+    Piecewise-linear on `err_px / figure_h_px` through `ACC_ANCHORS`. Scalar in,
+    scalar out; array in, array out.
+
+    `figure_h_px` defaults to 1.0 so a caller that already holds a NORMALISED
+    residual — everything downstream of `ProjectModel._accuracy`, which divides
+    by each camera's own figure height so the two cameras are comparable — can
+    pass it straight in.
+    """
+    xs = [a for a, _ in ACC_ANCHORS]
+    ys = [b for _, b in ACC_ANCHORS]
+    frac = np.asarray(err_px, float) / float(figure_h_px)
+    pct = np.interp(frac, xs, ys, left=ys[0], right=ys[-1])
+    pct = np.where(np.isnan(frac), np.nan, np.clip(pct, 0.0, 100.0))
+    return float(pct) if pct.ndim == 0 else pct
 
 
 def acc_band(pct: float) -> str:
@@ -46,7 +83,8 @@ def acc_band(pct: float) -> str:
     """
     if np.isnan(pct):
         return "red"
-    return "green" if pct >= ACC_HIGH else ("amber" if pct >= ACC_MED else "red")
+    green, amber = accuracy_pct(ACC_GREEN_FRAC), accuracy_pct(ACC_AMBER_FRAC)
+    return "green" if pct >= green else ("amber" if pct >= amber else "red")
 
 
 _BAND_COLORS = {"green": COL_GREEN, "amber": COL_AMBER, "red": COL_RED}
@@ -81,17 +119,59 @@ class _InfoRow(QWidget):
         self._v.setText(v)
 
 
+class _StackedRow(QWidget):
+    """An info row whose value is too long to sit beside its key.
+
+    The sidebar is 232 px wide and "50 mm · tag 15 · frame 0007" is not going
+    to share a line with a label. Stacked and word-wrapped, it fits at any
+    width instead of pushing the column wider than the panel and eliding.
+    """
+
+    def __init__(self, label: str, value: str = ""):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 1, 0, 1)
+        lay.setSpacing(0)
+        self._k = QLabel(label); self._k.setObjectName("infoKey")
+        self._v = QLabel(value); self._v.setObjectName("infoVal")
+        self._v.setWordWrap(True)
+        lay.addWidget(self._k); lay.addWidget(self._v)
+
+    def set_value(self, v: str):
+        self._v.setText(v)
+
+
 class PoseAccuracyGauge(QWidget):
-    """Circular gauge showing overall pose accuracy % + High/Medium/Low."""
+    """Circular gauge: one arc per camera, never one averaged number.
+
+    The two cameras are 2:1 apart in resolution and see the subject from
+    different angles, so a single figure hides the case that matters — one view
+    agreeing and the other not. Two arcs (outer = LEFT, inner = RIGHT) and two
+    percentages; the word underneath is the WORSE of the two bands, because
+    that is what the reconstruction is limited by.
+    """
+
+    # camera key -> arc inset in px. Outer ring is LEFT.
+    ARCS = ((CAM_LEFT, 0.0), (CAM_RIGHT, 16.0))
 
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(150)
-        self._pct = float("nan")
+        self._pct: dict[str, float] = {}
 
     def set_value(self, pct: float):
-        self._pct = pct
+        """One number for both cameras (used where only one exists)."""
+        self.set_cameras({cam: pct for cam, _ in self.ARCS})
+
+    def set_cameras(self, pct: dict):
+        self._pct = {k: float(v) for k, v in dict(pct).items()}
         self.update()
+
+    def _worst(self) -> float:
+        vals = [v for v in self._pct.values() if not np.isnan(v)]
+        if not vals:
+            return float("nan")
+        return min(vals)
 
     def paintEvent(self, _e):
         p = QPainter(self)
@@ -103,29 +183,47 @@ class PoseAccuracyGauge(QWidget):
         # and the near-white readout below became unreadable.
         p.fillRect(self.rect(), COL_PANEL)
         side = min(self.width(), self.height()) - 16
-        rect = QRectF((self.width() - side) / 2, 8, side, side)
-        # track
-        p.setPen(QPen(QColor(40, 44, 56), 10))
-        p.drawArc(rect, 0, 360 * 16)
-        pct = 0.0 if np.isnan(self._pct) else self._pct
-        col = acc_color(self._pct)
-        arc_pen = QPen(col, 10)
-        arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
-        p.setPen(arc_pen)
-        # start at top (90deg), clockwise
-        p.drawArc(rect, 90 * 16, -int(360 * 16 * pct / 100.0))
-        # text
+        base = QRectF((self.width() - side) / 2, 8, side, side)
+        for cam, inset in self.ARCS:
+            rect = base.adjusted(inset, inset, -inset, -inset)
+            p.setPen(QPen(QColor(40, 44, 56), 8))
+            p.drawArc(rect, 0, 360 * 16)
+            val = self._pct.get(cam, float("nan"))
+            if np.isnan(val):
+                continue
+            arc_pen = QPen(acc_color(val), 8)
+            arc_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+            p.setPen(arc_pen)
+            # start at top (90deg), clockwise
+            p.drawArc(rect, 90 * 16, -int(360 * 16 * max(val, 0.0) / 100.0))
+
+        inner = base.adjusted(30, 30, -30, -30)
         p.setPen(COL_TEXT)
-        f = QFont(); f.setPointSize(22); f.setBold(True); p.setFont(f)
-        txt = "--" if np.isnan(self._pct) else f"{pct:.0f}%"
-        p.drawText(rect, Qt.AlignmentFlag.AlignCenter, txt)
+        f = QFont(); f.setPointSize(16); f.setBold(True); p.setFont(f)
+        shown = " / ".join(
+            "--" if np.isnan(self._pct.get(cam, float("nan")))
+            else f"{self._pct[cam]:.0f}"
+            for cam, _ in self.ARCS)
+        p.drawText(inner, Qt.AlignmentFlag.AlignCenter, f"{shown}%")
+        worst = self._worst()
         f2 = QFont(); f2.setPointSize(9); p.setFont(f2)
-        p.setPen(col)
-        sub = QRectF(rect.left(), rect.center().y() + 16, rect.width(), 20)
-        p.drawText(sub, Qt.AlignmentFlag.AlignHCenter, acc_label(self._pct))
+        p.setPen(acc_color(worst))
+        sub = QRectF(base.left(), base.center().y() + 14, base.width(), 20)
+        p.drawText(sub, Qt.AlignmentFlag.AlignHCenter, acc_label(worst))
+        f3 = QFont(); f3.setPointSize(8); p.setFont(f3)
+        p.setPen(QColor(138, 145, 163))
+        legend = QRectF(base.left(), base.center().y() + 30, base.width(), 18)
+        p.drawText(legend, Qt.AlignmentFlag.AlignHCenter, "L / R")
 
 
 class PoseAccuracyPanel(QWidget):
+    """The gauge plus the raw numbers it was banded from.
+
+    The banding is a judgement call and the first thresholds will be wrong, so
+    the fraction of figure height each percentage came from is printed beside
+    it — the client can see straight through the colour to the measurement.
+    """
+
     def __init__(self):
         super().__init__()
         lay = QVBoxLayout(self)
@@ -133,19 +231,85 @@ class PoseAccuracyPanel(QWidget):
         lay.addWidget(_section("POSE ACCURACY"))
         self.gauge = PoseAccuracyGauge()
         lay.addWidget(self.gauge)
-        # the same bands acc_label() actually applies (ACC_HIGH/ACC_MED) —
-        # this legend used to claim 95/85 while the code banded at 85/70
-        for txt, col in (("High (85-100%)", COL_GREEN),
-                         ("Medium (70-84%)", COL_AMBER),
-                         ("Low (0-69%)", COL_RED)):
+        self.row_delivered = _InfoRow("Pose shown", "—")
+        self.row_delivered.setToolTip(
+            "How far the pose you are looking at lands from the keypoints in "
+            "each view, as a fraction of the subject's height in that image.")
+        lay.addWidget(self.row_delivered)
+        self.row_measured = _InfoRow("Measured", "—")
+        self.row_measured.setToolTip(
+            "The same for the raw triangulation, before the bone-length fit. "
+            "The gap between the two rows is what the fit cost.")
+        lay.addWidget(self.row_measured)
+        self.note = QLabel("")
+        self.note.setWordWrap(True)
+        self.note.setObjectName("legendLabel")
+        self.note.hide()
+        lay.addWidget(self.note)
+        # the same bands acc_band() actually applies, stated in the units they
+        # are applied in — this legend used to claim percentages with no
+        # denominator at all
+        for txt, col in (
+                (f"High — under {100 * ACC_GREEN_FRAC:.1f} % of figure height",
+                 COL_GREEN),
+                (f"Medium — under {100 * ACC_AMBER_FRAC:.1f} %", COL_AMBER),
+                (f"Low — over {100 * ACC_AMBER_FRAC:.1f} %", COL_RED)):
             row = QHBoxLayout()
             dot = QLabel("●"); dot.setStyleSheet(f"color: {col.name()};")
-            row.addWidget(dot); row.addWidget(QLabel(txt)); row.addStretch(1)
+            lab = QLabel(txt); lab.setObjectName("legendLabel")
+            row.addWidget(dot); row.addWidget(lab); row.addStretch(1)
             lay.addLayout(row)
         lay.addStretch(1)
 
     def set_overall(self, pct: float):
+        """One number for both cameras (no per-camera split available)."""
         self.gauge.set_value(pct)
+
+    def set_accuracy(self, delivered: dict, measured: dict | None = None):
+        """`delivered`/`measured` are {cam: normalised residual} scalars.
+
+        Both are fractions of that camera's figure height, so the two cameras
+        are directly comparable and neither is averaged into the other.
+        """
+        pct = {cam: accuracy_pct(v) for cam, v in delivered.items()}
+        self.gauge.set_cameras(pct)
+        self.row_delivered.set_value(_frac_row(delivered))
+        self.row_measured.set_value(
+            "—" if measured is None else _frac_row(measured))
+        self.note.setText(_fit_cost_note(measured, delivered))
+        self.note.setVisible(bool(self.note.text()))
+
+
+def _frac_row(fracs: dict) -> str:
+    """"0.95 % / 0.99 %" — left then right, as % of figure height."""
+    order = [cam for cam, _ in PoseAccuracyGauge.ARCS]
+    parts = []
+    for cam in order:
+        v = fracs.get(cam, float("nan"))
+        parts.append("—" if np.isnan(v) else f"{100.0 * v:.2f} %")
+    return " / ".join(parts)
+
+
+def _fit_cost_note(measured, delivered, warn_ratio: float = 1.2) -> str:
+    """What the bone fit cost, in the client's own take, or "".
+
+    The measured-vs-delivered ratio is the permanent regression detector for
+    everything downstream of triangulation: the build the client complained
+    about put the delivered pose 4.2x/6.2x further from the keypoints than the
+    measurement and nothing on screen said so.
+    """
+    if not measured or not delivered:
+        return ""
+    ratios = []
+    for cam, d in delivered.items():
+        m = measured.get(cam, float("nan"))
+        if np.isfinite(m) and m > 1e-9 and np.isfinite(d):
+            ratios.append(d / m)
+    if not ratios or max(ratios) < warn_ratio:
+        return ""
+    return (f"The pose shown sits {max(ratios):.1f}x further from the "
+            f"keypoints than the measurement does — that is what holding the "
+            f"character's bone lengths fixed costs on this take.")
 
 
 class JointAccuracyList(QWidget):
@@ -161,8 +325,14 @@ class JointAccuracyList(QWidget):
         lay.addWidget(self.list)
 
     def update_errors(self, errors: np.ndarray) -> float:
+        """`errors` are NORMALISED residuals (fraction of figure height).
+
+        `ProjectModel._accuracy` divides by each camera's own figure height
+        before it gets here, so a joint's number means the same thing in both
+        views and in every take.
+        """
         errors = np.asarray(errors, float).reshape(NUM_JOINTS)
-        pcts = np.array([accuracy_pct(e) for e in errors])
+        pcts = np.asarray(accuracy_pct(errors), float)
         order = np.argsort(np.nan_to_num(pcts, nan=-1))   # worst first
         self.list.clear()
         for j in order:
@@ -185,6 +355,7 @@ _SUBJECT_VERTICAL = (
 class Sidebar(QWidget):
     runDetection = Signal()
     recalibrate = Signal()
+    setScale = Signal(float)                # real subject height, in metres
     showJointsToggled = Signal(bool)
     showBonesToggled = Signal(bool)
     showBodyToggled = Signal(bool)
@@ -194,7 +365,27 @@ class Sidebar(QWidget):
         super().__init__()
         self.setObjectName("sidebar")
         self.setFixedWidth(232)
-        lay = QVBoxLayout(self)
+        # The CALIBRATION section grew a section's worth of measurements, and
+        # what it holds depends on the take (a symmetry note appears only when
+        # a limb pair disagrees). Scroll rather than squeeze: a column that
+        # compresses its labels to fit is how a number ends up elided to "5…"
+        # on a laptop screen.
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(
+            Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("background: transparent;")
+        scroll.viewport().setStyleSheet("background: transparent;")
+        inner = QWidget()
+        inner.setStyleSheet("background: transparent;")
+        scroll.setWidget(inner)
+        outer.addWidget(scroll)
+        self._scroll = scroll
+        lay = QVBoxLayout(inner)
         lay.setContentsMargins(14, 14, 14, 14)
         lay.setSpacing(6)
 
@@ -228,6 +419,87 @@ class Sidebar(QWidget):
         btn_recal = QPushButton("↻  Recalibrate 3D")
         btn_recal.clicked.connect(self.recalibrate)
         lay.addWidget(btn_recal)
+
+        # Facts the client can check against the scene with a tape measure.
+        # A calibration can be self-consistent and still be the wrong SIZE —
+        # the marker length is the only real-world dimension that enters it —
+        # and these three rows are where that shows up.
+        self.row_baseline = _InfoRow("Camera baseline", "—")
+        self.row_baseline.setToolTip(
+            "Distance between the two cameras, as the calibration has it. "
+            "Measure it: if this is wrong, everything is wrong by the same "
+            "factor.")
+        lay.addWidget(self.row_baseline)
+        self.row_height = _InfoRow("Subject height", "—")
+        self.row_height.setToolTip(
+            "Median vertical extent of the reconstructed pose, levelled — the "
+            "denominator every '% of height' in this app is measured against.")
+        lay.addWidget(self.row_height)
+        self.row_marker = _StackedRow("Marker", "—")
+        self.row_marker.setToolTip(
+            "The tag the world frame was built on, its printed edge length, "
+            "and the frame it was solved in.")
+        lay.addWidget(self.row_marker)
+
+        # --- set the scale from something actually measured ---------------
+        # The whole reconstruction is only as correctly SIZED as the marker
+        # length that was typed in at import. Rather than make the client
+        # re-import to correct it, let them state the one distance they can
+        # measure and rescale the calibration to match.
+        scale_row = QHBoxLayout()
+        scale_row.setContentsMargins(0, 2, 0, 0); scale_row.setSpacing(4)
+        self.scale_value = QDoubleSpinBox()
+        self.scale_value.setRange(0.1, 1000.0)
+        self.scale_value.setDecimals(1)
+        self.scale_value.setSuffix(" cm")
+        self.scale_value.setValue(11.8)
+        self.scale_value.setMaximumWidth(96)
+        self.scale_value.setToolTip(
+            "The subject's real height, measured. Applying it rescales the "
+            "calibration (both camera translations and the marker length) so "
+            "the reconstruction comes out this tall.")
+        self.btn_scale = QPushButton("Set scale")
+        self.btn_scale.setMaximumWidth(92)
+        self.btn_scale.setToolTip(
+            "Rescale the calibration so the reconstructed subject is exactly "
+            "the height on the left, then recompute and re-save it.")
+        self.btn_scale.clicked.connect(
+            lambda: self.setScale.emit(self.scale_value.value() / 100.0))
+        scale_row.addWidget(self.scale_value, 1)
+        scale_row.addWidget(self.btn_scale)
+        lay.addLayout(scale_row)
+
+        # --- what the reconstruction says about itself --------------------
+        # Reprojection cannot see any of these: it is weak by construction for
+        # a freshly triangulated point, which always reprojects near its own
+        # observations. Each of these three covers one of its blind spots.
+        self.row_bone_cv = _StackedRow("Bone length spread", "—")
+        self.row_bone_cv_caption = QLabel(
+            "a rigid subject should read near 0 %")
+        self.row_bone_cv_caption.setWordWrap(True)
+        self.row_bone_cv_caption.setObjectName("legendLabel")
+        self.row_bone_cv.setToolTip(
+            "Spread of each bone's length across the take. The subject is "
+            "rigid, so a rigid subject should read near 0 % — anything else "
+            "is reconstruction error, and this moves on a wrong camera pose "
+            "when the gauge barely does.")
+        lay.addWidget(self.row_bone_cv)
+        lay.addWidget(self.row_bone_cv_caption)
+        self.row_epipolar = _StackedRow("View disagreement", "—")
+        self.row_epipolar.setToolTip(
+            "How far each keypoint sits from where the other camera says it "
+            "must be, per image and as a fraction of that image's diagonal. "
+            "The body keypoints play no part in the calibration, so this is "
+            "an independent check on it — and it moves on a wrong focal "
+            "length, which the bone spread does not.")
+        lay.addWidget(self.row_epipolar)
+        self.row_symmetry = _InfoRow("L/R symmetry", "—")
+        lay.addWidget(self.row_symmetry)
+        self.symmetry_note = QLabel("")
+        self.symmetry_note.setWordWrap(True)
+        self.symmetry_note.setStyleSheet("color:#e0a33a; font-size:11px;")
+        self.symmetry_note.hide()
+        lay.addWidget(self.symmetry_note)
 
         lay.addSpacing(6)
         lay.addWidget(_section("PROCESSING"))
@@ -315,3 +587,80 @@ class Sidebar(QWidget):
         else:
             self.vertical_ref.setText(_SUBJECT_VERTICAL)
         self.vertical_ref.setVisible(bool(on))
+
+    # --- ruler-checkable facts ------------------------------------------
+    def set_metric_facts(self, baseline_m=None, subject_height_m=None,
+                         marker=None):
+        """Baseline, reconstructed subject height, and the marker provenance.
+
+        `marker` is the calibration report's dict (or None for a project
+        calibrated before the report existed — those simply say "—" rather
+        than inventing a tag id).
+        """
+        self.row_baseline.set_value(_cm(baseline_m))
+        self.row_height.set_value(_cm(subject_height_m))
+        if subject_height_m is not None and np.isfinite(subject_height_m):
+            self.scale_value.setValue(round(100.0 * subject_height_m, 1))
+        self.row_marker.set_value(_marker_text(marker))
+
+    # --- what the reconstruction says about itself -----------------------
+    def set_quality(self, q, notes=()):
+        """Fill the three quality rows from a `pose3d.quality.TakeQuality`.
+
+        `None` blanks them: a take with no calibration has no such numbers,
+        and a stale row is worse than an empty one.
+        """
+        if q is None:
+            for row in (self.row_bone_cv, self.row_epipolar, self.row_symmetry):
+                row.set_value("—")
+            self.symmetry_note.hide()
+            return
+        cv = q.bone_cv or {}
+        self.row_bone_cv.set_value(
+            f"{_pct1(cv.get('median_cv_pct'))} med / "
+            f"{_pct1(cv.get('max_cv_pct'))} max")
+        per_image = (q.epipolar or {}).get("per_image", {})
+        parts = []
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            d = per_image.get(cam) or {}
+            px, frac = d.get("median_px"), d.get("median_pct_diag")
+            if px is None or not np.isfinite(px):
+                parts.append("—")
+            else:
+                parts.append(f"{px:.1f} px ({_pct1(frac, 2)})")
+        self.row_epipolar.set_value(" / ".join(parts))
+        asym = [v.get("asym_pct") for v in (q.symmetry or {}).values()]
+        asym = [a for a in asym if a is not None and np.isfinite(a)]
+        self.row_symmetry.set_value(
+            f"{max(asym):.1f} % worst" if asym else "—")
+        notes = list(notes)
+        self.symmetry_note.setText("\n\n".join(f"• {n}" for n in notes))
+        self.symmetry_note.setToolTip("\n\n".join(notes))
+        self.symmetry_note.setVisible(bool(notes))
+
+
+def _cm(v) -> str:
+    return ("—" if v is None or not np.isfinite(v)
+            else f"{100.0 * float(v):.1f} cm")
+
+
+def _pct1(v, nd: int = 1) -> str:
+    return ("—" if v is None or not np.isfinite(v)
+            else f"{float(v):.{nd}f} %")
+
+
+def _marker_text(marker) -> str:
+    """"50 mm · tag 15 · frame 0007" from a calibration report."""
+    if not marker:
+        return "—"
+    bits = []
+    length = marker.get("marker_length_m")
+    if length is not None and np.isfinite(length):
+        bits.append(f"{1000.0 * float(length):.0f} mm")
+    tag = marker.get("world_tag_id")
+    if tag is not None:
+        bits.append(f"tag {tag}")
+    frame = marker.get("world_frame_id")
+    if frame:
+        bits.append(f"frame {frame}")
+    return " · ".join(bits) or "—"

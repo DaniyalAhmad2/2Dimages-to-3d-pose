@@ -9,16 +9,17 @@ from pose3d.detect.base import Detection
 from pose3d.detect.manual import ManualDetector
 
 
-def test_detection_rag():
+def test_detection_carries_scores_in_canonical_order():
+    """`Detection.rag()` was removed with Phase 4: the detector's confidence
+    never decided a colour anywhere that a reprojection residual did not, and
+    the one caller (`camera_view`) used it as a fallback that made a joint
+    with no 3D at all look green. The scores themselves are still carried."""
     xy = np.zeros((NUM_JOINTS, 2))
     scores = np.full(NUM_JOINTS, 0.9)
-    scores[Joint.LEFT_WRIST] = 0.4    # amber
-    scores[Joint.RIGHT_ANKLE] = 0.1   # red
+    scores[Joint.LEFT_WRIST] = 0.4
     d = Detection(xy=xy, scores=scores)
-    rag = d.rag()
-    assert rag[Joint.HEAD] == "green"
-    assert rag[Joint.LEFT_WRIST] == "amber"
-    assert rag[Joint.RIGHT_ANKLE] == "red"
+    assert not hasattr(d, "rag")
+    assert d.scores[Joint.LEFT_WRIST] == pytest.approx(0.4)
 
 
 def test_manual_detector_roundtrips():

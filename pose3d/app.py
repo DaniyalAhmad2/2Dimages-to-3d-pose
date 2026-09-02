@@ -72,8 +72,12 @@ def build_model(project_folder: str | None):
 
     if project_folder and Path(project_folder).exists():
         project = load_project(project_folder)
-        rig = _load_rig(Path(project_folder) / "calibration")
+        rig, reason = load_rig_with_reason(
+            Path(project_folder) / "calibration")
         model = ProjectModel(project, rig, project_dir=project_folder)
+        # the sidebar states it: a broken calibration must not look like no
+        # calibration, and neither must look like a broken 3D view
+        model.rig_error = reason
         # A take saved by an older pipeline is corrected here, once, before
         # anything is drawn — the window then shows what changed and offers
         # the stored pose back. Nothing is written to disk.
@@ -83,22 +87,80 @@ def build_model(project_folder: str | None):
     return ProjectModel(project, None)
 
 
-def _load_rig(calib_dir: Path):
-    """Load a CalibratedRig from a calibration folder if fully present."""
+def _check_extrinsics(cam: str, d) -> tuple:
+    """(R, t) for one camera, or raise ValueError naming what is wrong.
+
+    A 2x2 `R` used to build a perfectly happy `CalibratedRig` and only explode
+    inside triangulation, frames later, as a numpy broadcast error nobody could
+    read. The shape and the orthonormality are cheap and they are the two ways
+    a hand-edited or externally produced extrinsics.json goes wrong.
+    """
+    import numpy as np
+    try:
+        R = np.asarray(d["R"], float)
+        t = np.asarray(d["t"], float).ravel()
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"{cam} camera: R/t are not numbers ({e})") from e
+    if R.shape != (3, 3):
+        raise ValueError(
+            f"{cam} camera: R is {'x'.join(str(n) for n in R.shape)}, "
+            f"it must be 3x3")
+    if t.shape != (3,):
+        raise ValueError(
+            f"{cam} camera: t has {t.size} numbers, it must have 3")
+    if not np.isfinite(R).all() or not np.isfinite(t).all():
+        raise ValueError(f"{cam} camera: R or t contains NaN/inf")
+    off = float(np.abs(R @ R.T - np.eye(3)).max())
+    if off > 1e-3 or float(np.linalg.det(R)) < 0.0:
+        raise ValueError(
+            f"{cam} camera: R is not a rotation (R·Rᵀ is {off:.3g} off the "
+            f"identity, det {float(np.linalg.det(R)):.3f}) — every "
+            f"reconstruction from it would be skewed")
+    return R, t
+
+
+def load_rig_with_reason(calib_dir: Path):
+    """(CalibratedRig | None, reason). The reason is "" when there is nothing
+    to say — an uncalibrated project is a normal state, not a fault.
+
+    Everything else used to be swallowed by one blanket `except Exception`
+    that returned None, so a calibration folder with a typo in it was reported
+    to the user in exactly the same way as no calibration folder at all: the
+    3D view was empty and nothing anywhere said why.
+    """
+    import json
+
     from pose3d.calib.extrinsics import Extrinsics
     from pose3d.calib.intrinsics import Intrinsics
     from pose3d.pipeline import CalibratedRig
-    import json
     try:
         il = Intrinsics.load(calib_dir / "left_intrinsics.json")
         ir = Intrinsics.load(calib_dir / "right_intrinsics.json")
         ext = json.loads((calib_dir / "extrinsics.json").read_text())
-        import numpy as np
-        el = Extrinsics(R=np.array(ext["left"]["R"]), t=np.array(ext["left"]["t"]))
-        er = Extrinsics(R=np.array(ext["right"]["R"]), t=np.array(ext["right"]["t"]))
-        return CalibratedRig(il, ir, el, er)
-    except Exception:
-        return None
+    except FileNotFoundError:
+        return None, ""                  # genuinely uncalibrated: stay quiet
+    except json.JSONDecodeError as e:
+        return None, (f"The calibration in this project could not be read: "
+                      f"one of its files is not valid JSON ({e}).")
+    except (KeyError, ValueError, TypeError, OSError) as e:
+        return None, (f"The calibration in this project could not be read "
+                      f"({type(e).__name__}: {e}).")
+    try:
+        left = _check_extrinsics("left", ext["left"])
+        right = _check_extrinsics("right", ext["right"])
+    except KeyError as e:
+        return None, (f"extrinsics.json is missing the {e} camera, so no 3D "
+                      f"can be reconstructed.")
+    except (TypeError, ValueError) as e:
+        return None, f"This project's calibration is not usable — {e}."
+    el = Extrinsics(R=left[0], t=left[1])
+    er = Extrinsics(R=right[0], t=right[1])
+    return CalibratedRig(il, ir, el, er), ""
+
+
+def _load_rig(calib_dir: Path):
+    """Load a CalibratedRig from a calibration folder if fully present."""
+    return load_rig_with_reason(calib_dir)[0]
 
 
 def open_project_window(project_folder: str | None):
