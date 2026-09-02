@@ -8,10 +8,14 @@ fixture (`tests/fixtures/client_take`, built by `regen_client_take.py` from
 
 Every threshold sits 10-15 % above the value measured on 2026-09-01, with that
 value in a comment, so a threshold can never be met by having been set at the
-measurement. The two `xfail(strict=True)` tests at the bottom are the two
-things that are wrong today and that Phase 1 fixes: they must report XFAIL
-until then, and XPASS (a failure) the moment they start passing, which is the
-signal to promote them.
+measurement.
+
+The last two assertions were `xfail(strict=True)` while Phase 1 was being
+written — they are the two things the shipped build got wrong. They are live
+gates now. They measure the pose THIS build delivers (`delivered`: the app's
+own path — triangulate the stored 2D, then bone-fit with the shipped
+defaults), not the `fitted3d` stored in the fixture, which is the *old*
+build's answer and is kept as the record of what the client was sent.
 
 The numbers are `docs/audit-2026-09/wf_baseline.md`; the metric definitions are
 `pose3d.quality`.
@@ -47,6 +51,25 @@ def rig():
 def quality(project, rig):
     """Geometry only — no character, so this runs without the rig asset."""
     return take_quality(project, rig)
+
+
+@pytest.fixture(scope="module")
+def delivered(project, rig):
+    """The pose THIS build delivers for the take, by the app's own path.
+
+    `ProjectModel.recompute_all` is exactly these two calls, so this is what
+    opening the client's project now shows and exports — as opposed to the
+    `fitted3d` in the fixture, which is what the previous build stored.
+    """
+    p = copy.deepcopy(project)
+    pipeline.triangulate_project(p, rig)     # reproduces the stored 2.4e-7 m
+    pipeline.fit_project(p)                  # shipped defaults: no smoothing
+    return p
+
+
+@pytest.fixture(scope="module")
+def delivered_quality(delivered, rig):
+    return take_quality(delivered, rig)
 
 
 @pytest.fixture(scope="module")
@@ -95,31 +118,54 @@ def test_the_character_follows_the_captured_pose(quality_with_character):
     assert median <= 2.0, f"{median:.2f} % of body height"   # today 1.5
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "F01: fit_project ends with a causal EMA over frames that are discrete "
-    "hand-posed shots, so the pose that ships lags the keypoints by 4.2x "
-    "(left) / 6.2x (right) more than the measurement does. Phase 1 removes "
-    "the smoother from the default path and promotes this to a live gate."))
-def test_the_delivered_pose_reprojects_like_the_measurement(quality):
-    """The pose the app shows and exports must be no further from the 2D
-    keypoints than the raw triangulation is."""
+def test_the_delivered_pose_reprojects_like_the_measurement(delivered_quality):
+    """F01. The pose the app shows and exports must be no further from the 2D
+    keypoints than the raw triangulation is.
+
+    This was `xfail(strict=True)` until Phase 1: the causal EMA over frames
+    that are discrete hand-posed shots put the delivered pose 4.24x (left) /
+    6.17x (right) further from the keypoints than the measurement — 21.65 /
+    17.18 px. It is a live gate now."""
     for cam in CAMERAS:
-        ratio = quality.reproj_ratio(cam)
-        # today 4.24 left / 6.17 right
+        ratio = delivered_quality.reproj_ratio(cam)
+        # today 1.44 left / 1.44 right (7.37 / 4.02 px); was 4.24 / 6.17
         assert ratio <= 1.5, f"{cam}: delivered reprojects {ratio:.2f}x worse"
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "F01/F14: the same smoother. The stored fitted3d is the bone fit's answer "
-    "dragged backwards in time by up to 21.8 % of body height, so the shipped "
-    "pose is not the pose the fit produced. Phase 1 removes it."))
-def test_the_delivered_pose_is_the_pose_the_fit_produced(project, quality):
-    """Re-run the fit with no smoothing: the stored pose should be it."""
+def test_the_delivered_pose_is_the_pose_the_fit_produced(project, rig,
+                                                         delivered,
+                                                         delivered_quality):
+    """F01/F14. Nothing may sit between the bone fit and the pose the app
+    delivers: re-run the fit with smoothing explicitly off and the delivered
+    pose IS it.
+
+    Also `xfail(strict=True)` until Phase 1, when the stored `fitted3d` was
+    the fit's answer dragged backwards in time by up to 21.8 % of body height.
+    The gate is live and it fails again the day smoothing is re-enabled by
+    default at any call site on this path."""
     refit = copy.deepcopy(project)
+    pipeline.triangulate_project(refit, rig)
     pipeline.fit_project(refit, smooth=False)
-    stored = np.stack([f.fitted3d for f in project.frames])
+    shown = np.stack([f.fitted3d for f in delivered.frames])
     fresh = np.stack([f.fitted3d for f in refit.frames])
-    worst = float(np.nanmax(np.linalg.norm(stored - fresh, axis=2)))
-    pct = 100.0 * worst / quality.subject_height_m
-    # today 21.8 % of body height (25.7 mm on a 0.118 m subject)
+    worst = float(np.nanmax(np.linalg.norm(shown - fresh, axis=2)))
+    pct = 100.0 * worst / delivered_quality.subject_height_m
+    # today 0.0002 % of body height (solver noise); 21.8 % before Phase 1
     assert pct <= 3.0, f"delivered pose is {pct:.1f} % of height off the fit"
+
+
+def test_the_fixture_still_carries_the_pose_the_client_was_sent(project,
+                                                                delivered,
+                                                                quality):
+    """The two gates above are only worth something while the fixture holds
+    the OLD build's `fitted3d`. If it is ever regenerated from a fixed build
+    this fails, and says to re-baseline the two comments above rather than
+    quietly measuring a fixed pose against a fixed pose."""
+    stored = np.stack([f.fitted3d for f in project.frames])
+    shown = np.stack([f.fitted3d for f in delivered.frames])
+    worst = float(np.nanmax(np.linalg.norm(stored - shown, axis=2)))
+    pct = 100.0 * worst / quality.subject_height_m
+    # today 21.8 % of height: the lag the client complained about
+    assert pct >= 10.0, (
+        f"the fixture's stored pose is only {pct:.1f} % of height from what "
+        f"this build delivers — was it regenerated on a fixed build?")

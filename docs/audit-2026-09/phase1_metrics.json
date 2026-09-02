@@ -1,0 +1,130 @@
+{
+  "phase": "1 + 1b — remove the causal EMA; flagged gap fill; drag == batch; version stamp and non-destructive re-detect",
+  "measured_on": "2026-09-02",
+  "take": "workspace/pose3d_projects/Imported_Session (gitignored; committed as tests/fixtures/client_take)",
+  "subject_height_m": 0.1194,
+  "how_measured": {
+    "acceptance_harness": "cd /media/athena/hd3/Projects/pose3d-tool && PYTHONPATH=. .venv/bin/python docs/audit-2026-09/prototypes/metrics.py workspace/pose3d_projects/Imported_Session --source refit-nosmooth",
+    "why_refit_nosmooth": "prototypes/metrics.py --source refit hard-codes fit_project(smooth=True), which is no longer the shipped default; --source refit-nosmooth is the default path the app now runs (triangulate, then fit with no filter).",
+    "suite": "QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest -q --ignore=tests/build_demo_project.py"
+  },
+  "gates": [
+    {
+      "id": "reprojection",
+      "gate": "delivered / measured median reprojection error <= 1.5 in each camera",
+      "baseline": "21.65 px left / 17.18 px right delivered; ratios 4.24 / 6.17",
+      "measured": "7.37 px left / 4.02 px right delivered; ratios 1.44 / 1.44",
+      "status": "met",
+      "test": "tests/test_client_regression.py::test_the_delivered_pose_reprojects_like_the_measurement"
+    },
+    {
+      "id": "delivered_is_the_fit",
+      "gate": "max |delivered - refit(smoothing off)| <= 3 % of body height",
+      "baseline": "21.8 % of height (25.7 mm)",
+      "measured": "0.0002 % of height (solver noise)",
+      "status": "met",
+      "test": "tests/test_client_regression.py::test_the_delivered_pose_is_the_pose_the_fit_produced"
+    },
+    {
+      "id": "bone_length_cv",
+      "gate": "delivered bone-length CV median <= 0.15 % / max <= 0.40 %",
+      "baseline": "1.04 % median / 6.35 % max",
+      "measured": "0.148 % median / 0.362 % max (worst bone: pelvis-Rhip)",
+      "status": "met",
+      "test": "acceptance harness (the suite gates the RAW spread in tests/test_client_regression.py::test_raw_bone_lengths_are_consistent_across_frames)"
+    },
+    {
+      "id": "left_forearm_frame_0013",
+      "gate": "L forearm at frame 0013 back to its measured length (~0.0214 m)",
+      "baseline": "0.0173 m (19 % short — the frame blended with its neighbour)",
+      "measured": "0.02137 m",
+      "status": "met"
+    },
+    {
+      "id": "zero_pixel_drag",
+      "gate": "re-placing a joint on the pixel it already occupies moves no joint by more than 0.05 mm",
+      "baseline": "4.92 mm median / 25.65 mm max, on 15 of 15 joints",
+      "measured": "0.00 mm",
+      "status": "met",
+      "test": "tests/test_pipeline_fit.py::test_zero_pixel_drag_is_a_no_op"
+    },
+    {
+      "id": "derived_joint_follows_a_drag",
+      "gate": "after a 60 px shoulder drag the NECK's 3D error <= 0.2 mm, and one Ctrl+Z reverses both",
+      "baseline": "3.31 mm median / 10.66 mm max stale",
+      "measured": "within the test's 0.2 mm bound",
+      "status": "met",
+      "test": "tests/test_pipeline_fit.py::test_derived_joint_follows_a_shoulder_drag, ::test_one_undo_reverses_the_derived_joint_too"
+    },
+    {
+      "id": "sparse_frame_fit",
+      "gate": "a frame with 5 missing joints fits on lm in <= 40 ms",
+      "baseline": "746.78 ms (trf fallback)",
+      "measured": "~6 ms",
+      "status": "met",
+      "test": "tests/test_bonefit.py::test_sparse_frame_uses_lm"
+    },
+    {
+      "id": "gap_fill",
+      "gate_as_planned": "the posed-joint jump at a filled joint stays under 2 % of body height",
+      "gate": "RESTATED by the controller (fix round 1x): a filled joint is FLAGGED (Frame.filled, drawn hollow/amber, counted separately, read by the export) and its error is BELOW the hold-previous error of the behaviour it replaces.",
+      "why_restated": "2 % of height is below this take's noise floor — the subject's own median inter-frame motion is 9.36 mm = 7.9 % of height — so no interpolation of any kind can meet the planned gate. The decision-relevant quantity is how wrong the fill is where the truth IS known.",
+      "measured": {
+        "n_samples": 354,
+        "midpoint_of_the_neighbours_pct_height": {"median": 4.40, "p90": 13.29, "max": 50.40},
+        "hold_the_previous_frame_pct_height": {"median": 8.04, "p90": 23.19, "max": 59.11},
+        "fills_on_this_take": ["0012 RIGHT_KNEE", "0021 LEFT_ANKLE"],
+        "flagged": 2,
+        "unflagged_inventions": 0
+      },
+      "status": "met (midpoint halves the hold-previous error at the median and at p90, and every fill is flagged)",
+      "rollback": "fill_gaps(project, max_gap=0) ships the gap as a visible hole; the `filled` plumbing then simply never lights up.",
+      "test": "tests/test_gap_fill.py::test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame"
+    },
+    {
+      "id": "fabricated_joints",
+      "gate": "no joint is invented without a flag",
+      "baseline": "2 (frames 0012 and 0021 reported 15/15 reconstructed joints while two were copies of the previous frame)",
+      "measured": "0 unflagged; 2 flagged fills",
+      "status": "met"
+    },
+    {
+      "id": "recompute_on_open",
+      "gate": "opening the client's project on the fixed build changes the pose with no button press and says why, with this take's own numbers",
+      "measured": "pose moves 4.96 mm median / 25.65 mm max (4 % / 21 % of the figure's height); banner states it and offers Restore; version stamped so it happens once",
+      "status": "met",
+      "test": "tests/test_pipeline_fit.py::test_a_legacy_project_is_recomputed_on_open_and_says_what_moved, tests/test_io_project.py::test_version_stamp_round_trips"
+    },
+    {
+      "id": "face_point_migration_prompt",
+      "gate": "ADDED by the controller (fix round 1x, concern 4): when the take has no face keypoints the recompute banner names the one action that fixes the head",
+      "measured": "banner appends the Tools > \"Re-detect face points only\" hint iff every frame's head2d is NaN in both cameras",
+      "status": "met",
+      "test": "tests/test_pipeline_fit.py::test_the_recompute_banner_names_the_face_point_migration"
+    },
+    {
+      "id": "corrections_survive_a_redetect",
+      "gate": "corrections surviving 'Run Detection': 5/5, and no flag lies",
+      "baseline": "0/5 survive, 5 flags lie",
+      "measured": "5/5 survive, 0 flags lie",
+      "status": "met",
+      "test": "tests/test_pipeline_fit.py::test_redetect_keeps_corrections"
+    }
+  ],
+  "reported_not_gated": {
+    "retarget_median_pct_height": {
+      "before": 1.51,
+      "after": 1.6,
+      "note": "a RISE is the correct outcome: the smoothed pose scored better only because the character faithfully followed a pose that had drifted off the keypoints."
+    },
+    "inter_frame_motion_mm": {
+      "before": 7.60,
+      "after": 9.27,
+      "note": "+22 % (the audit predicted +17 % for a refit without the gap fill; the two filled joint-frames add the rest). That 22 % is the entirety of what the smoother was buying."
+    },
+    "jitter_probe_P2_mm": {
+      "value": 0.32,
+      "note": "median per-joint 3D spread over 20 re-triangulations under the detection auditor's bbox jitter, against 9.36 mm median inter-frame motion — well under the 1 mm threshold for shipping with smoothing off."
+    }
+  }
+}

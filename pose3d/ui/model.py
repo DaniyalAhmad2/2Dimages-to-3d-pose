@@ -74,14 +74,15 @@ class ProjectModel(QObject):
             return ""
         if self.rig is None:
             p.pipeline_version = PIPELINE_VERSION
-            self.migration_note = _NO_RIG_NOTE
+            self.migration_note = (_NO_RIG_NOTE + _head_hint(p)).strip()
             return self.migration_note
         stored = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
         self.recompute_all()
         p.pipeline_version = PIPELINE_VERSION
         self._stored_fitted3d = stored
         now = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
-        self.migration_note = _recompute_note(stored, now)
+        self.migration_note = (_recompute_note(stored, now)
+                               + _head_hint(p)).strip()
         return self.migration_note
 
     def restore_stored_pose(self) -> bool:
@@ -318,6 +319,24 @@ _NO_RIG_NOTE = (
     "behind the keypoints. It has no calibration loaded, so the stored pose "
     "has been left exactly as it was — load or re-estimate the calibration "
     "and press Recalculate 3D to correct it.")
+
+
+_HEAD_HINT = (
+    " This take also has no face points, so the head keeps its old "
+    "nose-pitch guess — run Tools ▸ \"Re-detect face points only\" to orient "
+    "it from the eyes and ears (your body pose and every correction are left "
+    "untouched).")
+
+
+def _head_hint(project: ProjectData) -> str:
+    """The one line the recompute banner adds when the take predates the face
+    keypoints. Recompute cannot invent them — it has no detector — so the
+    migration action has to be named where the user is already looking."""
+    for f in project.frames:
+        for cam in CAMERAS:
+            if np.isfinite(np.asarray(f.head2d[cam], float)).any():
+                return ""
+    return _HEAD_HINT
 
 
 def _recompute_note(stored: np.ndarray, now: np.ndarray) -> str:

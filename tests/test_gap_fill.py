@@ -180,3 +180,59 @@ def test_the_measured_overlay_omits_a_filled_joint():
 
     assert len(scatter.kwargs["pos"]) == NUM_JOINTS - 1
     assert not any(np.allclose(p, pts[WRIST]) for p in scatter.kwargs["pos"])
+
+
+# --- the shipped gate for the fill itself ---------------------------------
+#
+# The gate the plan first wrote ("the jump at a filled joint stays under 2 %
+# of body height") is not reachable by ANY interpolation on this take: the
+# subject's own median inter-frame motion is 7.9 % of height, so 2 % is below
+# the take's noise floor. The controller restated it as: a filled joint is
+# FLAGGED, and its error is BELOW the hold-previous error of the behaviour it
+# replaces (the old smoother's NaN branch carried the previous frame forward).
+# That is what this measures, on the client's own take, where the truth is
+# known: every joint-frame with both neighbours present is filled both ways
+# and compared with the observation that is actually there.
+
+def _fill_errors_pct_of_height(poses, height):
+    """(midpoint error, hold-previous error) in % of body height, over every
+    joint-frame whose neighbours and whose own observation are all present."""
+    mid, hold = [], []
+    for t in range(1, len(poses) - 1):
+        for j in range(NUM_JOINTS):
+            a, truth, b = poses[t - 1, j], poses[t, j], poses[t + 1, j]
+            if np.isnan([a, truth, b]).any():
+                continue
+            mid.append(np.linalg.norm(0.5 * (a + b) - truth))
+            hold.append(np.linalg.norm(a - truth))
+    return (100.0 * np.array(mid) / height, 100.0 * np.array(hold) / height)
+
+
+def test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame():
+    from pathlib import Path
+
+    from pose3d.core.io_project import load_project
+    from pose3d.quality import subject_height
+
+    project = load_project(Path(__file__).parent / "fixtures" / "client_take")
+    raw = np.stack([np.asarray(f.pose3d, float) for f in project.frames])
+    height = subject_height(
+        np.stack([np.asarray(f.fitted3d, float) for f in project.frames]))
+
+    n = fill_gaps(project)
+
+    # every value the fill wrote is flagged, and every flag has a value
+    assert n == 2                                    # 0012 R_KNEE, 0021 L_ANKLE
+    for f, before in zip(project.frames, raw):
+        written = np.isnan(before).any(1) & ~np.isnan(f.pose3d).any(1)
+        assert np.array_equal(written, np.asarray(f.filled, bool))
+        assert np.isfinite(f.pose3d[f.filled]).all()
+
+    # measured on the take as it was DETECTED (before the fill), so every
+    # sample has an observation to be right or wrong about
+    mid, hold = _fill_errors_pct_of_height(raw, height)
+    assert mid.size == 354
+    # today: midpoint 4.40 median / 13.29 p90, hold-previous 8.04 / 23.19
+    assert np.median(mid) < np.median(hold)
+    assert np.percentile(mid, 90) < np.percentile(hold, 90)
+    assert np.median(mid) <= 5.1, f"{np.median(mid):.2f} % of height"

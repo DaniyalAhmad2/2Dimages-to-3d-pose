@@ -298,3 +298,36 @@ def test_upgrade_does_nothing_to_a_current_project():
     assert model.upgrade_pipeline() == ""
     for f, pose in zip(data.frames, stored):
         assert np.allclose(f.fitted3d, pose)
+
+
+def test_the_recompute_banner_names_the_face_point_migration():
+    """A project made before face keypoints existed cannot grow them on open —
+    the recompute has no detector. So the banner that already explains the
+    pose change also names the one action that fixes the head."""
+    data, rig = _take()
+    data.pipeline_version = 0
+    assert not np.isfinite(data.frames[0].head2d[CAM_LEFT]).any()
+
+    note = ProjectModel(data, rig).upgrade_pipeline()
+
+    assert "Re-detect face points only" in note
+    assert "mm median" in note              # still says what moved
+
+
+def test_a_take_that_already_has_face_points_gets_no_hint():
+    data, rig = _take()
+    data.pipeline_version = 0
+    for f in data.frames:
+        for cam in CAMERAS:
+            f.head2d[cam][0] = (10.0, 20.0)
+
+    note = ProjectModel(data, rig).upgrade_pipeline()
+
+    assert "Re-detect face points" not in note
+
+
+def test_the_no_calibration_note_carries_the_hint_too():
+    data, _ = _take()
+    data.pipeline_version = 0
+    note = ProjectModel(data, None).upgrade_pipeline()
+    assert "calibration" in note and "Re-detect face points only" in note
