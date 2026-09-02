@@ -43,10 +43,19 @@ import pytest
 from pose3d import pipeline
 from pose3d.core.io_project import load_project
 from pose3d.core.project import CAMERAS
+from pose3d.core.skeleton import Joint
 from pose3d.quality import SYMMETRY_PAIRS, load_rig, take_quality
 from tests.gates import needs_character
 
 FIXTURE = Path(__file__).parent / "fixtures" / "client_take"
+
+#: The observations today's cross-view gate refuses on this take, as
+#: (frame_id, joint name). Both are detection errors and the evidence for
+#: calling them that is in test_cross_view.py::
+#: test_the_client_take_is_gated_on_its_own_distribution. They are named — not
+#: counted — because "the gate rejected two things" is only reassuring while
+#: they are the same two.
+GATED_OUT = {("0013", "LEFT_ELBOW"), ("0021", "LEFT_ANKLE")}
 
 
 @pytest.fixture(scope="module")
@@ -126,12 +135,26 @@ def test_the_reconstruction_is_measured_not_replayed(project, delivered):
     The residual is not zero and must not be asserted to be: the fixture's 2D
     is stored at 3 decimal places of a pixel (regen_client_take.KP_DECIMALS)
     while its 3D was computed from the full-precision detections.
+
+    Nor is the set of reconstructed joints identical to the fixture's: the
+    fixture's `pose3d` was written before the data-driven cross-view gate
+    (Phase 6.2) existed, and that gate refuses two of this take's 390 pairs —
+    0013 LEFT_ELBOW and 0021 LEFT_ANKLE, both detection errors
+    (test_cross_view.py::test_the_client_take_is_gated_on_its_own_distribution
+    names the evidence). So today's reconstruction has exactly those two
+    joints fewer, and every other joint to 2.0e-7 m. A joint appearing where
+    the fixture has none, or a third one going missing, still fails here.
     """
     stored = np.stack([f.pose3d for f in project.frames])
     fresh = np.stack([f.pose3d for f in delivered.frames])
-    assert np.array_equal(np.isnan(stored), np.isnan(fresh)), \
-        "a different set of joints reconstructs than on 2026-09-03"
-    worst = float(np.nanmax(np.abs(stored - fresh)))
+    lost = np.isnan(fresh).any(2) & ~np.isnan(stored).any(2)
+    assert not (np.isnan(stored).any(2) & ~np.isnan(fresh).any(2)).any(), \
+        "a joint reconstructs that did not on 2026-09-03"
+    assert {(project.frames[t].frame_id, Joint(int(j)).name)
+            for t, j in np.argwhere(lost)} == GATED_OUT, \
+        "a different set of joints is gated out than on 2026-09-03"
+    common = ~np.isnan(stored) & ~np.isnan(fresh)
+    worst = float(np.max(np.abs(stored - fresh)[common]))
     assert worst <= 3e-7, f"triangulation moved by {worst:.2e} m"  # today 2.0e-7
 
 
@@ -141,15 +164,17 @@ def test_an_interpolated_joint_is_not_counted_as_a_measurement(quality,
     bone-length CV, the symmetry and the "measured" reprojection above are all
     computed on observations only.
 
-    The COCO-17 detection of this take left two holes (0012 RIGHT_KNEE, 0021
-    LEFT_ANKLE); the Halpe-26 one leaves none, so the count asserted here is
-    now zero and the loop below is a live invariant with nothing to check. That
-    is a real improvement and not a weakening of the net: `tests/test_gap_fill.py`
-    exercises the fill itself on synthetic holes, and a regression that starts
-    dropping joints on the client take fails the `== 0` here.
+    The Halpe-26 detection of this take leaves no holes of its own, but the
+    cross-view gate refuses two of its pairs (0013 LEFT_ELBOW, 0021
+    LEFT_ANKLE), and a gated observation is a hole in the measurement like any
+    other: 2 missing, 2 filled, and those two joints must be NaN in `pose3d`
+    and finite in `fitted3d` — an interpolation the export uses and no metric
+    counts. Under COCO-17 the holes were the detector's own (0012 RIGHT_KNEE,
+    0021 LEFT_ANKLE) and the count was the same 2.
     """
-    assert quality.gaps["filled"] == 0
-    assert quality.gaps["n_missing"] == 0      # no holes left in the measurement
+    assert quality.gaps["n_missing"] == 2
+    assert quality.gaps["filled"] == 2
+    assert set(map(tuple, quality.gaps["missing"])) == GATED_OUT
     for f in delivered.frames:
         if f.filled.any():
             assert np.isnan(f.pose3d[f.filled]).all()

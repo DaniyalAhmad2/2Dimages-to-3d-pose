@@ -162,7 +162,13 @@ def test_a_bad_rig_does_not_destroy_kp2d(tmp_path):
     full re-detection restored them, and nothing said so.
 
     On the client's own rig and 2D (the committed fixture), a 12 deg error
-    about the left camera's vertical rejects 347 of its 778 observations.
+    about the left camera's vertical rejects 390 of its 780 observations.
+
+    "Every observation comes back" is measured against what the GOOD rig
+    writes on a clean load, not against an empty mask: this take has two pairs
+    of its own the good rig also refuses (0013 LEFT_ELBOW, 0021 LEFT_ANKLE —
+    see `test_the_client_take_is_gated_on_its_own_distribution`). The damage
+    must not leave one rejection more than that.
     """
     from pose3d.core.io_project import load_project, save_project
     from pose3d.quality import load_rig
@@ -188,11 +194,21 @@ def test_a_bad_rig_does_not_destroy_kp2d(tmp_path):
     after = sum(int(np.isfinite(f.kp2d[c]).all(1).sum())
                 for f in reloaded.frames for c in (CAM_LEFT, CAM_RIGHT))
     assert after == n_obs, f"{n_obs - after} of {n_obs} observations lost"
-    assert not any(f.rejected[c].any() for f in reloaded.frames
-                   for c in (CAM_LEFT, CAM_RIGHT)), "stale mask survived"
-    # and the 3D the take had before the damage is back, joint for joint
+
+    # and the 3D the take had before the damage is back, joint for joint,
+    # with the mask the good rig derives from scratch and nothing left over
+    # from the damaged run
     clean = load_project(FIXTURE)
     triangulate_project(clean, rig)
+    stale = [(f.frame_id, c, Joint(int(j)).name)
+             for f, g in zip(clean.frames, reloaded.frames)
+             for c in (CAM_LEFT, CAM_RIGHT)
+             for j in np.nonzero(np.asarray(g.rejected[c], bool)
+                                 & ~np.asarray(f.rejected[c], bool))[0]]
+    assert not stale, f"stale mask survived: {stale}"
+    for a, b in zip(clean.frames, reloaded.frames):
+        for c in (CAM_LEFT, CAM_RIGHT):
+            assert np.array_equal(a.rejected[c], b.rejected[c])
     for a, b in zip(clean.frames, reloaded.frames):
         assert np.array_equal(a.pose3d, b.pose3d, equal_nan=True)
 
@@ -319,14 +335,30 @@ def test_the_gate_is_sized_from_the_take_not_the_sensor():
 
 
 def test_the_client_take_is_gated_on_its_own_distribution():
-    """The acceptance number: 71.5 px -> ~29 px, still 0 of 388 rejected.
+    """The acceptance number: 71.5 px -> 28.05 px, and 2 of 390 rejected.
 
-    Measured on the committed fixture: Sampson median 4.908, p99 23.97, max
-    29.384 px; the gate lands at 29.45, which clears that tail by 0.06 px. The
-    left image's own allowance is 71.50 px (max observed 59.33) and the
-    right's 35.84 px (max observed 33.82), so neither per-image test fires
-    either. If this ever drops a pair, the gate has become tighter than the
-    take it is judging and the k in `pipeline._EPI_K` is what to look at.
+    Measured on the committed fixture as the app now detects it (Halpe-26,
+    2026-09-03): Sampson median 4.675, p95 15.53, p99 21.05 px, so the gate
+    lands at 6 x 4.675 = 28.05 px. Two pairs sit above it and BOTH are
+    detection errors, named here so a third one cannot appear silently:
+
+    * 0021 LEFT_ANKLE, 44.70 px. Its right view scores 0.34 and its
+      point-to-line distance is 50.53 px in the right image and 95.87 px in
+      the left — past BOTH per-image allowances (35.84 / 71.50 px), so this
+      one is refused whatever `_EPI_K` is. It is the same joint-frame COCO-17
+      failed to detect at all; Halpe-26 puts a point there instead of a hole.
+    * 0013 LEFT_ELBOW, 29.49 px. 5 % over the gate, inside both per-image
+      allowances, and independently wrong: triangulated anyway it contracts
+      the left upper arm to 17.6 mm against the take's own 22.9 mm median
+      (-23 %) on a rigid mannequin, and its left view scores 0.75 where the
+      frames either side score 0.94-1.01.
+
+    So k = 6 is not clipping this take's good tail: with those two out, the
+    highest disagreement left is 22.91 px (0022 LEFT_KNEE), 18 % under the
+    gate. The COCO-17 measurement this replaces was median 4.908, max 29.384,
+    gate 29.45 px, 0 of 388 rejected. If this ever starts dropping pairs that
+    survive scrutiny like the two above, the k in `pipeline._EPI_K` is what to
+    look at — widening it here would only mean the gate stopped judging.
     """
     from pose3d.core.io_project import load_project
     from pose3d.quality import load_rig
@@ -334,9 +366,13 @@ def test_the_client_take_is_gated_on_its_own_distribution():
     data = load_project(FIXTURE)
     rig = load_rig(FIXTURE / "calibration")
     thr = epipolar_threshold(rig, data)
-    assert 25.0 <= thr <= 30.0, thr                  # today 29.45
+    assert 25.0 <= thr <= 30.0, thr                  # today 28.05
     assert epipolar_threshold(rig) == pytest.approx(35.84, abs=0.01)  # ceiling
-    assert validate_cross_view(data, rig) == 0
+    assert validate_cross_view(data, rig) == 2
+    assert {(f.frame_id, Joint(int(j)).name)
+            for f in data.frames for c in (CAM_LEFT, CAM_RIGHT)
+            for j in np.nonzero(f.rejected[c])[0]} == {
+        ("0013", "LEFT_ELBOW"), ("0021", "LEFT_ANKLE")}
 
 
 def test_the_gate_and_the_metric_measure_the_same_thing():
@@ -367,10 +403,10 @@ def test_the_narrower_gate_catches_the_hallucination_it_names():
 
     Measured on the committed fixture, injecting the hallucination one frame
     at a time (so the corruption cannot widen the very median that sizes the
-    gate): ankle-on-knee 15 -> 21 of 25, wrist-on-elbow 8 -> 25 of 26. The
-    four ankle frames still missed sit as low as 9.2 px of disagreement —
-    below this take's own tail (max 29.38 px), so no threshold can catch them
-    without rejecting good data instead.
+    gate): ankle-on-knee 15 -> 22 of 26, wrist-on-elbow 8 -> 24 of 26. The
+    frames still missed sit as low as 9.2 px of disagreement — below this
+    take's own good tail (22.91 px), so no threshold can catch them without
+    rejecting good data instead.
     """
     from pose3d.core.io_project import load_project
     from pose3d.quality import load_rig
@@ -399,8 +435,8 @@ def test_the_narrower_gate_catches_the_hallucination_it_names():
     # floors with the project's 10-15 % margin under today's measurement, so
     # a change that moves one or two frames reports a number instead of a
     # failure; the OLD rule is the thing they have to stay clear of (15/25).
-    assert caught["ankle"][0] >= 18, caught["ankle"]     # today 21 of 25
-    assert caught["wrist"][0] >= 22, caught["wrist"]     # today 25 of 26
+    assert caught["ankle"][0] >= 19, caught["ankle"]     # today 22 of 26
+    assert caught["wrist"][0] >= 21, caught["wrist"]     # today 24 of 26
     assert caught["ankle"][0] > 15, "no better than the 71.5 px rule"
 
 
@@ -433,20 +469,23 @@ def test_the_sidebar_quotes_the_gate_that_was_applied():
 
 
 def test_losing_a_joint_narrows_the_gate_onto_the_takes_own_tail():
-    """The gate is sized from the take it is judging, and this take's tail is
-    0.06 px inside it.
+    """The gate is sized from the take it is judging, so losing data moves it.
 
-    `clip(6 x median, 25 px, ceiling)` on the fixture is 29.449 px against a
-    measured Sampson maximum of 29.384 — the margin is 0.2 %. Black out one
-    joint in one view for the whole take and those 26 pairs leave the
-    distribution, the median falls, and the gate closes to 28.439 px, which
-    rejects two pairs of the take's own tail that nothing is wrong with.
+    `clip(6 x median, 25 px, ceiling)` on the fixture is 28.049 px. Black out
+    one joint in one view for the whole take and those 26 pairs leave the
+    distribution, the median falls, and the gate closes by 1.71 px to 26.343.
 
-    Recorded, not gated: k = 6 is the plan's constant and the take still drops
-    0 of 388 undamaged. This is the number to look at when a change to the
-    detector or the rig moves the median, and it is the reason
-    `test_fallback_lengths_scale_to_the_subject` measures the fallback table
-    with the gate held fixed.
+    On this take that costs nothing: the two pairs the clean gate refuses
+    (0013 LEFT_ELBOW, 0021 LEFT_ANKLE — both detection errors, see
+    `test_the_client_take_is_gated_on_its_own_distribution`) are the same two
+    the narrowed gate refuses, and the highest good pair left, 22.91 px, is
+    still 13 % under the narrowed gate. Under COCO-17 the same experiment cost
+    two good pairs, because that take's tail sat 0.06 px inside its gate.
+
+    Recorded, not gated: k = 6 is the plan's constant. This is the number to
+    look at when a change to the detector or the rig moves the median, and it
+    is the reason `test_fallback_lengths_scale_to_the_subject` measures the
+    fallback table with the gate held fixed.
     """
     from pose3d.core.io_project import load_project
     from pose3d.quality import load_rig
@@ -454,7 +493,7 @@ def test_losing_a_joint_narrows_the_gate_onto_the_takes_own_tail():
     rig = load_rig(FIXTURE / "calibration")
     clean = load_project(FIXTURE)
     thr_clean = epipolar_threshold(rig, clean)
-    assert validate_cross_view(clean, rig) == 0
+    assert validate_cross_view(clean, rig) == 2      # the take's own two
 
     damaged = load_project(FIXTURE)
     for f in damaged.frames:
@@ -462,7 +501,8 @@ def test_losing_a_joint_narrows_the_gate_onto_the_takes_own_tail():
         f.scores[CAM_LEFT][int(Joint.RIGHT_HIP)] = 0.0
     thr_damaged = epipolar_threshold(rig, damaged)
 
-    assert thr_damaged < thr_clean                  # 28.439 vs 29.449 px
-    assert thr_clean - thr_damaged < 2.0, (thr_clean, thr_damaged)   # 1.01 px
-    # ...and that alone rejects a few pairs the clean gate is happy with
+    assert thr_damaged < thr_clean                  # 26.343 vs 28.049 px
+    assert thr_clean - thr_damaged < 2.0, (thr_clean, thr_damaged)   # 1.71 px
+    # ...and on THIS take the narrowing costs no good pair: the same two the
+    # clean gate refuses, and no more
     assert validate_cross_view(damaged, rig) <= 6   # today 2
