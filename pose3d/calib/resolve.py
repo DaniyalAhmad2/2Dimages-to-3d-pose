@@ -120,6 +120,13 @@ def load_world_up(calib_dir):
 
     Returns (up, source, spread_deg). None for a project calibrated before the
     vertical was recorded — those keep levelling on the subject, unchanged.
+
+    `spread_deg` is None when the file does not carry one, or carries null.
+    Reading that as 0.0 would turn a file that says nothing about its
+    uncertainty into the most confident vertical the app can hold, and
+    `orient.take_up` would then prefer it over the subject's body line; an
+    unknown spread must be refused, so a hand-edited or externally produced
+    extrinsics.json cannot smuggle in a vertical nothing validated.
     """
     try:
         d = json.loads((Path(calib_dir) / "extrinsics.json").read_text())
@@ -130,8 +137,94 @@ def load_world_up(calib_dir):
     n = float(np.linalg.norm(up))
     if up.shape != (3,) or not np.isfinite(n) or n < 1e-9:
         return None
-    return (up / n, str(d.get("world_up_source") or "recorded"),
-            float(d.get("world_up_spread_deg") or 0.0))
+    spread = d.get("world_up_spread_deg")
+    try:
+        spread = None if spread is None else float(spread)
+    except (TypeError, ValueError):
+        spread = None
+    if spread is not None and not np.isfinite(spread):
+        spread = None
+    return (up / n, str(d.get("world_up_source") or "recorded"), spread)
+
+
+# Recorded in the report so the sense of the vertical is provenance too: a
+# reader can tell an axis a body decided from one a camera guessed at.
+SIGN_FROM_POSES = "NECK above ANKLE, from the triangulated poses"
+SIGN_FROM_CAMERA_UP = "camera up proxy (no triangulated poses were available)"
+
+
+def finalize_world_up(project, calib_dir) -> tuple | None:
+    """Re-decide the SENSE of the recorded vertical from triangulated poses.
+
+    `resolve_calibration` has to run BEFORE detection and triangulation — it is
+    what makes triangulation possible — so at import time no frame has a
+    `fitted3d` yet and `estimate_world_up` has to settle the sign from the
+    camera-up proxy: "the phones were held the right way up". That proxy is
+    wrong for exactly one rig, and it is a rig people build: both cameras
+    mounted rotated ~180 deg. `estimate_world_up` then returns [0, 0, -1] where
+    the truth is [0, 0, 1], and every recalibrated project renders and exports
+    upside down.
+
+    So the sign is decided twice. This runs after triangulation, re-applies the
+    NECK-above-ANKLE test to the poses that now exist, and rewrites
+    extrinsics.json / report.json in place. It only ever FLIPS the axis — the
+    direction estimated from the rig geometry is untouched — so nothing about
+    the take's lean can leak into the vertical.
+
+    Returns the finalised (up, source, spread_deg), or None when there is
+    nothing to decide (no recorded vertical, or no pose with both a NECK and an
+    ankle). Files are rewritten only when something actually changed, so
+    re-opening a project is not a disk write.
+    """
+    from pose3d.geometry.gravity import sign_from_poses
+
+    calib_dir = Path(calib_dir)
+    ext_path = calib_dir / "extrinsics.json"
+    try:
+        doc = json.loads(ext_path.read_text())
+        raw_up = doc["world_up"]
+    except Exception:
+        return None
+    up = np.asarray(raw_up, float).ravel()
+    n = float(np.linalg.norm(up))
+    if up.shape != (3,) or not np.isfinite(n) or n < 1e-9:
+        return None
+    up = up / n
+
+    frames = getattr(project, "frames", None) or []
+    poses = [np.asarray(f.fitted3d, float) for f in frames
+             if getattr(f, "fitted3d", None) is not None]
+    if not poses:
+        return None
+    sign = sign_from_poses(up, np.stack(poses))
+    if sign is None:                      # the poses cannot tell: leave it be
+        return None
+
+    flipped = sign < 0
+    if flipped:
+        up = -up
+        doc["world_up"] = _to_jsonable(up)
+    changed = flipped
+
+    rep_path = calib_dir / "report.json"
+    try:
+        report = json.loads(rep_path.read_text())
+    except Exception:
+        report = None
+    if report is not None:
+        if flipped:
+            report["world_up"] = _to_jsonable(up)
+            report["world_up_candidates"] = {
+                k: _to_jsonable(-np.asarray(v, float))
+                for k, v in (report.get("world_up_candidates") or {}).items()}
+        if report.get("world_up_sign_source") != SIGN_FROM_POSES:
+            report["world_up_sign_source"] = SIGN_FROM_POSES
+            changed = True
+        if changed:
+            rep_path.write_text(json.dumps(_to_jsonable(report), indent=2))
+    if flipped:
+        ext_path.write_text(json.dumps(doc, indent=2))
+    return load_world_up(calib_dir)
 
 
 @dataclass
@@ -393,6 +486,27 @@ def score_branch_pairs(observations, frames, tag_id, intr, marker_length) -> dic
     return {"pairs": out, "branch_ratio": med_ratio}
 
 
+def pick_branch_pair(pairs: dict) -> tuple:
+    """Which (left branch, right branch) pair to calibrate from.
+
+    Admissible pairs first (see `score_branch_pairs`), then MOST FRAMES, then
+    lowest cross-frame relative-pose spread, then the lowest index so the
+    choice is reproducible.
+
+    Frame count has to come first because the spreads are not comparable
+    across pairs scored on different numbers of frames: the spread is a
+    maximum over pairwise angles, so a pair present in a single frame has no
+    pairs to take a maximum over and scores 0.0 — the best possible value, on
+    no evidence whatsoever. Healthy rigs never reach the tie-break at all
+    (branch 1 is inadmissible wherever a camera's median IPPE ratio separates
+    the branches, leaving {(0, 0)}), but on an ambiguous rig it would be
+    decided by whichever wrong pair was seen least.
+    """
+    ok = {k: v for k, v in pairs.items() if v["admissible"]} or pairs
+    return min(ok, key=lambda k: (-ok[k]["n_frames"],
+                                  ok[k]["relpose_spread_deg"], k))
+
+
 def camera_motion_check(observations, frames, tag_id, intr, marker_length,
                         reference: dict) -> dict:
     """Has a camera moved during the take?
@@ -479,10 +593,14 @@ def solve_rig_from_observations(
     if not usable:
         blocked = sorted(set(common) - set(usable))
         if blocked:
+            # a tag can be in `common` and in neither list: its solve failed,
+            # so it was never scored and so never admitted or rejected. Saying
+            # "were rejected — ." names no reason at all.
+            reasons = [rejected.get(t, "no usable pose could be solved from "
+                                       "its corners") for t in blocked]
             msg = ("Calibration was not successful: the only tags both cameras "
                    f"saw ({', '.join(str(t) for t in blocked)}) were rejected — "
-                   + "; ".join(rejected[t] for t in blocked if t in rejected)
-                   + ".")
+                   + "; ".join(reasons) + ".")
         else:
             msg = failure_message(observations)
         return RigSolution(False, {}, {
@@ -504,8 +622,7 @@ def solve_rig_from_observations(
     scored = score_branch_pairs(observations, frames, world_tag, intr,
                                 marker_length)
     pairs = scored["pairs"]
-    ok_pairs = {k: v for k, v in pairs.items() if v["admissible"]} or pairs
-    branch = min(ok_pairs, key=lambda k: (ok_pairs[k]["relpose_spread_deg"], k))
+    branch = pick_branch_pair(pairs)
 
     solves = {cam: _solves(observations, world_frame, cam, world_tag,
                            intr[cam], marker_length) for cam in CAMERAS}
@@ -523,10 +640,15 @@ def solve_rig_from_observations(
         if s:
             layout[tag_id] = (R_w.T @ s[0].R, R_w.T @ (s[0].t - t_w))
 
-    from pose3d.geometry.gravity import estimate_world_up
+    from pose3d.geometry.gravity import estimate_world_up, sign_from_poses
     rig = CalibratedRig(intr[CAM_LEFT], intr[CAM_RIGHT], ext[CAM_LEFT],
                         ext[CAM_RIGHT])
     up, spread, cands = estimate_world_up(rig, layout, poses)
+    # did the BODY settle the sense, or only the camera-up proxy? At import
+    # time it is always the proxy (poses is None until triangulation has run);
+    # finalize_world_up revisits it and rewrites this.
+    decided_by_poses = (up is not None and poses is not None
+                        and sign_from_poses(up, poses) is not None)
 
     centres = {cam: ext[cam].camera_center for cam in CAMERAS}
     axes = {cam: ext[cam].R.T @ np.array([0.0, 0.0, 1.0]) for cam in CAMERAS}
@@ -559,8 +681,14 @@ def solve_rig_from_observations(
         "image_size": {cam: list(intr[cam].image_size) for cam in CAMERAS},
         "world_up": (None if up is None else up.tolist()),
         "world_up_source": (None if up is None else " + ".join(cands)),
-        "world_up_spread_deg": (None if up is None else float(spread)),
+        "world_up_spread_deg": (None if up is None or spread is None
+                                else float(spread)),
         "world_up_candidates": {k: v.tolist() for k, v in cands.items()},
+        # whichever of the two rules settled the SENSE of that axis; the
+        # camera-up proxy is only a stand-in until finalize_world_up can ask
+        # the triangulated poses
+        "world_up_sign_source": (SIGN_FROM_POSES if decided_by_poses
+                                 else SIGN_FROM_CAMERA_UP),
     }
     msg = (f"Calibration estimated from ArUco marker {world_tag} "
            f"(frame {world_frame}).")

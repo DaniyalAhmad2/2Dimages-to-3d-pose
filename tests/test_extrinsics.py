@@ -236,3 +236,62 @@ def test_a_take_carried_only_by_a_rejected_tag_fails_loudly():
                                       d["marker_length_m"], d["dictionary"])
     assert not sol.ok
     assert "13" in sol.message and "not flat" in sol.message
+
+
+def test_a_common_tag_that_would_not_solve_still_gets_a_reason():
+    """A tag can be seen by both cameras and be in NEITHER list: its solve
+    failed, so it was never scored, so it was never admitted or rejected. The
+    failure message then read "... were rejected — ." and named no reason at
+    all — the same silence about tag 13 that took an audit to diagnose."""
+    from pose3d.calib.resolve import solve_rig_from_observations
+
+    d, obs, intr = _client_take()
+    # tag 99 in both cameras with degenerate corners: IPPE returns no pose
+    dead = np.full((4, 2), 100.0)
+    broken = {fid: {cam: {99: dead.copy()} for cam in ("left", "right")}
+              for fid in d["frame_order"]}
+    sol = solve_rig_from_observations(broken, d["frame_order"], intr,
+                                      d["marker_length_m"], d["dictionary"])
+    assert not sol.ok
+    assert "99" in sol.message
+    assert "no usable pose could be solved" in sol.message
+    assert not sol.message.endswith("— .")
+
+
+def test_the_branch_tie_break_wants_evidence_before_agreement():
+    """`relpose_spread_deg` is a MAXIMUM over pairwise angles, so a pair seen
+    in one frame has no pairs and scores 0.0 — the best possible value, on no
+    evidence. Comparing that against a pair scored over 11 frames hands the
+    calibration to whichever wrong branch was seen least."""
+    from pose3d.calib.resolve import pick_branch_pair
+
+    pairs = {
+        (0, 0): {"admissible": True, "n_frames": 11, "relpose_spread_deg": 1.13},
+        (1, 1): {"admissible": True, "n_frames": 1, "relpose_spread_deg": 0.0},
+    }
+    assert pick_branch_pair(pairs) == (0, 0)
+
+    # with the evidence equal, the more consistent pair wins as before
+    pairs[(1, 1)]["n_frames"] = 11
+    assert pick_branch_pair(pairs) == (1, 1)
+
+    # inadmissible pairs are still out of the running whatever they score
+    pairs[(1, 1)]["admissible"] = False
+    assert pick_branch_pair(pairs) == (0, 0)
+
+
+def test_the_report_says_what_settled_the_sense_of_the_vertical():
+    """At import time there are no triangulated poses, so the sign of the
+    recorded vertical rests on "the phones were held upright". That is a
+    materially weaker claim than the NECK-above-ANKLE test and the report has
+    to distinguish them — calib.resolve.finalize_world_up rewrites it once the
+    poses exist."""
+    from pose3d.calib.resolve import (
+        SIGN_FROM_CAMERA_UP, solve_rig_from_observations,
+    )
+
+    d, obs, intr = _client_take()
+    sol = solve_rig_from_observations(obs, d["frame_order"], intr,
+                                      d["marker_length_m"], d["dictionary"])
+    assert sol.ok
+    assert sol.report["world_up_sign_source"] == SIGN_FROM_CAMERA_UP

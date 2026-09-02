@@ -100,3 +100,18 @@ def test_a_recorded_vertical_changes_what_the_tilt_costs():
     assert "levels on the subject" not in msgs
     # ...and without one, the old message stands unchanged
     assert "levels on the subject" in " ".join(check_rig(rig))
+
+
+def test_an_unverified_vertical_does_not_change_what_the_tilt_costs():
+    """The softened warning is only true because the view USES the recorded
+    vertical. A vertical with an unknown spread (one proxy, nothing checking
+    it) is refused by orient.take_up, so the view is back on the subject and
+    the original warning is the true one. A warning that is no longer true is
+    worse than none — and so is one that is true but suppressed."""
+    rig = _rig((_tipped_cam((-0.3, -3, 1.5)), _tipped_cam((0.3, -3, 1.5))),
+               _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True),
+               _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True))
+    unverified = (np.array([0.0, 0.0, 1.0]), "camera up", None)
+    msgs = " ".join(check_rig(rig, unverified))
+    assert "levels on the subject" in msgs
+    assert "±" not in msgs                     # nothing to put a number on
