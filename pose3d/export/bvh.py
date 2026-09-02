@@ -81,7 +81,21 @@ class Bvh:
                 for i, c in enumerate(j.channels) if c.endswith("rotation")]
 
     def forward_kinematics(self, frame: int) -> np.ndarray:
-        """(n_joints, 3) world position of every joint on one motion row.
+        """(n_joints, 3) world position of every joint on one motion row."""
+        return self.pose(frame)[0]
+
+    def world_rotations(self, frame: int) -> np.ndarray:
+        """(n_joints, 3, 3) world orientation of every joint on one motion row.
+
+        The columns are the joint's own axes in world space, so a bone's
+        FACING can be read off the file — which is how "does the exported
+        character turn with the subject?" is answered without trusting the
+        positions of any particular pair of joints.
+        """
+        return self.pose(frame)[1]
+
+    def pose(self, frame: int):
+        """(positions (n,3), rotations (n,3,3)) for one motion row.
 
         BVH semantics: a joint's OFFSET is expressed in its parent's ROTATED
         frame, so the skeleton only takes its real shape once the rotations are
@@ -105,7 +119,7 @@ class Bvh:
                 rot[i] = base_R @ quat_to_matrix(euler_to_quat(angles, order))
             else:
                 rot[i] = base_R
-        return pos
+        return pos, np.stack(rot)
 
 
 def _read_text(path: Path) -> str:

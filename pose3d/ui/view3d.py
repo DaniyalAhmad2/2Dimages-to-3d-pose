@@ -178,6 +178,15 @@ class View3D(gl.GLViewWidget):
             re-seated frame by frame (that re-seating was a 34 % of rig height
             swing the export had no counterpart for).
 
+        VISIBLE CONSEQUENCE, on the record: seating on the LOWEST sole the take
+        reaches means the figure touches the grid on exactly one frame and
+        stands above it on the rest — by up to 34.34 % of rig height on the
+        client take, which is the spread of the per-frame seat that used to be
+        applied. That is the honest reading of the data (the subject really
+        was higher on those frames) and it is what makes the preview and the
+        export the same rigid map, but it is a change to what the preview
+        looks like and worth saying out loud rather than discovering.
+
         (None, 0.0) when the take is not known yet — a single `set_pose` with
         no `fit_subject` still draws, on the old per-frame rule.
 

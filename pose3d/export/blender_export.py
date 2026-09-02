@@ -18,6 +18,12 @@ from pose3d.core.skeleton import BONES, JOINT_NAMES, MIXAMO_BONE, NUM_JOINTS
 
 _JOB = Path(__file__).with_name("blender_job.py")
 
+# The two keyframe schedules. "one_per_pose" is the default for the delivered
+# files (export frame k+1 IS photograph k); "stepped" is the 0.7 s hold /
+# 0.3 s ease stop-motion the previews use, and which with keep_root_motion off
+# reproduces the file the client already has.
+SCHEDULES = frozenset({"one_per_pose", "stepped"})
+
 
 # Why an export produced nothing, as a value rather than a swallowed exception.
 # `_character_bone_frames` used to answer every failure with `return None, None`,
@@ -80,6 +86,17 @@ class ExportResult:
                 and "POSE3D_EXPORT_FAILED" not in self.stdout)
 
     @property
+    def preview_failed(self) -> bool:
+        """The files were written; a preview video was not.
+
+        A distinct outcome from a failed export, and it has to be: rendering
+        needs ffmpeg and a usable GL stack that the BVH and FBX do not, and
+        reporting "export failed" over a preview would have the user throw
+        away two correct files.
+        """
+        return "POSE3D_EXPORT_PREVIEW_FAILED" in self.stdout
+
+    @property
     def substituted(self) -> bool:
         """True when Blender wrote something OTHER than the posed character.
 
@@ -91,26 +108,33 @@ class ExportResult:
             "POSE3D_EXPORT_FALLBACK" in self.stdout)
 
 
-def _rig_camera(camera, M_view, Rz, scale, pelvis_ref, hips_world):
+def _rig_camera(camera, M_view, scale, pelvis_ref, hips_world):
     """The capture camera, expressed in the posed rig's space.
 
     `camera` is {"K", "R", "t", "image_size"} in the ArUco world frame, i.e.
     X_cam = R @ X_world + t (`calib.extrinsics.Extrinsics`). The character is
-    placed by the same similarity every joint goes through — de-tilt, yaw
-    align, uniform scale, offset onto the take's pelvis — so the camera goes
-    through it too and ends up looking at the figure from exactly where the
-    photograph was taken. That is what makes the fixed-camera mp4 comparable
-    to the client's own photos frame for frame, which a turntable spin over
-    the whole clip cannot be.
+    placed by the same similarity every joint goes through — de-tilt, uniform
+    scale, offset onto the take's pelvis — so the camera goes through it too
+    and ends up looking at the figure from exactly where the photograph was
+    taken. That is what makes the fixed-camera mp4 comparable to the client's
+    own photos frame for frame, which a turntable spin over the whole clip
+    cannot be.
+
+    ONE map, and no `Rz`: the exported character now lives in the de-tilted
+    CAPTURE frame (`Character.export_transform`), so the same transform serves
+    every frame. While the export was in rig space this had to pick one
+    frame's yaw for a whole clip, and on the client take the character drifted
+    away from the photograph by up to the take's 36.97 deg of turning as the
+    clip ran.
     """
     K = np.asarray(camera["K"], float).reshape(3, 3)
     Rc = np.asarray(camera["R"], float).reshape(3, 3)
     tc = np.asarray(camera["t"], float).reshape(3)
     w, h = (int(v) for v in camera["image_size"])
 
-    U = Rz @ M_view                       # world rotation -> rig rotation
+    U = M_view                            # world rotation -> capture rotation
     centre_world = -Rc.T @ tc
-    centre = hips_world + (Rz @ (M_view @ centre_world - pelvis_ref)) * scale
+    centre = hips_world + (M_view @ centre_world - pelvis_ref) * scale
     # OpenCV camera axes in world: +X right, +Y down, +Z forward. Blender's are
     # +X right, +Y up, -Z forward.
     axes = U @ Rc.T
@@ -177,10 +201,13 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
     omitting the keyframes holds the previous pose too — so this is stated
     rather than fixed.
 
-    `keep_root_motion` places every frame against the TAKE's pelvis instead of
-    its own, so the subject's travel reaches the file; `root_offsets` carries
-    the same translation out separately, so the turntable render can pin the
-    figure back in place without a second posing pass changing anything else.
+    `keep_root_motion` writes the bones in the de-tilted CAPTURE frame instead
+    of rig space (`Character.export_transform`), so the file carries both
+    things the 3D view shows and the delivered file did not: the subject's
+    travel away from the take's pelvis, and the subject's TURNING.
+    `root_offsets` carries the translation half out separately, so the
+    turntable render can pin the figure back in place without a second posing
+    pass changing anything else.
 
     Returns (fragment, reason): the JSON fragment to merge into the export
     document, or None and a `FAILURE_MESSAGES` key saying why. A reason is
@@ -229,42 +256,41 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
         keep_root_motion = False
 
     bone_frames, root_offsets = [], []
-    align = None                # (scale, Rz) of the first posable frame
+    scale = None                # the take's uniform scale, from the first frame
     for i, pose in enumerate(upright):
         valid = ~np.isnan(pose).any(1)
         if filled is not None:
-            # A joint fill_gaps flagged has a value, so this changes nothing
-            # today; it is here so the coupling is explicit and checked. The
-            # `& valid` is the guarantee: a flag can never conjure a joint the
-            # pose does not have, whatever a caller passes in.
-            valid |= np.asarray(filled[i], bool) & valid
+            # `fill_gaps` gives every joint it flags a value, and pose3d itself
+            # stays raw — so a flag can never point at a hole here. Asserted
+            # rather than papered over with `valid |= filled & valid`, which
+            # was a tautology dressed as a coupling.
+            assert not (np.asarray(filled[i], bool) & ~valid).any(), (
+                f"frame {i}: fill_gaps flagged a joint the pose does not have")
         if not valid.any():
             bone_frames.append(None); root_offsets.append(None); continue
         # the face keypoints take the same rotation, so the exported head is
         # oriented exactly as the preview shows it
         hp = None if head3d is None else np.asarray(head3d[i], float) @ R
-        bone_frames.append(ch.pose_bone_matrices(
+        # one solve per frame: the matrices AND the placement they were built
+        # with, so `root_offsets` cannot drift from what the bones carry
+        mats, al = ch.pose_bone_matrices(
             pose, valid, hp, keep_root_motion=keep_root_motion,
-            pelvis_ref=pelvis_ref))
-        # the placement this frame's pelvis is at, read off the SAME solve the
-        # matrices came from: `root_offset = Rz @ (pelvis - pelvis_ref) * scale`
-        _skin, pelvis, scale, Rz = ch._skin_matrices(pose, valid)
-        if scale is None:
+            pelvis_ref=pelvis_ref, return_alignment=True)
+        bone_frames.append(mats)
+        if al is None:
             root_offsets.append(None); continue
-        if align is None:
-            align = (scale, Rz)
-        root_offsets.append(
-            [0.0, 0.0, 0.0] if pelvis_ref is None else
-            [float(v) for v in (Rz @ (pelvis - pelvis_ref)) * scale])
+        if scale is None:
+            scale = al.scale
+        root_offsets.append([float(v) for v in al.root_offset])
     if all(b is None for b in bone_frames):
         return None, ("no_posable_frame", f"{len(bone_frames)} frames")
 
     frag = {"bone_frames": bone_frames, "bone_names": ch.bone_names,
             "root_offsets": root_offsets,
             "keep_root_motion": bool(keep_root_motion)}
-    if camera is not None and pelvis_ref is not None and align is not None:
+    if camera is not None and pelvis_ref is not None and scale is not None:
         try:
-            frag["camera"] = _rig_camera(camera, R.T, align[1], align[0],
+            frag["camera"] = _rig_camera(camera, R.T, scale,
                                          pelvis_ref, ch.hips_world)
         except Exception as e:
             # a missing or malformed camera must cost the take its extra
@@ -338,7 +364,12 @@ def export_animation(
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = _poses_to_json(poses3d, fps)
     doc["display_frame"] = int(display_frame)   # which pose the turntable spins
-    doc["schedule"] = "stepped" if schedule == "stepped" else "one_per_pose"
+    # a typo used to select the default silently, which in a phase about not
+    # substituting one output for another is the wrong direction to fail in
+    if schedule not in SCHEDULES:
+        raise ValueError(f"schedule must be one of {sorted(SCHEDULES)}, "
+                         f"not {schedule!r}")
+    doc["schedule"] = schedule
 
     want_character = requested_bundled or bool(character)
     have_character = bool(character) and Path(character).exists()

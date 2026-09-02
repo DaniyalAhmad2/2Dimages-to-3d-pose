@@ -8,8 +8,11 @@ reports:
 
   (a) deviation from the pose the app computed at each captured keyframe, as a
       % of body height, after ONE global similarity fit (the file is in the
-      .blend armature's space, the app's joints are in metres) — against the
-      posed rig, against `Character.posed_joints`, and per keyframe;
+      .blend armature's space, the app's joints are in metres) — against
+      `Character.posed_joints` (THE gate), against the matrices the exporter
+      wrote, and per keyframe;
+  (h) the exported hips' FACING against the captured shoulder line, per frame:
+      the number that says whether the character TURNS with the subject;
   (b) per in-between frame: how far each bone leaves the slerp arc between its
       bracketing keys, how far it overshoots past either of them, and how far
       each Euler channel overshoots the interval its two keys span;
@@ -64,18 +67,19 @@ def report_keyframe_fidelity(bvh, character, up, valid, holds, out,
 
     Three numbers, because they answer three different questions:
 
-      a1  the file vs the RIG-space pose the exporter actually posed (skin
-          matrices through `pelvis_ref`), under ONE global similarity fit for
-          the whole take. This is the phase's gate: it is the only one that
-          fails if the root translation is dropped, because the fit is shared
-          across frames and cannot re-place each of them.
+      a1  the file vs the matrices the exporter actually WROTE, under one
+          global similarity fit for the whole take. This is the Blender
+          round-trip: it says the armature Blender saved reproduces what the
+          host handed it, and nothing about whether what the host handed it
+          was right.
       a2  the file vs `Character.posed_joints`, i.e. the pose in the CAPTURE's
-          own space, again under one global fit. This is larger, and the
-          difference is not the export's: `_skin_matrices` yaw-aligns every
-          frame to the rig, so the exported character never turns while the
-          subject does. Recorded, not fixed, here.
+          own space — the 3D view's own space — again under ONE global fit for
+          the take, not one per frame. THIS IS THE PHASE'S GATE, because it is
+          the only one that fails if the export drops the subject's travel or
+          the subject's turning: a shared fit cannot re-place or re-orient
+          each frame to hide either.
       a3  a similarity fit PER keyframe: pure shape, with each frame's own
-          placement forgiven.
+          placement and facing forgiven.
     """
     # Only the canonical joints the rig reports at a bone HEAD: BVH forward
     # kinematics gives head positions, and the one joint read off a bone's
@@ -88,21 +92,25 @@ def report_keyframe_fidelity(bvh, character, up, valid, holds, out,
         else:
             skipped.append(JOINT_NAMES[j])
 
-    src, dst, rig_dst, index, per_frame = [], [], [], [], []
+    src, dst, exp_dst, index, per_frame = [], [], [], [], []
     for k, (row, _) in enumerate(holds):
         fk = bvh.forward_kinematics(row)
         app = character.posed_joints(up[k], valid[k], None)
-        skin = character._skin_matrices(up[k], valid[k],
-                                        pelvis_ref=pelvis_ref)[0]
+        skin, origin, scale, Rz = character._skin_matrices(up[k], valid[k])
         if app is None or skin is None:
             continue
         rig = character._joints_from_skin(skin)
+        if pelvis_ref is not None:
+            # the joints the exporter wrote: the same rigid map it put on every
+            # bone matrix, read from the one place that formula lives
+            X = character.export_transform(origin, scale, Rz, pelvis_ref)
+            rig = (X[:3, :3] @ rig.T).T + X[:3, 3]
         a, b = [], []
         for j, bi in mapping.items():
             if valid[k][j] and np.isfinite(app[j]).all():
                 a.append(fk[bi])
                 b.append(app[j])
-                rig_dst.append(rig[j])
+                exp_dst.append(rig[j])
                 index.append((k, j))
         src.extend(a)
         dst.extend(b)
@@ -112,7 +120,7 @@ def report_keyframe_fidelity(bvh, character, up, valid, holds, out,
         s, R, t = similarity(a, b)
         per_frame.append(np.linalg.norm((s * (R @ a.T).T + t) - b, axis=1))
     src, dst = np.asarray(src), np.asarray(dst)
-    rig_dst = np.asarray(rig_dst)
+    exp_dst = np.asarray(exp_dst)
     per_frame = np.concatenate(per_frame)
     height = float(np.median([p[v, 2].max() - p[v, 2].min()
                               for p, v in zip(up, valid) if v.sum() >= 2]))
@@ -124,11 +132,11 @@ def report_keyframe_fidelity(bvh, character, up, valid, holds, out,
 
     # a1: rig units, so the yardstick is the subject's height through the same
     # uniform scale the character was fitted with
-    _s1, e1 = _fit(src, rig_dst, height * character._scale)
+    _s1, e1 = _fit(src, exp_dst, height * character._scale)
     _s2, e2 = _fit(src, dst, height)
-    out["a1_bvh_vs_posed_rig_median_pct"] = float(np.median(e1))
-    out["a1_bvh_vs_posed_rig_p90_pct"] = float(np.percentile(e1, 90))
-    out["a1_bvh_vs_posed_rig_max_pct"] = float(e1.max())
+    out["a1_bvh_vs_exported_matrices_median_pct"] = float(np.median(e1))
+    out["a1_bvh_vs_exported_matrices_p90_pct"] = float(np.percentile(e1, 90))
+    out["a1_bvh_vs_exported_matrices_max_pct"] = float(e1.max())
     out["a2_bvh_vs_view_capture_median_pct"] = float(np.median(e2))
     out["a2_bvh_vs_view_capture_max_pct"] = float(e2.max())
     out["a3_per_keyframe_max_pct"] = 100 * float(per_frame.max()) / height
@@ -136,21 +144,93 @@ def report_keyframe_fidelity(bvh, character, up, valid, holds, out,
 
     print(f"(a) BVH forward kinematics vs the app's pose, {len(mapping)} "
           f"joints x {len(holds)} keyframes, body height {height:.4f} m")
-    print(f"    a1 vs the posed RIG (one global fit): median "
-          f"{np.median(e1):.4f} % of height, p90 {np.percentile(e1, 90):.4f} %, "
-          f"max {e1.max():.4f} %")
-    print(f"    a2 vs Character.posed_joints (one global fit): median "
-          f"{np.median(e2):.3f} % of height, max {e2.max():.3f} % — the "
-          f"remainder is the per-frame yaw the retarget removes, not the "
-          f"export's")
+    print(f"    a2 vs Character.posed_joints, ONE global fit — THE GATE: "
+          f"median {np.median(e2):.4f} % of height, max {e2.max():.4f} %")
     worst = int(np.argmax(e2))
     print(f"       worst: pose {index[worst][0]} {JOINT_NAMES[index[worst][1]]}")
+    print(f"    a1 vs the matrices the exporter wrote (one global fit): median "
+          f"{np.median(e1):.4f} % of height, p90 {np.percentile(e1, 90):.4f} %, "
+          f"max {e1.max():.4f} % — the Blender round trip")
     print(f"    a3 a similarity fit PER KEYFRAME: median "
           f"{100 * np.median(per_frame) / height:.6f} % of height, max "
           f"{100 * per_frame.max() / height:.6f} %")
     if skipped:
         print(f"    not comparable (not a bone head in the file): "
               f"{', '.join(skipped)}")
+
+
+def report_facing(bvh, character, up, valid, holds, out) -> None:
+    """(h) does the exported character TURN with the subject?
+
+    The hips bone's world orientation is read straight off the file and
+    compared, frame by frame, with the yaw of the captured shoulder line. The
+    constant between the two is a rig convention (where the rest hips point
+    relative to the subject's shoulders), so what is measured is how well the
+    file TRACKS the capture once that constant is removed.
+
+    Before this phase's fix the answer was "not at all": `_skin_matrices` turns
+    every frame onto the rig's rest facing and the export never undid it, so
+    the exported hips' yaw was constant to ~1e-5 deg while the client's take
+    turned through 36.97 deg.
+    """
+    from pose3d.core.skeleton import Joint
+    hips = bvh.index("hips")
+    ls, rs = int(Joint.LEFT_SHOULDER), int(Joint.RIGHT_SHOULDER)
+    names = [b.name for b in bvh.joints]
+
+    def _bone(j):
+        b, which = character._joint_src[j]
+        n = character.bone_names[b]
+        return bvh.index(n) if which == "head" and n in names else None
+
+    bl, br = _bone(ls), _bone(rs)
+    hip_yaw, sh_yaw, cap_yaw, cap_hip = [], [], [], []
+    for k, (row, _) in enumerate(holds):
+        if not (valid[k][ls] and valid[k][rs]):
+            continue
+        d = up[k][rs] - up[k][ls]
+        cap_yaw.append(np.arctan2(d[1], d[0]))
+        R = bvh.world_rotations(row)[hips]
+        # the hips bone's own +X axis, projected on the ground plane
+        hip_yaw.append(np.arctan2(R[1, 0], R[0, 0]))
+        if bl is not None and br is not None:
+            fk = bvh.forward_kinematics(row)
+            e = fk[br] - fk[bl]
+            sh_yaw.append(np.arctan2(e[1], e[0]))
+        h = up[k][int(Joint.RIGHT_HIP)] - up[k][int(Joint.LEFT_HIP)]
+        cap_hip.append(np.arctan2(h[1], h[0]))
+
+    def _drift(a, b):
+        r = np.degrees(np.unwrap(a) - np.unwrap(b))
+        return np.abs(r - r.mean()).max()
+
+    cap_yaw = np.asarray(cap_yaw); hip_yaw = np.asarray(hip_yaw)
+    cap_hip = np.asarray(cap_hip)
+    out["h_hips_vs_capture_shoulders_drift_deg"] = float(_drift(hip_yaw, cap_yaw))
+    out["h_hips_vs_capture_hips_drift_deg"] = float(_drift(hip_yaw, cap_hip))
+    out["h_bvh_hips_yaw_ptp_deg"] = float(np.degrees(np.ptp(np.unwrap(hip_yaw))))
+    out["h_capture_shoulder_yaw_ptp_deg"] = float(np.degrees(np.ptp(np.unwrap(cap_yaw))))
+    out["h_capture_subject_torso_twist_ptp_deg"] = float(
+        np.degrees(np.ptp(np.unwrap(cap_hip) - np.unwrap(cap_yaw))))
+    print(f"(h) does the exported character turn with the subject? "
+          f"{len(cap_yaw)} frames")
+    print(f"    the file's hips turn through "
+          f"{out['h_bvh_hips_yaw_ptp_deg']:.2f} deg; the subject's shoulder "
+          f"line turns through {out['h_capture_shoulder_yaw_ptp_deg']:.2f} deg")
+    print(f"    hips vs the captured SHOULDER line: drift "
+          f"{out['h_hips_vs_capture_shoulders_drift_deg']:.3f} deg")
+    print(f"    hips vs the captured HIP line (what the hips bone actually "
+          f"follows): drift {out['h_hips_vs_capture_hips_drift_deg']:.3f} deg")
+    print(f"    the subject's own hip-vs-shoulder twist spans "
+          f"{out['h_capture_subject_torso_twist_ptp_deg']:.2f} deg — that is "
+          f"the subject, not the export, and it is why the two drifts differ")
+    if sh_yaw:
+        sh_yaw = np.asarray(sh_yaw)
+        out["h_shoulders_vs_capture_shoulders_drift_deg"] = float(
+            _drift(sh_yaw, cap_yaw))
+        print(f"    the file's own SHOULDER line vs the captured one: drift "
+              f"{out['h_shoulders_vs_capture_shoulders_drift_deg']:.3f} deg "
+              f"— the export's yaw, with the subject's twist taken out")
 
 
 def report_interpolation(bvh, holds, out) -> None:
@@ -266,8 +346,9 @@ def report_placement(ch, up, valid, out) -> None:
     print("    under the take-wide rule it is 0 by construction, and the "
           "export applies the same one")
     print(f"(g) the retarget's per-frame yaw alignment spans "
-          f"{out['g_per_frame_yaw_ptp_deg']:.2f} deg over the take — the "
-          f"exported character does not turn with the subject (see a2)")
+          f"{out['g_per_frame_yaw_ptp_deg']:.2f} deg over the take — this is "
+          f"what `_skin_matrices` removes and `export_transform` puts back, "
+          f"so the exported character turns with the subject (see h)")
 
 
 def report_fallback(poses, out_dir, blender, timeout, out) -> None:
@@ -362,16 +443,16 @@ def main(argv=None) -> int:
     print(f"subject height {subject_height(poses):.4f} m, "
           f"character scale {ch._scale:.4f}\n")
 
-    # What root motion SHOULD put in the hips: the take's pelvis travel mapped
-    # into rig space by the SAME `Rz @ (pelvis - pelvis_ref) * scale` the
-    # exporter applies, so this is the number the file has to reproduce and not
-    # a rotation-dependent approximation of it.
+    # What root motion SHOULD put in the hips: the take's pelvis travel through
+    # the fitted scale, in the capture's own frame — the SAME
+    # `(pelvis - pelvis_ref) * scale` the exporter applies, so this is the
+    # number the file has to reproduce and not an approximation of it.
     ref = take_pelvis_ref(up)
     offs = []
     for k in range(n_poses):
-        _skin, pelvis, scale, Rz = ch._skin_matrices(up[k], valid[k])
+        _skin, pelvis, scale, _Rz = ch._skin_matrices(up[k], valid[k])
         if scale is not None:
-            offs.append((Rz @ (pelvis - ref)) * scale)
+            offs.append((pelvis - ref) * scale)
     offs = np.asarray(offs, float)
     travel = float(np.max(offs.max(0) - offs.min(0))) if len(offs) else None
     if not args.root_motion:
@@ -387,6 +468,8 @@ def main(argv=None) -> int:
 
     report_keyframe_fidelity(bvh, ch, up, valid, holds, out,
                              pelvis_ref=ref if args.root_motion else None)
+    print()
+    report_facing(bvh, ch, up, valid, holds, out)
     print()
     report_interpolation(bvh, holds, out)
     print()

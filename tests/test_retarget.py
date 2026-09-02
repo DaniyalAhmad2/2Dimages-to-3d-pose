@@ -947,3 +947,51 @@ def test_view_and_export_share_one_skinning():
         got = ch._from_rig(ch._joints_from_skin(skin), pelvis, scale, Rz)
         want = ch.posed_joints(p, valid)
         assert np.allclose(got, want, atol=1e-9, equal_nan=True)
+
+
+def test_the_exported_matrices_are_the_view_through_one_similarity():
+    """The SHIPPING configuration: `keep_root_motion=True`.
+
+    `test_view_and_export_share_one_skinning` above pins the rig-space form,
+    which is the rollback and is what `_character_bone_frames` (and so
+    test_orient_up / test_gap_fill) reads. The delivered file is written the
+    other way — in the de-tilted capture frame — and that path had no
+    numpy-level guard at all: only the Blender-gated export tests covered it,
+    so on a machine without Blender nothing checked it.
+
+    What must hold, for the WHOLE take at once: the joints the exporter writes
+    are the joints the 3D view draws, through ONE similarity — the fitted
+    scale, no rotation, and the constant offset onto the take's pelvis. One
+    for the take, so a per-frame yaw (round 1's `Rz @ (pelvis - ref) * scale`
+    placement, which left the character facing forward while the subject
+    turned) cannot hide in it.
+    """
+    from pose3d.geometry.character import take_pelvis_ref
+    ch = _ch()
+    fx = fixture_poses()
+    poses = np.stack(list(_poses()) + ([] if fx is None else list(fx)))
+    ch.fit_to_subject(poses)
+    ref = take_pelvis_ref(poses)
+    assert ref is not None
+
+    got, want = [], []
+    for p in poses:
+        valid = ~np.isnan(p).any(1)
+        mats, al = ch.pose_bone_matrices(p, valid, None, keep_root_motion=True,
+                                         pelvis_ref=ref, return_alignment=True)
+        skin = np.array([np.array(mats[n]) @ np.linalg.inv(ch.rest[b])
+                         for b, n in enumerate(ch.bone_names)])
+        # `skin` here is the EXPORTED matrix's deform, so the joints it carries
+        # are already in the capture frame; no `_from_rig` and no per-frame
+        # anything is allowed to intervene
+        j = ch._joints_from_skin(skin)
+        view = ch.posed_joints(p, valid)
+        m = np.isfinite(j).all(1) & np.isfinite(view).all(1)
+        got.append(j[m]); want.append(view[m])
+        assert al.scale == ch._scale
+    got, want = np.concatenate(got), np.concatenate(want)
+    resid = got - want * ch._scale
+    assert np.abs(resid - resid.mean(0)).max() <= 1e-9 * ch.rig_h, \
+        f"the export is not the view: {np.abs(resid - resid.mean(0)).max():.9f}"
+    # ...and the constant IS the take's pelvis mapped onto the rig's hips
+    assert np.allclose(resid.mean(0), ch.hips_world - ref * ch._scale, atol=1e-9)

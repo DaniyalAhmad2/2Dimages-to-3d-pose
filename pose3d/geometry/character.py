@@ -18,6 +18,7 @@ matrices via `pose_bone_matrices`.
 from __future__ import annotations
 
 import json
+from collections import namedtuple
 from pathlib import Path
 
 import numpy as np
@@ -25,6 +26,16 @@ import numpy as np
 from pose3d.core.skeleton import BONES, Joint, NUM_HEAD_KP, NUM_JOINTS
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
+
+# How one frame was placed, read off the solve that posed it.
+#   origin       the pelvis this frame was centred on, in capture units
+#   scale        the uniform rig-per-capture scale (take-wide once fitted)
+#   Rz           the yaw that aligns this frame's shoulder line to the rig
+#   root_offset  (origin - pelvis_ref) * scale, in the CAPTURE frame
+#   transform    the (4,4) rig-space -> capture-frame map, identity with root
+#                motion off (see `Character.export_transform`)
+RigAlignment = namedtuple(
+    "RigAlignment", "origin scale Rz root_offset transform")
 
 
 class PoseUnavailable(Exception):
@@ -321,6 +332,19 @@ def _bend_weight(bend_deg):
     return float(np.clip(
         (bend_deg - _ROLL_BEND_MIN_DEG)
         / (_ROLL_BEND_FULL_DEG - _ROLL_BEND_MIN_DEG), 0.0, 1.0))
+
+
+def root_offset(origin, scale, pelvis_ref):
+    """The subject's travel away from the take's reference, in rig units.
+
+    In the CAPTURE's own frame — deliberately not turned by the retarget's
+    per-frame `Rz`. Round 1 wrote `Rz @ (pelvis - pelvis_ref) * scale`, which
+    expresses the travel in a frame that rotates with the subject: the
+    direction the exported hips moved then depended on which way the subject
+    happened to be facing that frame.
+    """
+    return ((np.asarray(origin, float) - np.asarray(pelvis_ref, float))
+            * float(scale))
 
 
 def take_pelvis_ref(poses):
@@ -912,8 +936,7 @@ class Character:
         our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
         return self.rig_h / our_h
 
-    def _skin_matrices(self, up_pose, valid, head_pts=None, *,
-                       pelvis_ref=None):
+    def _skin_matrices(self, up_pose, valid, head_pts=None):
         """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
         Returns (skin (B,4,4), origin (3,), scale, Rz (3,3)) or (None,)*4 if the
@@ -924,22 +947,13 @@ class Character:
         space as `up_pose`; given them the head bone gets a real orientation
         instead of riding the neck.
 
-        ROOT MOTION. `to_rig` maps the capture into rig space around an
-        `origin` that is this frame's own pelvis by default — which is exactly
-        why the exported file used to have a hips translation range of
-        [0, 0, 0] while the subject's pelvis travelled 116 % of its own body
-        height (F13). Pass `pelvis_ref` — the take's pelvis, once, from
-        `take_pelvis_ref` — and the origin becomes that instead, so the whole
-        rig is translated by
-
-            root_offset = Rz @ (pelvis - pelvis_ref) * scale
-
-        every frame. It is a RIGID translation of the result: bone directions
-        are differences of `to_rig` points, so not one rotation changes, and
-        `_from_rig` given the same origin maps the joints straight back to the
-        capture's own space. That is what lets the 3D view and the export share
-        one placement rule (`pose_bone_matrices(keep_root_motion=True)`) while
-        `posed_joints` and the character/capture overlay stay put.
+        RIG SPACE means two things are removed here and put back by whoever
+        needs them: `to_rig` centres on THIS frame's pelvis (so the subject's
+        travel is not in the result) and `Rz` turns this frame's shoulder line
+        onto the rig's rest facing (so the subject's turning is not either).
+        `_from_rig` puts both back for the live view; `export_transform` puts
+        both back for the exported file. Neither is a property of the take, so
+        this stays a pure function of one frame.
         """
         up_pose = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)
         j = Joint
@@ -954,10 +968,7 @@ class Character:
                 return None, None, None, None
             pelvis = np.mean(hips, axis=0)
 
-        # the take's pelvis when root motion is on, else this frame's own —
-        # the ONE line that decides whether the figure travels or animates in
-        # place, in the view and in the exported file alike
-        origin = pelvis if pelvis_ref is None else np.asarray(pelvis_ref, float)
+        origin = pelvis
 
         scale = self._frame_scale(up_pose, valid)
 
@@ -1085,10 +1096,12 @@ class Character:
     def _from_rig(self, pts, origin, scale, Rz):
         """Rig space -> the pose space the caller supplied.
 
-        `origin` is whatever `_skin_matrices` centred `to_rig` on — this
-        frame's pelvis normally, the take's `pelvis_ref` when root motion is
-        on. Feeding back the same origin is what makes the round trip exact
-        either way, so turning root motion on cannot move `posed_joints`.
+        `origin`, `scale` and `Rz` are what `_skin_matrices` returned for this
+        frame; feeding them straight back is what makes the round trip exact,
+        and undoing `Rz` here is why the live view shows the subject TURN. The
+        exported file gets the same two things back through
+        `export_transform`, which is the same map with the rig's units and
+        origin kept.
         """
         pts = np.atleast_2d(np.asarray(pts, float))
         return origin + (Rz.T @ (pts - self.hips_world).T).T / scale
@@ -1140,26 +1153,78 @@ class Character:
         """Canonical joints of the posed rig, in the same space as up_pose."""
         return self.pose_and_joints(up_pose, valid, head_pts)[2]
 
+    def export_transform(self, origin, scale, Rz, pelvis_ref):
+        """The rig-space -> CAPTURE-frame map for one frame, as a (4,4).
+
+        THE formula, in one place. It was written out three times (here, the
+        export's `root_offsets`, the fidelity tool) and the copies could not
+        be checked against each other.
+
+            X = T(root_offset) @ R_about_hips(Rz.T)
+
+        `R_about_hips` rotates about the rig's REST hips position, so the
+        pelvis does not move and only the facing changes; `root_offset =
+        (pelvis - pelvis_ref) * scale` is the subject's travel in the capture's
+        own frame, NOT rotated by `Rz`. Composed with the rig-space pose it
+        gives, for every joint,
+
+            X @ j_rig = hips_world + scale * (j_capture - pelvis_ref)
+
+        i.e. the de-tilted capture, uniformly scaled into rig units. One rigid
+        transform applied to every bone's world matrix, which is exactly what
+        Blender is driven with, so it is exact rather than an approximation.
+        """
+        R = np.asarray(Rz, float).T
+        X = np.eye(4)
+        X[:3, :3] = R
+        X[:3, 3] = (self.hips_world - R @ self.hips_world
+                    + root_offset(origin, scale, pelvis_ref))
+        return X
+
     def pose_bone_matrices(self, up_pose, valid, head_pts=None, *,
-                           keep_root_motion: bool = False, pelvis_ref=None):
-        """Posed bone world matrices in RIG space: {bone_name: (4,4) list}.
+                           keep_root_motion: bool = False, pelvis_ref=None,
+                           return_alignment: bool = False):
+        """Posed bone world matrices: {bone_name: (4,4) list}.
 
         M_posed[b] = skin[b] @ rest[b]. Blender's deform is
         pose_bone.matrix @ rest[b]^-1, so setting pose_bone.matrix = M_posed[b]
         reproduces this class's skinning exactly — that is what keeps the
         export identical to the 3D view. Returns None for an unusable pose.
 
-        `keep_root_motion` with a take-wide `pelvis_ref` (see `_skin_matrices`)
-        translates the whole rig by the subject's travel since that reference,
-        so the exported hips carry the motion instead of the file animating in
-        place. It is off here and switched on by the caller, so the rollback is
-        one argument: off plus the stepped schedule reproduces the file the
-        client already has.
+        With `keep_root_motion` OFF the matrices are in RIG space: the rig's
+        own rest facing, the pelvis pinned at `hips_world`. That is the
+        rollback, bit-for-bit, and it is what the turntable and the pose-only
+        probes read.
+
+        With `keep_root_motion` ON and a take-wide `pelvis_ref` they are in the
+        de-tilted CAPTURE frame expressed in rig units — `export_transform`
+        above. This is the fix for BOTH halves of "the character does not
+        follow the keypoints": `_skin_matrices` yaw-aligns every frame's
+        shoulder line to the rig's rest facing, and the live view undoes that
+        with `_from_rig`'s `Rz.T` while the export used not to, so the subject
+        turned on screen (36.97 deg over the client take) and never turned in
+        the delivered file; and the pelvis was pinned, so the travel was
+        absent too. Both are undone here, per frame, with no caller-owned
+        state: `Rz` and the pelvis are read off this frame's own solve.
+
+        `return_alignment` also yields the frame's `(origin, scale, Rz,
+        root_offset, transform)`, so a caller that needs the placement — the
+        export's `root_offsets`, the fixed camera, the fidelity tool — reads it
+        off the SAME solve instead of posing the frame a second time.
         """
-        ref = pelvis_ref if keep_root_motion else None
-        skin, *_ = self._skin_matrices(up_pose, valid, head_pts,
-                                       pelvis_ref=ref)
+        skin, origin, scale, Rz = self._skin_matrices(up_pose, valid, head_pts)
         if skin is None:
-            return None
-        return {name: (skin[b] @ self.rest[b]).tolist()
-                for b, name in enumerate(self.bone_names)}
+            return (None, None) if return_alignment else None
+        X, off = None, np.zeros(3)
+        if keep_root_motion and pelvis_ref is not None:
+            X = self.export_transform(origin, scale, Rz, pelvis_ref)
+            off = root_offset(origin, scale, pelvis_ref)
+        mats = {}
+        for b, name in enumerate(self.bone_names):
+            M = skin[b] @ self.rest[b]
+            mats[name] = (M if X is None else X @ M).tolist()
+        if not return_alignment:
+            return mats
+        return mats, RigAlignment(np.asarray(origin, float), float(scale),
+                                  np.asarray(Rz, float), off,
+                                  np.eye(4) if X is None else X)

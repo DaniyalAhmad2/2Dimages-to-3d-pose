@@ -282,10 +282,19 @@ def export_fbx_mesh(objs, path):
 
 
 def _add_lights(center, diag, scene):
+    """Three suns around the figure. Returns the objects it created.
+
+    Returned, not looked up again by name: cleaning up with
+    `name.startswith("L")` also deletes any light a replacement character
+    .blend happens to ship under a name beginning with L.
+    """
+    made = []
     for pos in ((diag, -diag, diag * 2), (-diag, -diag, diag), (0, diag, diag)):
         ld = bpy.data.lights.new("L", type="SUN"); ld.energy = 2.5
         lo = bpy.data.objects.new("L", ld)
         scene.collection.objects.link(lo); lo.location = center + Vector(pos)
+        made.append(lo)
+    return made
 
 
 def _add_camera_light(center, diag, scene):
@@ -478,7 +487,8 @@ def _drive_character_bones_fk(arm, data, scene, schedule, pin_root=False):
     The turntable render wants that — a subject who walks more than its own
     height would spin its way out of frame — while the BVH/FBX and the
     fixed-camera render want the travel. It is a translation of the whole rig,
-    so removing it changes no rotation and no pose.
+    so removing it changes no rotation and no pose: the figure still TURNS
+    with the subject on the turntable, it simply turns on the spot.
     """
     bone_frames = data["bone_frames"]
     offsets = data.get("root_offsets") or []
@@ -514,6 +524,9 @@ def _drive_character_bones_fk(arm, data, scene, schedule, pin_root=False):
 
     last = None
     last_off = None
+    # the previous frame's keyed quaternion per bone: see the hemisphere note
+    # in the keyframe loop below
+    prev_q = {}
     for fi in range(n):
         mats = bone_frames[fi] if bone_frames[fi] is not None else last
         if mats is None:
@@ -551,6 +564,22 @@ def _drive_character_bones_fk(arm, data, scene, schedule, pin_root=False):
                 pb = arm.pose.bones.get(name)
                 if pb is None:
                     continue
+                # Keep each bone's quaternion in the same hemisphere as the
+                # frame before. Setting `pb.matrix` makes Blender derive the
+                # quaternion afresh, canonically, so a bone whose rotation
+                # passes 180 deg comes back NEGATED — the identical pose, but
+                # every interpolation between those two keys then takes the
+                # long way round. The hips sit near 180 deg on this rig, so a
+                # subject that turns (which is the whole point of the
+                # capture-frame export) produced a 19.8 deg backswing through
+                # the first ease of every preview. Caught by
+                # test_inbetween_stays_on_the_arc.
+                q = pb.rotation_quaternion.copy()
+                p = prev_q.get(name)
+                if p is not None and q.dot(p) < 0.0:
+                    q.negate()
+                    pb.rotation_quaternion = q
+                prev_q[name] = q
                 pb.keyframe_insert("location", frame=f)
                 pb.keyframe_insert("rotation_quaternion", frame=f)
 
@@ -765,8 +794,20 @@ def character_main(data, args, scene):
         _write_frame_map(args.outdir, args.name, file_schedule)
 
     if not args.no_video:
-        _render_videos(arm, meshes, data, args, scene, n, have_bones,
-                       file_schedule, file_total)
+        # The files are already on disk and correct. A preview that fails —
+        # ffmpeg missing, no usable GL, a camera spec this Blender dislikes —
+        # must not be reported as a failed EXPORT: the old shape let it reach
+        # main's except, print POSE3D_EXPORT_FAILED, exit 2 and leave the
+        # written BVH/FBX sitting there orphaned and disowned.
+        try:
+            _render_videos(arm, meshes, data, args, scene, n, have_bones,
+                           file_schedule, file_total)
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            print(f"POSE3D_EXPORT_PREVIEW_FAILED: the BVH and FBX were "
+                  f"written; the preview video was not ({type(e).__name__}: "
+                  f"{e})")
     return True
 
 
@@ -801,13 +842,13 @@ def _render_videos(arm, meshes, data, args, scene, n, have_bones,
     if cam_spec is not None:
         repose(pin_root=False)          # the travel is the point here
         center, diag = _character_bounds(meshes)
-        _add_lights(center, diag, scene)
-        _add_fixed_camera(cam_spec, diag, scene)
+        made = _add_lights(center, diag, scene)
+        made.append(_add_fixed_camera(cam_spec, diag, scene))
         render_mp4(os.path.join(args.outdir, args.name + "_camera.mp4"),
                    scene, args.fps, resolution=None)
-        _delete([o for o in bpy.data.objects
-                 if o.name.startswith(("FixedCam", "L"))
-                 and o.type in ("CAMERA", "LIGHT")])
+        # exactly the objects this function created — deleting by name prefix
+        # ("FixedCam", "L") would take a replacement rig's own "Lamp" with it
+        _delete(made)
 
     repose(pin_root=True)               # in place, so the spin is readable
     center, diag = _character_bounds(meshes)

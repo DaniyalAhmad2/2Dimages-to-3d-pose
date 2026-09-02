@@ -9,6 +9,7 @@ import numpy as np
 import pytest
 
 from pose3d.config import blender_binary, character_blend
+from pose3d.core.skeleton import Joint
 from pose3d.export.blender_export import export_animation
 from tests import bvh_util
 from tests.gates import needs_blender, needs_character, needs_video_render
@@ -141,6 +142,36 @@ DELIVERED_HELPER_TRANSLATION_PCT = 42.5   # 42.49 %, on shin.R.001
 # pinned at rest rather than left to float.
 MAX_NON_HIPS_TRANSLATION_PCT = 1.0
 
+# Phase 3's headline gate, restated where it can fail: forward kinematics off
+# the delivered BVH against `Character.posed_joints` — the CAPTURE's own space,
+# which is what the 3D view draws — after ONE global similarity fit for the
+# whole take. One fit, because a fit per keyframe re-places and re-orients
+# every frame and so forgives precisely the defect this is looking for.
+#
+# The round-1 export was measured against the RIG-space pose it had itself
+# written, which passes by construction; against `posed_joints` it measured
+# 6.357 % median / 16.313 % max of body height on the client take
+# (docs/audit-2026-09/phase3_metrics.json, label "round1"). That residual was
+# the per-frame yaw `_skin_matrices` removes and the export never put back.
+MAX_VIEW_DEVIATION_PCT = 1.0
+ROUND1_CAPTURE_SPACE_MAX_PCT = 16.313     # what this gate has to catch
+
+# ...and the same defect read off the file's own orientation: the exported
+# figure's facing must TRACK the capture's. The constant angle between them is
+# a rig convention and is removed; what is left is drift.
+#
+# Measured two ways, because on a REAL subject the hips and the shoulders
+# twist against each other and the hips bone follows the hip line, not the
+# shoulder line. On the client take (docs/audit-2026-09/phase3_metrics.json,
+# label "after"): the file's own shoulder line tracks the captured shoulder
+# line to 0.196 deg; the hips bone tracks the captured HIP line to 3.049 deg
+# (the retarget's own roll fit) and the captured SHOULDER line only to 21.3
+# deg, which is the subject's own 38.8 deg of torso twist and not the
+# export's. Round 1 had the exported figure not turning AT ALL — 26.9 deg of
+# drift on the same take — so either measure catches it. The synthetic fixture
+# turns rigidly, so hips and shoulders are locked and both read ~0 there.
+MAX_FACING_DRIFT_DEG = 3.0
+
 
 @pytest.fixture(scope="module")
 def delivered():
@@ -228,20 +259,34 @@ def test_the_recorded_rig_height_is_still_the_bundled_rigs():
 # current rig and the current placement rule — and because the delivered file
 # predates the rig swap, so its numbers cannot gate today's code.
 
-def _travelling_motion(n=6, step=0.06):
-    """A take with real translation: the subject walks +x, arms swinging.
+def _travelling_motion(n=6, step=0.06, turn_deg=8.0):
+    """A take that walks AND turns: the subject moves +x while rotating.
 
-    `_motion` above moves two wrists and nothing else, so it cannot tell an
-    export that keeps the subject's travel from one that pins it away — which
-    is exactly the defect (F13) these tests exist for.
+    Both halves are load-bearing and both were missing before:
+
+    * `_motion` above moves two wrists and nothing else, so it cannot tell an
+      export that keeps the subject's travel from one that pins it away —
+      which is the first half of F13.
+    * without the turn, the shoulder line's yaw is constant, `Rz` is constant,
+      and comparing the file against the RIG-space pose and against the
+      CAPTURE-space pose give the same answer. A fixture like that passes
+      `test_bvh_keyframes_match_the_view` however the export is written, and
+      it is exactly what hid the 36.97 deg of unrepresented yaw on the client
+      take for a whole round. `turn_deg` per pose puts a comparable span
+      (0-40 deg over six poses) into the fixture.
     """
+    from tests.synth import rot_about
     base = sample_skeleton_3d()
+    pelvis = base[int(Joint.PELVIS)].copy()
     seq = []
     for i in range(n):
         p = base.copy()
         p[6, 0] -= 0.02 * i     # left wrist
         p[7, 0] += 0.02 * i     # right wrist
-        p[:, 0] += step * i     # ...and the whole figure travels
+        # turn the whole figure about the vertical through its own pelvis...
+        R = rot_about((0, 0, 1), turn_deg * i)
+        p = (p - pelvis) @ R.T + pelvis
+        p[:, 0] += step * i     # ...and walk it
         seq.append(p)
     return np.stack(seq)
 
@@ -290,8 +335,17 @@ def test_root_motion_reaches_bvh(fresh, tmp_path):
     """F13: the hips translation in the file must be the subject's own travel.
 
     Measured as the DISTANCE the hips move between the first and last captured
-    pose, which is invariant to the yaw the retarget applies, against the same
-    distance in the capture through the character's fitted scale.
+    pose, against the same distance in the capture through the character's
+    fitted scale.
+
+    A distance is the right measure because the exported hips are
+    `(pelvis_k - pelvis_ref) * scale` — the capture's own frame, no per-frame
+    rotation — so it equals the captured distance exactly, on a take that
+    turns as much as on one that does not. (Round 1 wrote
+    `Rz_k @ (pelvis_k - pelvis_ref) * scale`, where that equality held only
+    while `Rz` was constant, which was true of the old straight-ahead fixture
+    and false of the client take. The docstring said "invariant to the yaw the
+    retarget applies"; it was not.)
     """
     seq, bvh = fresh
     ch, upright, ref = _placement(seq)
@@ -340,12 +394,23 @@ def test_helper_bones_are_pinned(fresh):
 @needs_blender()
 @needs_character()
 def test_bvh_keyframes_match_the_view(fresh):
-    """The file holds the pose the app computed, placement included.
+    """THE gate: the delivered file holds the pose the 3D VIEW shows.
 
-    Forward kinematics off every captured keyframe against the rig the app
-    posed, after ONE global similarity fit for the whole take — one, because a
-    fit per keyframe forgives exactly the placement error this is looking for.
-    Measured 0.0000 % of body height.
+    Forward kinematics off every captured keyframe of the BVH, against
+    `Character.posed_joints` — the capture's own space, which is what the view
+    draws — after ONE global similarity fit (one scale, one rotation, one
+    translation) for the whole take.
+
+    One fit for the take, not one per keyframe, is the whole point: a per-frame
+    fit re-places and re-orients each frame and would forgive both halves of
+    "the character does not follow the keypoints". So would comparing against
+    the rig-space matrices the exporter itself wrote, which is what round 1
+    did: it passes however the export is written, and it passed while the
+    capture-space deviation was 16.313 % of body height.
+
+    On the client take this measures 0.0000 % of body height with this
+    round's export (`phase3_metrics.json`, label "after"), against 6.357 %
+    median / 16.313 % max for round 1's.
     """
     seq, bvh = fresh
     ch, upright, ref = _placement(seq)
@@ -358,16 +423,63 @@ def test_bvh_keyframes_match_the_view(fresh):
     src, dst = [], []
     for k, (row, _last) in enumerate(bvh_util.keyframe_rows(bvh, len(seq))):
         valid = ~np.isnan(upright[k]).any(1)
-        skin = ch._skin_matrices(upright[k], valid, pelvis_ref=ref)[0]
-        rig = ch._joints_from_skin(skin)
+        app = ch.posed_joints(upright[k], valid)
         fk = bvh.forward_kinematics(row)
         for j, bi in mapping.items():
-            if valid[j] and np.isfinite(rig[j]).all():
-                src.append(fk[bi]); dst.append(rig[j])
+            if valid[j] and np.isfinite(app[j]).all():
+                src.append(fk[bi]); dst.append(app[j])
     err = bvh_util.similarity_error(np.asarray(src), np.asarray(dst))
     height = float(np.median([np.ptp(p[~np.isnan(p).any(1), 2]) for p in upright]))
-    assert float(err.max()) <= 0.01 * height * ch._scale, \
-        f"{100 * err.max() / (height * ch._scale):.4f} % of body height"
+    pct = 100.0 * float(err.max()) / height
+    assert pct <= MAX_VIEW_DEVIATION_PCT, \
+        f"{pct:.4f} % of body height (gate {MAX_VIEW_DEVIATION_PCT} %)"
+
+
+@needs_blender()
+@needs_character()
+def test_the_exported_character_turns_with_the_subject(fresh):
+    """The other half of the same gate, read off the file's own rotations.
+
+    `_skin_matrices` turns every frame's shoulder line onto the rig's rest
+    facing; the live view undoes that (`_from_rig`'s `Rz.T`) and the export
+    used not to, so the subject turned on screen and stood rigidly forward in
+    the delivered file — 36.97 deg of it on the client take. The angle between
+    the exported hips' facing and the captured shoulder line is a rig
+    convention, so it is the DRIFT in that angle that is asserted.
+    """
+    seq, bvh = fresh
+    ch, upright, _ref = _placement(seq)
+    hips = bvh.index("hips")
+    ls, rs = int(Joint.LEFT_SHOULDER), int(Joint.RIGHT_SHOULDER)
+    names = [b.name for b in bvh.joints]
+
+    def _shoulder_bone(j):
+        b, which = ch._joint_src[j]
+        assert which == "head" and ch.bone_names[b] in names
+        return bvh.index(ch.bone_names[b])
+
+    bl, br = _shoulder_bone(ls), _shoulder_bone(rs)
+    hips_yaw, file_yaw, cap_yaw = [], [], []
+    for k, (row, _last) in enumerate(bvh_util.keyframe_rows(bvh, len(seq))):
+        d = upright[k][rs] - upright[k][ls]
+        cap_yaw.append(np.arctan2(d[1], d[0]))
+        R = bvh.world_rotations(row)[hips]
+        hips_yaw.append(np.arctan2(R[1, 0], R[0, 0]))
+        fk = bvh.forward_kinematics(row)
+        e = fk[br] - fk[bl]
+        file_yaw.append(np.arctan2(e[1], e[0]))
+
+    cap = np.degrees(np.unwrap(cap_yaw))
+    assert np.ptp(cap) > 4 * MAX_FACING_DRIFT_DEG, \
+        "the fixture does not turn, so this asserts nothing"
+    for what, track in (("hips bone", hips_yaw),
+                        ("exported shoulder line", file_yaw)):
+        got = np.degrees(np.unwrap(track))
+        drift = (got - cap) - (got - cap).mean()
+        assert np.abs(drift).max() <= MAX_FACING_DRIFT_DEG, \
+            (f"the {what} turns through {np.ptp(got):.2f} deg while the "
+             f"subject turns through {np.ptp(cap):.2f}: drift "
+             f"{np.abs(drift).max():.2f} deg")
 
 
 @needs_blender()
@@ -448,6 +560,19 @@ def test_missing_character_asset_reports(tmp_path):
     assert res.reason == "character_asset_missing"
     assert "no_such_character.blend" in res.message
     assert not list(tmp_path.glob("x.*"))
+
+
+def test_an_unknown_schedule_is_refused(tmp_path):
+    """`schedule` used to be normalised by `"stepped" if s == "stepped" else
+    "one_per_pose"`, so a typo silently selected the default — which in a
+    phase about never substituting one output for another is the wrong
+    direction to fail in."""
+    import pytest as _pytest
+    with _pytest.raises(ValueError) as e:
+        export_animation(_motion(), tmp_path, name="z", fps=30,
+                         render_video=False, schedule="one-per-pose")
+    assert "one_per_pose" in str(e.value)
+    assert not list(tmp_path.glob("z.*"))
 
 
 def test_the_substitute_export_needs_an_explicit_opt_in(tmp_path):

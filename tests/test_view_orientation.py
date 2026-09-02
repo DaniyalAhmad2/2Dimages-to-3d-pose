@@ -111,25 +111,40 @@ def test_grounding_is_ankle_based():
 
 # --- Phase 3: one placement rule, shared with the export --------------------
 
-def _travelling_take(n=6, step=0.06):
+def _travelling_take(n=6, step=0.06, turn_deg=0.0):
     """A synthetic take whose subject genuinely walks, so a rule that deletes
-    the travel can be told from one that keeps it."""
-    from tests.synth import sample_skeleton_3d
+    the travel can be told from one that keeps it.
+
+    `turn_deg` per pose also turns the subject about its own pelvis, which a
+    rule that deletes the FACING can be told from one that keeps it. Off by
+    default because the "what the old per-frame rule dropped" contrast below
+    measures the wobble between the joint mean and the pelvis, and a turning
+    subject swings that mean about the pelvis for reasons that have nothing to
+    do with the placement rule.
+    """
+    from tests.synth import rot_about, sample_skeleton_3d
     base = sample_skeleton_3d()
+    pelvis = base[int(Joint.PELVIS)].copy()
     out = []
     for i in range(n):
         p = base.copy()
         p[6, 0] -= 0.02 * i
+        if turn_deg:
+            p = (p - pelvis) @ rot_about((0, 0, 1), turn_deg * i).T + pelvis
         p[:, 0] += step * i
         out.append(p)
     return np.stack(out)
 
 
 def _headless_view(poses):
-    """A View3D with no Qt behind it.
+    """A View3D with no Qt behind it, and its draw calls captured.
 
     `__new__` rather than `View3D()`: the placement rule is arithmetic over the
     take and a `Character`, and it should be assertable without a GL context.
+    Everything `set_pose` DRAWS with is stubbed and recorded on `v.drawn`, so
+    the tests can assert on the values that actually reach the screen rather
+    than only on `_take_placement`'s return value — a change that left the
+    rule intact but stopped `set_pose` applying it would otherwise pass.
     """
     from pose3d.geometry.character import Character
     from pose3d.ui.view3d import View3D
@@ -140,6 +155,24 @@ def _headless_view(poses):
     v._character.fit_to_subject(poses)
     v._take = poses
     v._place = None
+    v._framed = True                 # nothing to frame without a GL camera
+    v._show_body = True
+    v._char_error = ""
+    v._char_error_source = ""
+    v.drawn = {}
+
+    def _draw_skeleton(scatter, lines, pts, valid, base_color=None,
+                       filled=None):
+        v.drawn[scatter] = (np.asarray(pts, float).copy(),
+                            np.asarray(valid, bool).copy())
+
+    def _set_body(verts, faces):
+        v.drawn["body"] = None if verts is None else np.asarray(verts).copy()
+
+    v._draw_skeleton = _draw_skeleton
+    v._set_body = _set_body
+    v._scatter, v._lines = "char", "char_lines"
+    v._cap_scatter, v._cap_lines = "capture", "capture_lines"
     return v
 
 
@@ -163,14 +196,20 @@ def test_the_view_places_the_whole_take_by_one_rigid_map():
     assert np.allclose(place[:2], ref[:2])          # the shared horizontal rule
     assert travel > 0.2                             # sized for the walk, not one pose
 
-    pel = np.stack([take_pelvis_ref(p[None]) for p in poses]) - place
-    kept = np.ptp(pel[:, 0])
-    real = np.ptp(poses[:, int(Joint.PELVIS), 0])
-    assert kept == pytest.approx(real, rel=1e-9)
+    # what `set_pose` actually hands the capture overlay, frame by frame: the
+    # raw take minus ONE constant offset, elementwise. (`np.ptp` of the pelvis
+    # track would be satisfied by any offset whatsoever, constant or not, since
+    # a peak-to-peak is translation-invariant — it asserted nothing.)
+    for k, pose in enumerate(poses):
+        view.set_pose(pose)
+        drawn, valid = view.drawn["capture"]
+        assert valid.all()
+        assert np.allclose(drawn, pose - place, atol=1e-9), f"frame {k}"
 
     # ...and what the old rule did with the same take, for contrast: centring
     # on the mean of the valid joints every frame leaves only the wobble
     # between that mean and the pelvis. Measured 2.2 % of the real travel.
+    real = np.ptp(poses[:, int(Joint.PELVIS), 0])
     per_frame = np.stack([p[~np.isnan(p).any(1)][:, 0].mean() for p in poses])
     dropped = np.ptp(poses[:, int(Joint.PELVIS), 0] - per_frame)
     assert dropped <= 0.03 * real
@@ -180,28 +219,42 @@ def test_the_view_places_the_whole_take_by_one_rigid_map():
 def test_the_view_and_the_export_place_the_figure_the_same_way():
     """The preview-vs-export placement gap, asserted rather than described.
 
-    The view subtracts one take-wide offset; the export offsets the hips by
-    `Rz @ (pelvis - pelvis_ref) * scale`. Those are the same rigid map through
-    the same uniform scale, so the figure's displacement from frame to frame
-    must agree to within numerical noise — 0 by construction, and this is what
-    fails if either side goes back to placing per frame.
+    The view subtracts one take-wide offset from the capture-space pose; the
+    export maps the rig into that same capture frame
+    (`Character.export_transform`) and expresses it in rig units. Those are the
+    same rigid map through the same uniform scale, so the character's joints
+    must agree — position AND facing — up to the scale and the constant offset
+    between the two origins. This is what fails if either side goes back to
+    placing (or turning) per frame.
     """
     from pose3d.geometry.character import take_pelvis_ref
-    poses = _travelling_take()
+    poses = _travelling_take(turn_deg=8.0)   # walks AND turns: both must agree
     view = _headless_view(poses)
     ch = view._character
     ref = take_pelvis_ref(poses)
     place, _travel = view._take_placement()
 
-    for k in (0, 2, 5):
+    seen, expected = [], []
+    for k in range(len(poses)):
         valid = ~np.isnan(poses[k]).any(1)
-        # the export's own root offset for this frame, back in capture units
-        skin_ref = ch._skin_matrices(poses[k], valid, pelvis_ref=ref)[0]
-        skin_own = ch._skin_matrices(poses[k], valid)[0]
-        _s, _pelvis, scale, Rz = ch._skin_matrices(poses[k], valid)
-        off_rig = skin_ref[ch.hips_idx][:3, 3] - skin_own[ch.hips_idx][:3, 3]
-        off_capture = (Rz.T @ off_rig) / scale
-        # what the view draws for the same frame: the posed pelvis, placed
-        drawn = ch.posed_joints(poses[k], valid)[int(Joint.PELVIS)] - place
-        assert np.allclose(drawn[:2], off_capture[:2], atol=1e-9), \
-            f"frame {k}: view {drawn[:2]} vs export {off_capture[:2]}"
+        # the export's own matrices for this frame, and the joints they carry
+        _mats, al = ch.pose_bone_matrices(poses[k], valid, None,
+                                          keep_root_motion=True,
+                                          pelvis_ref=ref, return_alignment=True)
+        skin = ch._skin_matrices(poses[k], valid)[0]
+        rig = ch._joints_from_skin(skin)
+        exported = (al.transform[:3, :3] @ rig.T).T + al.transform[:3, 3]
+        # what the view draws for the same frame
+        view.set_pose(poses[k])
+        drawn = view.drawn["char"][0]
+        for j in range(len(drawn)):
+            if np.isfinite(rig[j]).all() and np.isfinite(drawn[j]).all():
+                seen.append(drawn[j]); expected.append(exported[j])
+
+    seen, expected = np.asarray(seen), np.asarray(expected)
+    # the export is the view through one similarity: scale, no rotation, and a
+    # constant offset (the view seats on the ankle datum, the export on the
+    # pelvis). Solve for the offset and check the residual is numerical noise.
+    resid = expected - seen * ch._scale
+    assert np.abs(resid - resid.mean(0)).max() <= 1e-6 * ch.rig_h, \
+        f"view and export disagree by {np.abs(resid - resid.mean(0)).max():.6f} rig units"

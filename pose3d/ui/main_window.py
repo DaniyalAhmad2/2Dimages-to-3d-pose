@@ -583,6 +583,12 @@ class MainWindow(QMainWindow):
                     ("Character — rigged armature, matches the 3D view", res.fbx),
                     ("Motion capture", res.bvh)]
                 body = "\n\n".join(f"{lbl}:\n{p}" for lbl, p in items if p)
+                if res.preview_failed:
+                    # the files are correct and written; only the render is
+                    # missing, and saying so beats reporting a failed export
+                    body += ("\n\nThe preview video could not be rendered on "
+                             "this machine. The motion capture and character "
+                             "files above are complete.")
                 QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
             else:
                 # Say WHY, from the reason the export carries, instead of the
@@ -612,7 +618,13 @@ class MainWindow(QMainWindow):
             ext = json.loads((calib / "extrinsics.json").read_text())["left"]
             return {"K": intr.K.tolist(), "R": ext["R"], "t": ext["t"],
                     "image_size": list(intr.image_size)}
-        except Exception:
+        except FileNotFoundError:
+            return None                 # no calibration: normal, and silent
+        except Exception as e:
+            # a PRESENT but unreadable calibration is not normal, and losing
+            # the fixed-camera preview without a word is how it stays unnoticed
+            print(f"fixed-camera preview unavailable: the project's "
+                  f"calibration could not be read ({type(e).__name__}: {e})")
             return None
 
     def _toggle_fullscreen(self):
