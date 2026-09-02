@@ -13,7 +13,7 @@ from pose3d.core.skeleton import Joint
 from pose3d.export.blender_export import export_animation
 from tests import bvh_util
 from tests.gates import needs_blender, needs_character, needs_video_render
-from tests.synth import sample_skeleton_3d
+from tests.synth import rot_about, sample_skeleton_3d
 
 _BLENDER = blender_binary()
 
@@ -275,7 +275,6 @@ def _travelling_motion(n=6, step=0.06, turn_deg=8.0):
       take for a whole round. `turn_deg` per pose puts a comparable span
       (0-40 deg over six poses) into the fixture.
     """
-    from tests.synth import rot_about
     base = sample_skeleton_3d()
     pelvis = base[int(Joint.PELVIS)].copy()
     seq = []
@@ -567,8 +566,7 @@ def test_an_unknown_schedule_is_refused(tmp_path):
     "one_per_pose"`, so a typo silently selected the default — which in a
     phase about never substituting one output for another is the wrong
     direction to fail in."""
-    import pytest as _pytest
-    with _pytest.raises(ValueError) as e:
+    with pytest.raises(ValueError) as e:
         export_animation(_motion(), tmp_path, name="z", fps=30,
                          render_video=False, schedule="one-per-pose")
     assert "one_per_pose" in str(e.value)
