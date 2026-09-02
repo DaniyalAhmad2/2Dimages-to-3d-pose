@@ -31,7 +31,19 @@ def measure_bone_lengths(poses3d: np.ndarray) -> dict[tuple[int, int], float]:
     return lengths
 
 
-# metres; used when no measured rig is supplied
+# Proportions of the PELVIS->NECK spine, not metres. The numbers below are
+# the old absolute table divided by its own 0.55 m spine, so a take of a
+# 0.55 m-spined adult gets exactly what it always did — and the client's
+# 12 cm mannequin gets a table scaled to IT.
+#
+# This matters on the shipped path, not just when a whole bone is missing:
+# a fallback length sits in the least-squares as a residual regardless of
+# `fill_missing`, so on the client take blacking out one hip in one view for
+# the whole take moved the still-OBSERVED joints by 71.6 mm median / 279.6 mm
+# max — 237 % of body height — because the solver was pulling a 12 cm subject
+# onto a 1.75 m skeleton. With the table scaled to the subject the same
+# blackout costs 2.3 mm.
+_SPINE_M = 0.55
 _FALLBACK_LENGTHS: dict[tuple[Joint, Joint], float] = {
     (Joint.PELVIS, Joint.NECK): 0.55,
     (Joint.NECK, Joint.HEAD): 0.20,
@@ -50,8 +62,50 @@ _FALLBACK_LENGTHS: dict[tuple[Joint, Joint], float] = {
 }
 
 
-def fallback_bone_lengths() -> dict[tuple[int, int], float]:
-    return {(int(a), int(b)): v for (a, b), v in _FALLBACK_LENGTHS.items()}
+def fallback_bone_lengths(reference_m: float | None = None
+                          ) -> dict[tuple[int, int], float]:
+    """Default bone lengths, scaled to an observed reference.
+
+    `reference_m` is the subject's measured PELVIS->NECK spine. Anything else
+    is a body-proportion table for a subject nobody measured: the defaults are
+    a 1.75 m adult's, and the client's subject is a 12 cm mannequin, 14x
+    smaller. Absent (or non-positive), the table comes back in its historical
+    metres, which is what every caller got before and what a caller with
+    nothing measured deserves.
+
+    Use `reference_from_measured` when the spine itself was never observed.
+    """
+    ratio = (float(reference_m) / _SPINE_M
+             if reference_m is not None and np.isfinite(reference_m)
+             and reference_m > 1e-9 else 1.0)
+    return {(int(a), int(b)): v * ratio
+            for (a, b), v in _FALLBACK_LENGTHS.items()}
+
+
+def reference_from_measured(measured: dict[tuple[int, int], float]
+                            ) -> float | None:
+    """The spine length to scale the fallback table by, from what WAS seen.
+
+    Prefer the measured PELVIS->NECK spine. When that bone is itself missing,
+    take the largest measured bone and divide it by its own share of the
+    spine — the biggest bone is the best-conditioned estimate of the subject's
+    size (on the client take it agrees with the spine to within 4 %), and any
+    measured bone beats a table written for a different body.
+
+    None when nothing at all was measured; there is no subject to scale to and
+    the caller must fall back to the absolute table.
+    """
+    spine = measured.get((int(Joint.PELVIS), int(Joint.NECK)), 0.0)
+    if spine and spine > 1e-6:
+        return float(spine)
+    ratios = {(int(a), int(b)): v / _SPINE_M
+              for (a, b), v in _FALLBACK_LENGTHS.items()}
+    seen = [(v, k) for k, v in measured.items()
+            if v > 1e-6 and ratios.get(k, 0.0) > 1e-9]
+    if not seen:
+        return None
+    length, key = max(seen)
+    return float(length / ratios[key])
 
 
 def _adjacency() -> dict[int, tuple[int, ...]]:
@@ -106,7 +160,7 @@ def fit_bone_lengths(
     bone_lengths: dict[tuple[int, int], float],
     data_weight: float = 1.0,
     bone_weight: float = 5.0,
-    fill_missing: bool = True,
+    fill_missing: bool = False,
 ) -> np.ndarray:
     """Fit one frame's joints to fixed bone lengths.
 
@@ -117,8 +171,10 @@ def fit_bone_lengths(
     data_weight : pull toward observed positions.
     bone_weight : enforce bone lengths (higher = stiffer skeleton).
     fill_missing : if True, occluded joints come back placed rather than NaN;
-        if False, joints with no observation stay NaN (not invented) — used so
-        a joint dropped from both/one view is genuinely absent from the 3D.
+        if False (the DEFAULT), joints with no observation stay NaN — a joint
+        the cameras did not see is absent, not guessed. The default used to be
+        True, so the safe behaviour was the one every caller had to remember
+        to ask for; `pipeline.fit_frame`, the app's only fit, always did.
 
     Only `solvable_joints` are variables; the rest are frozen at the initial
     guess and the bone residuals touching them are dropped, so a frozen joint

@@ -11,18 +11,18 @@ disagree by construction.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 import numpy as np
 
 from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
-from pose3d.core.skeleton import NUM_JOINTS
+from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS
 from pose3d.detect.base import KeypointDetector
 from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
-    smooth_temporal,
+    reference_from_measured, smooth_temporal,
 )
 from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, triangulate_points,
@@ -455,7 +455,11 @@ class FitReport:
     """
     failed: int = 0                  # frames that fell back to the raw pose
     first_error: str | None = None
-    fallback_bones: int = 0          # bones never observed -> default length
+    # bones never observed in this take, by name -> a default proportion was
+    # used. Named, not counted: "2 bones fell back" does not tell the user
+    # whether it was the two collarbones (harmless) or both thighs (the whole
+    # lower body posed off a table).
+    fallback_bones: list[str] = field(default_factory=list)
     gaps_filled: int = 0             # joint-frames interpolated and flagged
 
     def note(self) -> str:
@@ -467,8 +471,9 @@ class FitReport:
                 f"shows their raw triangulation instead ({self.first_error})")
         if self.fallback_bones:
             parts.append(
-                f"{self.fallback_bones} bone(s) were never seen in this take, "
-                f"so a default body proportion was used for them")
+                f"{len(self.fallback_bones)} bone(s) were never seen in this "
+                f"take ({', '.join(self.fallback_bones)}), so a default body "
+                f"proportion — scaled to this subject — was used for them")
         if self.gaps_filled:
             parts.append(
                 f"{self.gaps_filled} joint(s) were missing for a single frame "
@@ -477,20 +482,27 @@ class FitReport:
         return "; ".join(parts)
 
 
-def bone_length_targets(project: ProjectData) -> tuple[dict, int]:
-    """(target length per bone, how many fell back to a default proportion).
+def bone_length_targets(project: ProjectData) -> tuple[dict, list[str]]:
+    """(target length per bone, the names of the bones that fell back).
 
     Measured as the median over the whole take — the subject's own skeleton,
     not a generic body — with a default proportion only where a bone was never
     observed at all. The single source of these numbers: the batch fit and the
     live manual-correction re-solve both call this, so they cannot drift.
+
+    The defaults are PROPORTIONS of the subject's own measured spine, not a
+    1.75 m adult's centimetres. A fallback length sits in the least-squares as
+    a residual whether or not the joint it belongs to is being solved for, so
+    an unmeasurable bone used to drag every observed joint around it toward a
+    skeleton 14x the size of the client's mannequin.
     """
     raw = np.stack([f.pose3d for f in project.frames]) if project.frames \
         else np.zeros((0, NUM_JOINTS, 3))
     measured = measure_bone_lengths(raw)
-    fb = fallback_bone_lengths()
-    n_fallback = sum(1 for v in measured.values() if v <= 1e-6)
-    return {k: (v if v > 1e-6 else fb[k]) for k, v in measured.items()}, n_fallback
+    fb = fallback_bone_lengths(reference_from_measured(measured))
+    fallen = [f"{JOINT_NAMES[a]}-{JOINT_NAMES[b]}"
+              for (a, b), v in measured.items() if v <= 1e-6]
+    return {k: (v if v > 1e-6 else fb[k]) for k, v in measured.items()}, fallen
 
 
 def fit_frame(pose3d: np.ndarray, bone_lengths: dict) -> np.ndarray:

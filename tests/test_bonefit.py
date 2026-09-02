@@ -4,8 +4,12 @@ Temporal smoothing has its own suite (tests/test_smoothing.py): the only
 guard it ever had here was that it reduced variance, which a lag does too,
 and that is how a 21.8 %-of-height defect stayed green.
 """
-import numpy as np
+from pathlib import Path
 
+import numpy as np
+import pytest
+
+from pose3d import pipeline
 from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
 from pose3d.geometry.bonefit import (
     fit_bone_lengths, measure_bone_lengths, solvable_joints,
@@ -186,3 +190,147 @@ def test_a_frozen_joint_cannot_drag_the_observed_ones():
     moved = np.linalg.norm(partial[int(Joint.LEFT_KNEE)]
                            - full[int(Joint.LEFT_KNEE)])
     assert moved < 1e-3, f"knee moved {1000 * moved:.2f} mm"
+
+
+# --- fallback lengths are proportions of THIS subject (F18) ----------------
+
+FIXTURE = Path(__file__).parent / "fixtures" / "client_take"
+
+
+def test_the_fallback_table_is_a_proportion_not_a_body():
+    """Ratios of the measured PELVIS-NECK spine, and the historical metres
+    when there is nothing to scale to."""
+    from pose3d.geometry.bonefit import fallback_bone_lengths
+
+    plain = fallback_bone_lengths()
+    assert plain[(int(Joint.PELVIS), int(Joint.NECK))] == 0.55   # as it was
+    assert plain[(int(Joint.LEFT_HIP), int(Joint.LEFT_KNEE))] == 0.43
+    assert fallback_bone_lengths(0.55) == plain                  # the anchor
+
+    # a 12 cm mannequin with a 41 mm spine gets a 41 mm spine, not 550 mm
+    small = fallback_bone_lengths(0.0411)
+    assert small[(int(Joint.PELVIS), int(Joint.NECK))] == pytest.approx(0.0411)
+    for k, v in small.items():
+        assert v == pytest.approx(plain[k] * 0.0411 / 0.55)
+    # and a reference that is not one is ignored rather than exploded
+    for bad in (None, 0.0, -1.0, float("nan")):
+        assert fallback_bone_lengths(bad) == plain
+
+
+def test_the_reference_survives_the_spine_itself_falling_back():
+    """No spine, no problem: the largest measured bone divided by its own
+    share of the spine.
+
+    On the client take that lands 15.7 % above the directly measured spine,
+    and it cannot do much better: the reference is recovered through an ADULT
+    proportion table, and this subject is a stylised mannequin whose thigh is
+    0.90 of its spine where the table says 0.78. Every measured bone implies a
+    spine of 43.9-48.9 mm against a true 41.1 mm, so the error is the
+    subject's proportions, not the choice of bone. 16 % beats the 1240 % that
+    an unscaled table was out by.
+    """
+    from pose3d.core.io_project import load_project
+    from pose3d.geometry.bonefit import reference_from_measured
+    from pose3d.quality import load_rig
+
+    project = load_project(FIXTURE)
+    pipeline.triangulate_project(project, load_rig(FIXTURE / "calibration"))
+    measured = measure_bone_lengths(
+        np.stack([f.pose3d for f in project.frames]))
+    direct = reference_from_measured(measured)
+    assert direct == pytest.approx(
+        measured[(int(Joint.PELVIS), int(Joint.NECK))])
+
+    without_spine = dict(measured)
+    without_spine[(int(Joint.PELVIS), int(Joint.NECK))] = 0.0
+    derived = reference_from_measured(without_spine)
+    assert abs(derived - direct) / direct < 0.20      # today 15.7 %
+    # nothing measured at all: there is no subject to scale to
+    assert reference_from_measured({k: 0.0 for k in measured}) is None
+
+
+def test_fallback_lengths_scale_to_the_subject():
+    """Black out one hip in one view for a WHOLE take and the joints that were
+    still observed must barely move.
+
+    The fallback residuals sit in the least-squares whether or not the joint
+    they belong to is being solved for, so an unmeasurable bone drags every
+    observed joint around it. Measured on the committed fixture (a 119 mm
+    subject), blacking out the right hip in the left view for all 26 frames:
+    the other joints moved 18.95 mm median / 190.73 mm max — 16 % and 160 % of
+    body height — because the solver was pulling a 12 cm mannequin onto a
+    1.75 m skeleton. Scaled to the subject's own 41 mm spine the same blackout
+    costs 0.04 mm median, 1.74 mm p99, 6.99 mm max.
+    """
+    from pose3d.core.io_project import load_project
+    from pose3d.core.project import CAM_LEFT
+    from pose3d.geometry.bonefit import fallback_bone_lengths
+    from pose3d.quality import load_rig
+
+    rig = load_rig(FIXTURE / "calibration")
+
+    def fit(blackout=None, scaled=True):
+        project = load_project(FIXTURE)
+        if blackout is not None:
+            for f in project.frames:
+                f.kp2d[CAM_LEFT][int(blackout)] = np.nan
+                f.scores[CAM_LEFT][int(blackout)] = 0.0
+        pipeline.triangulate_project(project, rig)
+        targets, fell = pipeline.bone_length_targets(project)
+        if not scaled:                     # the pre-6.3 absolute table
+            plain = fallback_bone_lengths()
+            measured = measure_bone_lengths(
+                np.stack([f.pose3d for f in project.frames]))
+            targets = {k: (v if v > 1e-6 else plain[k])
+                       for k, v in measured.items()}
+        pipeline.fit_project(project, bone_lengths=targets)
+        return np.stack([f.fitted3d for f in project.frames]), fell
+
+    clean, fell_clean = fit()
+    assert fell_clean == []                # nothing falls back on a good take
+
+    damaged, fell = fit(Joint.RIGHT_HIP)
+    assert "PELVIS-RIGHT_HIP" in fell and "RIGHT_HIP-RIGHT_KNEE" in fell
+
+    keep = [j for j in range(NUM_JOINTS) if j != int(Joint.RIGHT_HIP)]
+    moved = np.linalg.norm(damaged[:, keep] - clean[:, keep], axis=2)
+    moved = moved[np.isfinite(moved)]
+    assert np.median(moved) < 0.0005, np.median(moved)          # today 0.04 mm
+    assert np.percentile(moved, 99) < 0.0025, moved             # today 1.74 mm
+    assert moved.max() < 0.008, moved.max()                     # today 6.99 mm
+
+    # ...and the same blackout against the unscaled table, so this test cannot
+    # pass by measuring nothing
+    old, _ = fit(Joint.RIGHT_HIP, scaled=False)
+    old_moved = np.linalg.norm(old[:, keep] - clean[:, keep], axis=2)
+    old_moved = old_moved[np.isfinite(old_moved)]
+    assert old_moved.max() > 0.10, old_moved.max()              # today 190.7 mm
+
+
+def test_the_report_names_the_bones_that_fell_back():
+    """"2 bones fell back" does not say whether it was the two collarbones or
+    both thighs."""
+    from pose3d.core.io_project import load_project
+    from pose3d.core.project import CAM_LEFT
+    from pose3d.quality import load_rig
+
+    project = load_project(FIXTURE)
+    for f in project.frames:
+        f.kp2d[CAM_LEFT][int(Joint.RIGHT_HIP)] = np.nan
+    pipeline.triangulate_project(project, load_rig(FIXTURE / "calibration"))
+    report = pipeline.fit_project(project)
+
+    assert report.fallback_bones == ["PELVIS-RIGHT_HIP", "RIGHT_HIP-RIGHT_KNEE"]
+    note = report.note()
+    assert "PELVIS-RIGHT_HIP" in note and "2 bone(s)" in note
+
+
+def test_the_library_default_does_not_invent_joints():
+    """`fill_missing` defaults to False: the safe behaviour is the one a
+    caller gets by not thinking about it. `pipeline.fit_frame` — the app's
+    only fit — always passed False; every other caller had to remember."""
+    gt = sample_skeleton_3d()
+    target = measure_bone_lengths(gt[None])
+    raw = gt.copy()
+    raw[6] = np.nan
+    assert np.isnan(fit_bone_lengths(raw, target)[6]).all()
