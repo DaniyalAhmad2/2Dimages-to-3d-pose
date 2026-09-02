@@ -5,8 +5,13 @@ capsules along the bones + spheres at the joints) with the coloured skeleton
 (joints + bones) overlaid on top — matching the mockup's grey mannequin.
 
 The pose stands ON the grid (grid = ground): the world up-axis is detected from
-the skeleton (head vs ankles), mapped to view +Z, centred horizontally, and the
-sole beneath the lower ankle dropped to z = 0 (see `ground_datum`).
+the skeleton (head vs ankles), mapped to view +Z, and the figure placed by ONE
+rule for the whole take — centred on the take's pelvis and seated on the lowest
+sole the take reaches (see `ground_datum`, `Character.take_pelvis_ref`). Placing
+per frame instead is what used to discard the subject's translation here while
+the exported file discarded it by a different rule again; one take-wide rigid
+placement is the same rule `pose_bone_matrices(keep_root_motion=True)` gives the
+export, so the preview and the delivered file agree frame for frame.
 Unit-agnostic (metres or centimetres).
 """
 from __future__ import annotations
@@ -92,6 +97,8 @@ class View3D(gl.GLViewWidget):
         self._show_body = True
         self._show_capture = False
         self._character = None          # lazily-loaded skinned character
+        self._take = None               # the whole take, raw world poses
+        self._place = None              # (offset (3,), pelvis travel) in view space
         self._framed = False
         self._vaxis = None
         self._vsign = 1.0
@@ -106,6 +113,7 @@ class View3D(gl.GLViewWidget):
         de-tilt so the figure stands upright. None -> per-frame auto-detect."""
         self._R = None if R is None else np.asarray(R, float).reshape(3, 3)
         self._vaxis = None
+        self._place = None              # view space moved: re-measure the take
         self._framed = False
 
     def fit_subject(self, poses):
@@ -115,15 +123,74 @@ class View3D(gl.GLViewWidget):
         `poses` are raw world poses; they get de-tilted here exactly as
         set_pose() does."""
         try:
-            if self._character is None:
-                from pose3d.geometry.character import Character
-                self._character = Character()
-            poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
-            if self._R is not None:
-                poses = poses @ self._R.T
-            self._character.fit_to_subject(poses)
+            self._ensure_character()
+            raw = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
+            self._take = raw
+            self._place = None
+            self._character.fit_to_subject(
+                raw @ self._R.T if self._R is not None else raw)
         except Exception:
             pass
+
+    def _ensure_character(self):
+        if self._character is None:
+            from pose3d.geometry.character import Character
+            self._character = Character()
+        return self._character
+
+    def _take_placement(self):
+        """(offset (3,), pelvis travel) placing the WHOLE take, in view space.
+
+        One rigid offset for the sequence, not one per frame:
+          * horizontally, the take's pelvis (`take_pelvis_ref`) — the old rule
+            re-centred on the mean of the valid joints every frame, which moves
+            against the pelvis by up to 5.8 % of body height and quietly
+            deleted the subject's travel;
+          * vertically, Phase 2's ankle datum — the sole beneath the lower
+            ankle, never the lowest mesh vertex — taken at its LOWEST over the
+            take, so the grid is the ground the subject actually stood on and
+            the figure rises off it when the subject did instead of being
+            re-seated frame by frame (that re-seating was a 34 % of rig height
+            swing the export had no counterpart for).
+
+        (None, 0.0) when the take is not known yet — a single `set_pose` with
+        no `fit_subject` still draws, on the old per-frame rule.
+
+        Costs one posing pass per frame of the take, ONCE, cached until the
+        take or the orientation changes. The app's takes are photographed
+        poses (26 on the client's), so that is milliseconds.
+        """
+        if self._place is not None:
+            return self._place
+        if self._take is None:
+            return None, 0.0
+        try:
+            from pose3d.geometry.character import take_pelvis_ref
+            ch = self._ensure_character()
+            up = self._to_view(self._take)
+            ref = take_pelvis_ref(up)
+            if ref is None:
+                return None, 0.0
+            seats, pelvis = [], []
+            for pose in up:
+                valid = ~np.isnan(pose).any(1)
+                if not valid.any():
+                    continue
+                vpose = np.where(valid[:, None], pose, np.nan)
+                verts, _faces, cj = ch.pose_and_joints(vpose, valid)
+                if verts is None or not len(verts):
+                    continue
+                seats.append(ground_datum(verts, cj, ch.ground_drop(vpose, valid)))
+                pelvis.append(take_pelvis_ref(pose[None]))
+            if not seats:
+                return None, 0.0
+            offset = np.array([ref[0], ref[1], float(min(seats))])
+            pel = np.asarray([p for p in pelvis if p is not None], float)
+            travel = float(np.linalg.norm(pel.max(0) - pel.min(0))) if len(pel) else 0.0
+            self._place = (offset, travel)
+        except Exception:
+            return None, 0.0
+        return self._place
 
     def _to_view(self, pts):
         """World -> view rotation. Shape-agnostic: used for the canonical
@@ -146,6 +213,7 @@ class View3D(gl.GLViewWidget):
     def reframe(self):
         self._framed = False
         self._vaxis = None
+        self._place = None
 
     def set_projection(self, mode: str):
         """'Perspective' or 'Orthographic' (approximated via a narrow FOV)."""
@@ -172,21 +240,28 @@ class View3D(gl.GLViewWidget):
 
         v = self._to_view(pose3d)
         vv = v[valid]
-        # centre horizontally; ground tentatively on the lowest joint (the ankle,
-        # since feet aren't detected)
-        cx, cy = vv[:, 0].mean(), vv[:, 1].mean()
-        v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= vv[:, 2].min()
+        place, travel = self._take_placement()
+        if place is not None:
+            # ONE placement for the whole take, so what moves on screen is the
+            # subject and nothing else — and it is the same rigid map the
+            # export applies (see `_take_placement`).
+            v = v - place
+        else:
+            # no take yet: centre horizontally and ground tentatively on the
+            # lowest joint (the ankle, since feet aren't detected)
+            cx, cy = vv[:, 0].mean(), vv[:, 1].mean()
+            v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= vv[:, 2].min()
 
-        # pose the character, then ground it on the sole under its lower ankle
-        # so the feet rest ON the plane instead of the ankle (feet would pierce
-        # it) without the ground sliding about frame to frame.
+        # pose the character, then (per-frame path only) ground it on the sole
+        # under its lower ankle so the feet rest ON the plane instead of the
+        # ankle, which would pierce it.
         vpose = np.where(valid[:, None], v, np.nan)
         # Same world->view rotation as the pose; the grounding translation is
         # deliberately NOT applied, because only a direction basis is read off
         # these and directions are translation-invariant.
         vhead = self._to_view(head3d) if head3d is not None else None
         verts, faces, cj, drop = self._skin(vpose, vhead)
-        if verts is not None and len(verts):
+        if place is None and verts is not None and len(verts):
             dz = ground_datum(verts, cj, drop)
             verts = verts.copy(); verts[:, 2] -= dz
             v[:, 2] -= dz
@@ -216,7 +291,10 @@ class View3D(gl.GLViewWidget):
         self._set_body(verts, faces)
 
         if not self._framed:
-            span = float(np.linalg.norm(ref.max(0) - ref.min(0))) or 1.0
+            # the figure PLUS how far it walks: framing on one frame's figure
+            # is what let a subject with real translation leave the grid the
+            # moment the view stopped re-centring on it every frame
+            span = (float(np.linalg.norm(ref.max(0) - ref.min(0))) + travel) or 1.0
             self._grid.setSize(span * 1.6, span * 1.6)
             self._grid.setSpacing(span / 8.0, span / 8.0)
             self.setCameraPosition(pos=Vector(0, 0, height * 0.5),
@@ -249,9 +327,7 @@ class View3D(gl.GLViewWidget):
         `set_pose` into the Qt slot.
         """
         try:
-            if self._character is None:
-                from pose3d.geometry.character import Character
-                self._character = Character()
+            self._ensure_character()
             valid = ~np.isnan(vpose).any(1)
             verts, faces, cj = self._character.pose_and_joints(
                 vpose, valid, vhead)

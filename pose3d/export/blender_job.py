@@ -40,6 +40,15 @@ def parse_args():
     p.add_argument("--no-video", action="store_true")
     p.add_argument("--name", default="pose3d")
     p.add_argument("--character", default="")   # .blend already opened as base
+    # one keyframe per photographed pose (export frame k+1 IS photograph k) or
+    # the 0.7 s hold / 0.3 s ease stop-motion. The schedule the app asks for is
+    # in the JSON; this flag is the command-line override.
+    p.add_argument("--schedule", choices=("one-per-pose", "stepped"),
+                   default=None)
+    # Without this, a character retarget that fails takes the whole export down
+    # loudly instead of writing a DIFFERENT animation under the same name.
+    p.add_argument("--allow-fallback", dest="allow_fallback",
+                   action="store_true")
     return p.parse_args(argv)
 
 
@@ -272,6 +281,13 @@ def export_fbx_mesh(objs, path):
         axis_forward="-Z", axis_up="Y")
 
 
+def _add_lights(center, diag, scene):
+    for pos in ((diag, -diag, diag * 2), (-diag, -diag, diag), (0, diag, diag)):
+        ld = bpy.data.lights.new("L", type="SUN"); ld.energy = 2.5
+        lo = bpy.data.objects.new("L", ld)
+        scene.collection.objects.link(lo); lo.location = center + Vector(pos)
+
+
 def _add_camera_light(center, diag, scene):
     tgt = bpy.data.objects.new("Tgt", None)
     scene.collection.objects.link(tgt); tgt.location = center
@@ -283,10 +299,36 @@ def _add_camera_light(center, diag, scene):
     con = cam.constraints.new("TRACK_TO")
     con.target = tgt; con.track_axis = "TRACK_NEGATIVE_Z"; con.up_axis = "UP_Y"
     scene.camera = cam
-    for pos in ((diag, -diag, diag * 2), (-diag, -diag, diag), (0, diag, diag)):
-        ld = bpy.data.lights.new("L", type="SUN"); ld.energy = 2.5
-        lo = bpy.data.objects.new("L", ld)
-        scene.collection.objects.link(lo); lo.location = center + Vector(pos)
+    _add_lights(center, diag, scene)
+
+
+def _add_fixed_camera(spec, diag, scene):
+    """The capture camera itself, already mapped into rig space by the host.
+
+    A turntable spin is exactly what makes "does the character follow the
+    keypoints?" unanswerable by eye — the viewpoint moves as much as the
+    subject does. The client's own comparison is photograph k against export
+    frame k, so render one from where the photograph was taken.
+    """
+    cam_data = bpy.data.cameras.new("FixedCam")
+    cam_data.clip_end = max(1000.0, diag * 40)
+    # the character is scaled into rig units, so the real camera stands tens of
+    # rig units away: near/far both scale with the figure rather than with metres
+    cam_data.clip_start = max(0.001, diag * 1e-3)
+    cam_data.sensor_fit = "HORIZONTAL"
+    cam_data.sensor_width = float(spec.get("sensor_mm", 36.0))
+    cam_data.lens = float(spec["lens_mm"])
+    cam_data.shift_x = float(spec.get("shift_x", 0.0))
+    cam_data.shift_y = float(spec.get("shift_y", 0.0))
+    cam = bpy.data.objects.new("FixedCam", cam_data)
+    scene.collection.objects.link(cam)
+    cam.matrix_world = Matrix(spec["matrix"])
+    scene.camera = cam
+    w, h = (int(v) for v in spec.get("image_size", (720, 720)))
+    long_side = 720.0
+    scene.render.resolution_x = max(2, int(round(long_side * min(1.0, w / max(w, h)))))
+    scene.render.resolution_y = max(2, int(round(long_side * min(1.0, h / max(w, h)))))
+    return cam
 
 
 def turntable_spin(objs, center, scene, seconds, fps):
@@ -307,7 +349,7 @@ def turntable_spin(objs, center, scene, seconds, fps):
     scene.frame_start = 1; scene.frame_end = total
 
 
-def render_mp4(path, scene, fps):
+def render_mp4(path, scene, fps, resolution=(720, 720)):
     scene.render.filepath = path
     r = scene.render.image_settings
     r.media_type = "VIDEO"          # 5.x: MUST come before file_format
@@ -321,8 +363,11 @@ def render_mp4(path, scene, fps):
         if eng in engines:
             scene.render.engine = eng
             break
-    scene.render.resolution_x = 720
-    scene.render.resolution_y = 720
+    # None leaves whatever the caller set, which is how the fixed-camera pass
+    # keeps the capture's own image aspect instead of a forced square
+    if resolution is not None:
+        scene.render.resolution_x = int(resolution[0])
+        scene.render.resolution_y = int(resolution[1])
     bpy.ops.render.render(animation=True)
 
 
@@ -419,7 +464,7 @@ def _prep_rig(arm):
         pb.scale = (1.0, 1.0, 1.0)
 
 
-def _drive_character_bones_fk(arm, data, scene, schedule):
+def _drive_character_bones_fk(arm, data, scene, schedule, pin_root=False):
     """Pose the rig from the app's own bone matrices, hierarchy intact.
 
     Each bone is given the exact world transform the app's skinning computed, so
@@ -427,8 +472,16 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
     (see _prep_rig) the hierarchy can represent that exactly, and the result is
     still a normal re-poseable, retargetable armature rather than a flattened
     bone soup.
+
+    `pin_root` subtracts the take's root motion (`root_offsets`, the rigid
+    translation the host added to every bone) so the figure animates in place.
+    The turntable render wants that — a subject who walks more than its own
+    height would spin its way out of frame — while the BVH/FBX and the
+    fixed-camera render want the travel. It is a translation of the whole rig,
+    so removing it changes no rotation and no pose.
     """
     bone_frames = data["bone_frames"]
+    offsets = data.get("root_offsets") or []
     n = len(bone_frames)
     # the npz (which produced these matrices) and this .blend are read by two
     # separate code paths; if they have drifted apart, say so instead of
@@ -445,18 +498,42 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
         schedule = [[fi + 1] for fi in range(n)]
     _prep_rig(arm)
     order = _pose_hierarchy_order(arm)
+    # Bones the app never drives — IK helpers like `shin.L.001`, and anything
+    # else a replacement rig carries. They are PINNED at their rest transform
+    # and keyframed there, not omitted: dropping a bone changes the exported
+    # armature's topology, which the FBX writer, this module's own name lookups
+    # and every downstream retarget depend on. Left unpinned they are what
+    # carried 42.5 % of rig height of translation in the file the client got.
+    undriven = [nm for nm in order if nm not in (sample or {})]
+    if undriven:
+        print(f"pinning {len(undriven)} undriven bone(s) at rest: "
+              f"{undriven[:6]}")
     arm_inv = arm.matrix_world.inverted()
     for pb in arm.pose.bones:
         pb.rotation_mode = "QUATERNION"
 
     last = None
+    last_off = None
     for fi in range(n):
         mats = bone_frames[fi] if bone_frames[fi] is not None else last
         if mats is None:
             continue
         last = mats
+        off = offsets[fi] if fi < len(offsets) else None
+        if off is None:
+            off = last_off
+        last_off = off
+        undo = (Matrix.Translation(-Vector(off))
+                if (pin_root and off) else None)
         for f in schedule[fi]:
             scene.frame_set(f)
+            for name in undriven:
+                pb = arm.pose.bones.get(name)
+                if pb is None:
+                    continue
+                pb.location = (0.0, 0.0, 0.0)
+                pb.rotation_quaternion = (1.0, 0.0, 0.0, 0.0)
+                pb.scale = (1.0, 1.0, 1.0)
             for name in order:
                 pb = arm.pose.bones.get(name)
                 M = mats.get(name)
@@ -465,7 +542,10 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
                 # set the bone's full world transform, exactly as the app
                 # computed it (parents first, so each child reads a settled
                 # parent). Scale inheritance is off, so this is representable.
-                pb.matrix = arm_inv @ Matrix(M)
+                W = Matrix(M)
+                if undo is not None:
+                    W = undo @ W
+                pb.matrix = arm_inv @ W
                 bpy.context.view_layer.update()
             for name in order:
                 pb = arm.pose.bones.get(name)
@@ -475,7 +555,8 @@ def _drive_character_bones_fk(arm, data, scene, schedule):
                 pb.keyframe_insert("rotation_quaternion", frame=f)
 
 
-def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
+def _retarget_character(arm, rframes, joint_names, scene, schedule=None,
+                        keep_root_motion=True):
     import math
     idx = {n: i for i, n in enumerate(joint_names)}
 
@@ -515,14 +596,31 @@ def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
 
     if schedule is None:
         schedule = [[fi + 1] for fi in range(len(rframes))]
+    # The take's pelvis, once, so the subject's travel survives — the same rule
+    # `Character.pose_bone_matrices(keep_root_motion=True)` applies on the
+    # primary path. Re-centring on each frame's own pelvis (what this did) is
+    # what gave the delivered file a hips translation range of exactly zero.
+    ref = None
+    if keep_root_motion:
+        # the first frame that HAS a pelvis: frame 0's could be the one that
+        # dropped out, and `pelvis_of` answers the origin for those
+        ref = next((pelvis_of(fr) for fr in rframes
+                    if fr[idx["PELVIS"]] is not None
+                    or fr[idx["LEFT_HIP"]] is not None
+                    or fr[idx["RIGHT_HIP"]] is not None), None)
+    pb = arm.pose.bones
+    hips_rest = arm.data.bones["hips"].matrix_local.copy()
+    arm_inv = arm.matrix_world.inverted()
     last = {}
     for fi, fr in enumerate(rframes):
         pv = pelvis_of(fr)
+        origin = pv if ref is None else ref
+        root_off = Vector((0, 0, 0)) if ref is None else (Rz @ (pv - ref)) * scale
         pos = {}
         for n in joint_names:
             p = fr[idx[n]]
             if p is not None:
-                w = hips_world + (Rz @ (Vector(p) - pv)) * scale
+                w = hips_world + (Rz @ (Vector(p) - origin)) * scale
                 last[n] = w
             else:
                 w = last.get(n, hips_world)     # hold last known if occluded
@@ -531,10 +629,16 @@ def _retarget_character(arm, rframes, joint_names, scene, schedule=None):
             for n in joint_names:
                 empties[n].location = pos[n]
                 empties[n].keyframe_insert("location", frame=f)
+            if "hips" in pb:
+                # Keyframed, not COPY_LOCATION'd onto the pelvis empty: the
+                # constraint pinned the hips to a point that by construction
+                # never moved, and a keyed channel needs no bake to survive.
+                scene.frame_set(f)
+                world = (Matrix.Translation(root_off)
+                         @ arm.matrix_world @ hips_rest)
+                pb["hips"].matrix = arm_inv @ world
+                pb["hips"].keyframe_insert("location", frame=f)
 
-    pb = arm.pose.bones
-    if "hips" in pb:
-        pb["hips"].constraints.new("COPY_LOCATION").target = empties["PELVIS"]
     for bone, tgt in _RIG_TRACK:
         if bone in pb and tgt in empties:
             # aim only (no stretch) so the exported character keeps its natural
@@ -585,6 +689,22 @@ def _export_character_fbx(objs, path):
         apply_unit_scale=True, global_scale=1.0, axis_forward="-Z", axis_up="Y")
 
 
+def _write_frame_map(outdir, name, schedule):
+    """<name>_frames.json: captured pose index -> [first, last] export frame.
+
+    Written ONLY for the stepped schedule, where the 1 + 30*k offset is real
+    and a consumer cannot guess it. On the default one-frame-per-pose schedule
+    export frame k+1 IS photograph k, and a file restating that is one more
+    thing to keep in sync for no information.
+    """
+    import json as _json
+    import os
+    path = os.path.join(outdir, name + "_frames.json")
+    with open(path, "w") as fh:
+        _json.dump({str(i): [f[0], f[-1]] for i, f in enumerate(schedule)}, fh)
+    print(f"wrote {path}")
+
+
 def character_main(data, args, scene):
     frames = [[(None if p is None else tuple(p)) for p in fr]
               for fr in data["frames"]]
@@ -603,9 +723,16 @@ def character_main(data, args, scene):
 
     scene.render.fps = args.fps
     n = len(rframes)
-    # multi-frame: hold each captured pose then ease to the next (stop-motion);
-    # single pose: one frame (spun as a turntable below).
-    schedule, total = _stepped_schedule(n, args.fps) if n > 1 else (None, 1)
+    # THE FILES: one keyframe per photographed pose, so export frame k+1 is
+    # photograph k and nothing has to know about a 30-frame stride. The stepped
+    # stop-motion hold is still available (and is what the mp4 uses), and with
+    # keep_root_motion off it reproduces the file the client already has.
+    kind = args.schedule or data.get("schedule") or "one-per-pose"
+    kind = "stepped" if str(kind).replace("_", "-") == "stepped" else "one-per-pose"
+    if n > 1 and kind == "stepped":
+        file_schedule, file_total = _stepped_schedule(n, args.fps)
+    else:
+        file_schedule, file_total = None, n
 
     enable_addons()
     import os
@@ -613,31 +740,83 @@ def character_main(data, args, scene):
     bvh_path = os.path.join(args.outdir, args.name + ".bvh")
     fbx_path = os.path.join(args.outdir, args.name + ".fbx")
 
-    if data.get("bone_frames") is not None:
+    have_bones = data.get("bone_frames") is not None
+    if not have_bones and not args.allow_fallback:
+        raise RuntimeError(
+            "the export document carries no bone_frames, so the character "
+            "cannot be posed the way the 3D view poses it")
+    if have_bones:
         # Rotation-only FK with the hierarchy intact. The app skins the character
         # the same way (no stretch), so this single armature is BOTH an exact
         # match to the 3D view and a normal re-poseable/retargetable rig.
-        _drive_character_bones_fk(arm, data, scene, schedule)
-        scene.frame_start = 1; scene.frame_end = total
+        _drive_character_bones_fk(arm, data, scene, file_schedule)
+        scene.frame_start = 1; scene.frame_end = file_total
         export_bvh(arm, bvh_path, scene)
         _export_character_fbx([arm] + meshes, fbx_path)
     else:
         # fallback: aim-only Damped-Track retarget from joint positions
-        _retarget_character(arm, rframes, joint_names, scene, schedule=schedule)
-        scene.frame_start = 1; scene.frame_end = total
+        _retarget_character(arm, rframes, joint_names, scene,
+                            schedule=file_schedule)
+        scene.frame_start = 1; scene.frame_end = file_total
         _bake_and_clean(arm, scene)
         export_bvh(arm, bvh_path, scene)
         _export_character_fbx([arm] + meshes, fbx_path)
+    if file_schedule is not None:
+        _write_frame_map(args.outdir, args.name, file_schedule)
 
     if not args.no_video:
-        center, diag = _character_bounds(meshes)
-        _add_camera_light(center, diag, scene)
-        # spin exactly once over the whole clip so it never gets "stuck" after
-        # the poses finish; a lone pose gets a 6 s turntable.
-        secs = total / args.fps if n > 1 else 6
-        turntable_spin([arm], center, scene, seconds=secs, fps=args.fps)
-        render_mp4(os.path.join(args.outdir, args.name + ".mp4"), scene, args.fps)
+        _render_videos(arm, meshes, data, args, scene, n, have_bones,
+                       file_schedule, file_total)
     return True
+
+
+def _render_videos(arm, meshes, data, args, scene, n, have_bones,
+                   file_schedule, file_total):
+    """The previews: the capture camera's own view, then the turntable.
+
+    In that order because the turntable parents the armature to a spinning
+    empty, which there is no reason to undo afterwards. Both are rendered from
+    the STEPPED schedule whatever the files use — a 26-frame clip at 30 fps is
+    under a second of video — and the turntable alone pins the root motion back
+    out, because a subject who travels more than its own height would otherwise
+    spin straight out of frame.
+    """
+    import os
+    if have_bones:
+        video_schedule, total = (_stepped_schedule(n, args.fps) if n > 1
+                                 else (None, 1))
+    else:
+        # the aim-only fallback is baked, not re-poseable frame by frame here,
+        # so its video is whatever the files got
+        video_schedule, total = file_schedule, file_total
+    cam_spec = data.get("camera") if have_bones else None
+
+    def repose(pin_root):
+        if have_bones:
+            arm.animation_data_clear()
+            _drive_character_bones_fk(arm, data, scene, video_schedule,
+                                      pin_root=pin_root)
+        scene.frame_start = 1; scene.frame_end = total
+
+    if cam_spec is not None:
+        repose(pin_root=False)          # the travel is the point here
+        center, diag = _character_bounds(meshes)
+        _add_lights(center, diag, scene)
+        _add_fixed_camera(cam_spec, diag, scene)
+        render_mp4(os.path.join(args.outdir, args.name + "_camera.mp4"),
+                   scene, args.fps, resolution=None)
+        _delete([o for o in bpy.data.objects
+                 if o.name.startswith(("FixedCam", "L"))
+                 and o.type in ("CAMERA", "LIGHT")])
+
+    repose(pin_root=True)               # in place, so the spin is readable
+    center, diag = _character_bounds(meshes)
+    _add_camera_light(center, diag, scene)
+    # spin exactly once over the whole clip so it never gets "stuck" after
+    # the poses finish; a lone pose gets a 6 s turntable.
+    secs = total / args.fps if n > 1 else 6
+    turntable_spin([arm], center, scene, seconds=secs, fps=args.fps)
+    render_mp4(os.path.join(args.outdir, args.name + ".mp4"), scene, args.fps)
 
 
 def main():
@@ -648,12 +827,29 @@ def main():
     scene = bpy.context.scene
     # character mode: a rigged .blend was opened as the base file
     if args.character:
+        reason = None
         try:
             if character_main(data, args, scene):
                 print("POSE3D_EXPORT_OK")
                 return
+            reason = ("the opened .blend has no usable rig "
+                      "(no armature with a 'hips' pose bone)")
         except Exception as e:
-            print(f"character retarget failed ({e}); falling back to skeleton")
+            import traceback
+            traceback.print_exc()
+            reason = f"{type(e).__name__}: {e}"
+        # One loud, greppable line. What used to be here was a bare print and
+        # a fall-through to a DIFFERENT retarget, which the host then reported
+        # as a successful export: the client received a null-rooted stick
+        # figure under the character's name and nothing said so (F31).
+        print(f"POSE3D_EXPORT_FALLBACK: character retarget failed — {reason}")
+        if not args.allow_fallback:
+            print("POSE3D_EXPORT_FAILED: refusing to write a different "
+                  "animation under the same name; re-run with --allow-fallback "
+                  "to accept the aim-only skeleton retarget instead")
+            sys.exit(2)
+        print("POSE3D_EXPORT_FALLBACK: writing the skeleton figure instead, "
+              "because --allow-fallback was given")
 
     frames = [[(None if p is None else tuple(p)) for p in fr]
               for fr in data["frames"]]

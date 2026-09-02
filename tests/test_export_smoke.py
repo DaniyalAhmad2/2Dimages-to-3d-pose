@@ -10,6 +10,7 @@ import pytest
 
 from pose3d.config import blender_binary, character_blend
 from pose3d.export.blender_export import export_animation
+from tests import bvh_util
 from tests.gates import needs_blender, needs_character, needs_video_render
 from tests.synth import sample_skeleton_3d
 
@@ -127,12 +128,18 @@ DELIVERED_POSES = 26                  # the client take's 26 photographed poses
 DELIVERED_FRAMES = 772                # 1 + 25*30 + 21, at 30 fps
 RIG_HEIGHT = 14.4228                  # Character().rig_h for the bundled rig
 
-# The largest non-hips position channel in the delivered file, as a % of rig
-# height: an orphan IK helper bone carries the root motion that `to_rig` refuses
-# to give the hips. Phase 3 gives the hips real root motion and pins the helper
-# bones at rest; set this to 1.0 then and the assertion below is Phase 3's gate
-# unchanged.
-MAX_NON_HIPS_TRANSLATION_PCT = 42.5   # today 42.49 %, on shin.R.001
+# The largest non-hips position channel in the DELIVERED file, as a % of the
+# CURRENT rig's height: an orphan IK helper bone carried the root motion that
+# `to_rig` refused to give the hips. A historical fact about a file exported
+# before the rig swap, so it is asserted as history; Phase 3's live gate is
+# MAX_NON_HIPS_TRANSLATION_PCT on a fresh export.
+DELIVERED_HELPER_TRANSLATION_PCT = 42.5   # 42.49 %, on shin.R.001
+
+# Phase 3's gate, on a FRESH export: no bone but the hips may carry meaningful
+# translation. Measured 0.00003 % on the current 19-bone rig, which has no
+# helper bones at all; 1 % leaves room for a replacement rig whose helpers are
+# pinned at rest rather than left to float.
+MAX_NON_HIPS_TRANSLATION_PCT = 1.0
 
 
 @pytest.fixture(scope="module")
@@ -149,14 +156,22 @@ def test_the_delivered_file_is_one_stepped_frame_run_per_pose(delivered):
 
 
 def test_each_captured_pose_is_held_exactly(delivered):
-    """The stop-motion hold must be a hold: 21 frames of the same numbers, not
-    a slow drift that reads as the figure breathing."""
-    from tests import bvh_util
+    """The stop-motion hold must be a hold: 22 rows of the same numbers, not
+    a slow drift that reads as the figure breathing.
+
+    The run length is MEASURED off the file, not restated from the schedule
+    constant that generated it — comparing `last - first` against `HOLD` when
+    `last` came from `HOLD` says nothing about the file at all.
+    """
     for i, (first, last) in enumerate(bvh_util.stepped_holds(DELIVERED_POSES)):
-        block = delivered.motion[first:last + 1]
-        assert last - first == bvh_util.HOLD
-        assert np.array_equal(block, np.repeat(block[:1], len(block), axis=0)), \
-            f"pose {i}'s hold drifts by {np.abs(block - block[0]).max()}"
+        row = delivered.motion[first]
+        run = 0
+        while (first + run < delivered.n_frames
+               and np.array_equal(delivered.motion[first + run], row)):
+            run += 1
+        assert run == bvh_util.HOLD + 1, \
+            f"pose {i} holds for {run} rows, not {bvh_util.HOLD + 1}"
+        assert first + run == last + 1
 
 
 def test_the_hips_never_move_in_the_delivered_file(delivered):
@@ -177,9 +192,16 @@ def test_the_in_betweens_do_not_overshoot_the_poses_they_connect(delivered):
     assert float(overshoot.max()) <= 5.0    # today 3.795 deg
 
 
-def test_a_helper_bone_carries_the_root_motion(delivered):
-    """The translation the hips do not get has to go somewhere: it lands on an
-    orphan IK helper bone, which is not motion any importer will use."""
+def test_a_helper_bone_carried_the_root_motion_in_the_delivered_file(delivered):
+    """HISTORICAL, and pinned as history rather than as a live bound.
+
+    The translation the hips did not get had to go somewhere, and it landed on
+    an orphan IK helper bone — motion no importer will use. That file predates
+    the rig swap, so the 42.5 % below divides an OLD rig's channel by the
+    CURRENT rig's height and is not a number today's export can be gated on;
+    `test_helper_bones_are_pinned` gates a fresh export instead. What this
+    still asserts is the shape of the defect, on the file the client has.
+    """
     ranges = {}
     for j in delivered.joints:
         p = delivered.positions(j.name)
@@ -187,11 +209,9 @@ def test_a_helper_bone_carries_the_root_motion(delivered):
             ranges[j.name] = float(np.max(p.max(0) - p.min(0)))
     name, worst = max(ranges.items(), key=lambda kv: kv[1])
     pct = 100.0 * worst / RIG_HEIGHT
-    assert pct <= MAX_NON_HIPS_TRANSLATION_PCT, f"{name} carries {pct:.1f} %"
-    if MAX_NON_HIPS_TRANSLATION_PCT > 1.0:
-        # still today's file, so also pin the fact rather than just its bound
-        assert name == "shin.R.001"
-        assert pct >= 0.99 * MAX_NON_HIPS_TRANSLATION_PCT, f"{pct:.2f} %"
+    assert name == "shin.R.001"
+    assert 0.99 * DELIVERED_HELPER_TRANSLATION_PCT <= pct \
+        <= 1.01 * DELIVERED_HELPER_TRANSLATION_PCT, f"{name} carries {pct:.2f} %"
 
 
 @needs_character()
@@ -200,3 +220,245 @@ def test_the_recorded_rig_height_is_still_the_bundled_rigs():
     rig it came from and fail if that rig is replaced."""
     from pose3d.geometry.character import Character
     assert Character().rig_h == pytest.approx(RIG_HEIGHT, abs=0.001)
+
+
+# --- Phase 3: a FRESH export, which is what the client will now receive -----
+# Everything above this line reads the file the client already has. These read
+# a file this checkout produces, because that is the only way to assert on the
+# current rig and the current placement rule — and because the delivered file
+# predates the rig swap, so its numbers cannot gate today's code.
+
+def _travelling_motion(n=6, step=0.06):
+    """A take with real translation: the subject walks +x, arms swinging.
+
+    `_motion` above moves two wrists and nothing else, so it cannot tell an
+    export that keeps the subject's travel from one that pins it away — which
+    is exactly the defect (F13) these tests exist for.
+    """
+    base = sample_skeleton_3d()
+    seq = []
+    for i in range(n):
+        p = base.copy()
+        p[6, 0] -= 0.02 * i     # left wrist
+        p[7, 0] += 0.02 * i     # right wrist
+        p[:, 0] += step * i     # ...and the whole figure travels
+        seq.append(p)
+    return np.stack(seq)
+
+
+def _placement(seq):
+    """(character fitted to the take, upright poses, pelvis_ref) as the export
+    computes them — the reference the file has to reproduce."""
+    from pose3d.geometry.character import Character, take_pelvis_ref
+    from pose3d.geometry.orient import de_tilt_matrix, take_up
+    up, _source, _spread = take_up(seq, None)
+    R = de_tilt_matrix(up).T if up is not None else np.eye(3)
+    upright = np.asarray(seq, float) @ R
+    ch = Character()
+    ch.fit_to_subject(upright)
+    return ch, upright, take_pelvis_ref(upright)
+
+
+@pytest.fixture(scope="module")
+def fresh(tmp_path_factory):
+    """One fresh export of a travelling take, parsed: (seq, Bvh).
+
+    Module-scoped because it costs a Blender run and every assertion below is
+    about the same file.
+    """
+    out = tmp_path_factory.mktemp("fresh")
+    seq = _travelling_motion()
+    res = export_animation(seq, out, name="fresh", fps=30, render_video=False,
+                           timeout=500, character=_CHARACTER)
+    assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
+    return seq, bvh_util.parse(res.bvh)
+
+
+@needs_blender()
+@needs_character()
+def test_one_frame_per_pose_is_default(fresh):
+    """Export frame k+1 IS photograph k. The stepped schedule put pose k at
+    frame 1 + 30k, which nothing downstream could know without being told."""
+    seq, bvh = fresh
+    assert bvh.n_frames == len(seq)
+    assert bvh_util.keyframe_rows(bvh, len(seq)) == [(i, i) for i in range(len(seq))]
+
+
+@needs_blender()
+@needs_character()
+def test_root_motion_reaches_bvh(fresh, tmp_path):
+    """F13: the hips translation in the file must be the subject's own travel.
+
+    Measured as the DISTANCE the hips move between the first and last captured
+    pose, which is invariant to the yaw the retarget applies, against the same
+    distance in the capture through the character's fitted scale.
+    """
+    seq, bvh = fresh
+    ch, upright, ref = _placement(seq)
+    from pose3d.geometry.character import take_pelvis_ref
+    pel = np.stack([take_pelvis_ref(p[None]) for p in upright])
+    expected = float(np.linalg.norm(pel[-1] - pel[0])) * ch._scale
+    assert expected > 0.1 * ch.rig_h, "the fixture take does not travel"
+
+    rows = bvh_util.keyframe_rows(bvh, len(seq))
+    hips = bvh.positions("hips")
+    got = float(np.linalg.norm(hips[rows[-1][0]] - hips[rows[0][0]]))
+    assert abs(got - expected) <= 0.01 * expected, \
+        f"the file carries {got:.4f} rig units of hips travel, not {expected:.4f}"
+
+    # ...and with the flag off, exactly none: the rollback switch, thrown.
+    off = export_animation(seq, tmp_path, name="off", fps=30,
+                           render_video=False, timeout=500,
+                           character=_CHARACTER, keep_root_motion=False)
+    assert off.ok, off.stderr[-2000:]
+    h0 = bvh_util.parse(off.bvh).positions("hips")
+    assert np.array_equal(h0, np.repeat(h0[:1], len(h0), axis=0))
+
+
+@needs_blender()
+@needs_character()
+def test_helper_bones_are_pinned(fresh):
+    """No bone but the hips may carry meaningful translation.
+
+    A plain assertion, not an xfail: the delivered file put 42.5 % of rig
+    height on `shin.R.001`, and a bone the app never drives must be keyframed
+    at its rest transform — pinned, not omitted, because dropping a bone
+    changes the exported armature's topology.
+    """
+    _seq, bvh = fresh
+    ranges = {}
+    for j in bvh.joints:
+        p = bvh.positions(j.name)
+        if p.shape[1] == 3 and j.name != "hips":
+            ranges[j.name] = float(np.max(p.max(0) - p.min(0)))
+    name, worst = max(ranges.items(), key=lambda kv: kv[1])
+    pct = 100.0 * worst / RIG_HEIGHT
+    # measured 0.00003 % on the bundled 19-bone rig
+    assert pct <= MAX_NON_HIPS_TRANSLATION_PCT, f"{name} carries {pct:.3f} %"
+
+
+@needs_blender()
+@needs_character()
+def test_bvh_keyframes_match_the_view(fresh):
+    """The file holds the pose the app computed, placement included.
+
+    Forward kinematics off every captured keyframe against the rig the app
+    posed, after ONE global similarity fit for the whole take — one, because a
+    fit per keyframe forgives exactly the placement error this is looking for.
+    Measured 0.0000 % of body height.
+    """
+    seq, bvh = fresh
+    ch, upright, ref = _placement(seq)
+    names = [b.name for b in bvh.joints]
+    mapping = {j: bvh.index(ch.bone_names[b])
+               for j, (b, which) in ch._joint_src.items()
+               if which == "head" and ch.bone_names[b] in names}
+    assert len(mapping) >= 10
+
+    src, dst = [], []
+    for k, (row, _last) in enumerate(bvh_util.keyframe_rows(bvh, len(seq))):
+        valid = ~np.isnan(upright[k]).any(1)
+        skin = ch._skin_matrices(upright[k], valid, pelvis_ref=ref)[0]
+        rig = ch._joints_from_skin(skin)
+        fk = bvh.forward_kinematics(row)
+        for j, bi in mapping.items():
+            if valid[j] and np.isfinite(rig[j]).all():
+                src.append(fk[bi]); dst.append(rig[j])
+    err = bvh_util.similarity_error(np.asarray(src), np.asarray(dst))
+    height = float(np.median([np.ptp(p[~np.isnan(p).any(1), 2]) for p in upright]))
+    assert float(err.max()) <= 0.01 * height * ch._scale, \
+        f"{100 * err.max() / (height * ch._scale):.4f} % of body height"
+
+
+@needs_blender()
+@needs_character()
+def test_no_quaternion_flips(fresh):
+    """Consecutive keyframes must stay in one hemisphere: a flip is a bone
+    spinning the long way round between two poses. Measured 0 pairs."""
+    seq, bvh = fresh
+    rows = [a for a, _b in bvh_util.keyframe_rows(bvh, len(seq))]
+    flips = 0
+    for j in bvh.joints:
+        order = [c for c in j.channels if c.endswith("rotation")]
+        if not order:
+            continue
+        r = bvh.rotations(j.name)
+        keys = [bvh_util.euler_to_quat(r[a], order) for a in rows]
+        flips += sum(1 for q0, q1 in zip(keys, keys[1:])
+                     if float(np.dot(q0, q1)) < 0)
+    assert flips == 0
+
+
+@needs_blender()
+@needs_character()
+def test_inbetween_stays_on_the_arc(tmp_path):
+    """The eased transitions are fine and must stay fine.
+
+    Only the stepped schedule HAS in-betweens — that is the point of one frame
+    per pose — so this exports the mp4's schedule explicitly rather than
+    quietly measuring nothing.
+    """
+    seq = _travelling_motion()
+    res = export_animation(seq, tmp_path, name="st", fps=30, render_video=False,
+                           timeout=500, character=_CHARACTER,
+                           schedule="stepped")
+    assert res.ok, res.stderr[-2000:]
+    bvh = bvh_util.parse(res.bvh)
+    rows = bvh_util.keyframe_rows(bvh, len(seq))
+    assert bvh.n_frames == bvh_util.expected_frames(len(seq))
+    over = bvh_util.channel_overshoot(bvh, len(seq), holds=rows)
+    assert float(over.max()) <= 5.0        # delivered file measured 3.795 deg
+
+
+@needs_blender()
+@needs_character()
+def test_the_stepped_schedule_writes_a_frame_map(tmp_path):
+    """`<name>_frames.json` says which export frames a captured pose occupies —
+    written only where the 1 + 30k stride is real, since on the default
+    schedule it would restate `k -> k+1`."""
+    import json
+    seq = _travelling_motion(n=4)
+    res = export_animation(seq, tmp_path, name="fm", fps=30, render_video=False,
+                           timeout=500, character=_CHARACTER,
+                           schedule="stepped")
+    assert res.ok, res.stderr[-2000:]
+    doc = json.loads((tmp_path / "fm_frames.json").read_text())
+    assert doc["0"] == [1, 1 + bvh_util.HOLD]
+    assert doc["1"][0] == 1 + bvh_util.SEGMENT
+
+    plain = export_animation(seq, tmp_path, name="pl", fps=30,
+                             render_video=False, timeout=500,
+                             character=_CHARACTER)
+    assert plain.ok, plain.stderr[-2000:]
+    assert not (tmp_path / "pl_frames.json").exists()
+
+
+def test_missing_character_asset_reports(tmp_path):
+    """F31: a missing asset must be a FAILED export naming the asset, not a
+    different animation shipped under the same name.
+
+    No Blender needed, and deliberately so: the refusal happens before the
+    subprocess is launched, which is the only way it can be certain that
+    nothing was written.
+    """
+    missing = tmp_path / "no_such_character.blend"
+    res = export_animation(_motion(), tmp_path, name="x", fps=30,
+                           render_video=False, character=str(missing))
+    assert res.ok is False
+    assert res.reason == "character_asset_missing"
+    assert "no_such_character.blend" in res.message
+    assert not list(tmp_path.glob("x.*"))
+
+
+def test_the_substitute_export_needs_an_explicit_opt_in(tmp_path):
+    """The fallback still exists — it is simply no longer the default answer to
+    an exception. Asking for it is a decision the caller makes."""
+    missing = tmp_path / "gone.blend"
+    res = export_animation(_motion(), tmp_path, name="y", fps=30,
+                           render_video=False, character=str(missing),
+                           allow_fallback=True, blender="/nonexistent/blender")
+    # it got as far as trying to run Blender instead of refusing outright,
+    # and the result says out loud that what it would have written is not the
+    # character — the caller has to decide what to tell the user
+    assert res.reason == "blender_missing"
+    assert res.substituted is True

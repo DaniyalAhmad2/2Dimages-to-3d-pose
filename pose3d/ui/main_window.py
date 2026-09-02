@@ -22,10 +22,10 @@ class _ExportWorker(QThread):
     finished_res = Signal(object)          # ExportResult or Exception
 
     def __init__(self, poses, out, name, fps, display_frame, head3d=None,
-                 filled=None, recorded_up=None):
+                 filled=None, recorded_up=None, camera=None):
         super().__init__()
         self._a = (poses, out, name, fps, display_frame, head3d, filled,
-                   recorded_up)
+                   recorded_up, camera)
 
     def _on_line(self, line: str):
         if "Fra:" in line:
@@ -43,13 +43,21 @@ class _ExportWorker(QThread):
 
     def run(self):
         from pose3d.export.blender_export import export_animation
-        poses, out, name, fps, df, head3d, filled, recorded_up = self._a
+        poses, out, name, fps, df, head3d, filled, recorded_up, cam = self._a
         self.status.emit("Posing the character in Blender…")
         try:
+            # The delivered file's defaults: the subject's travel kept (the
+            # 3D view places the figure by the same take-wide rule), one
+            # keyframe per photographed pose, and no substitute animation if
+            # anything goes wrong. `camera` adds a preview rendered from the
+            # LEFT camera's own pose, which is the comparison the client makes.
             res = export_animation(poses, out, name=name, fps=fps,
                                    render_video=True, display_frame=df,
                                    head3d=head3d, filled=filled,
-                                   recorded_up=recorded_up,
+                                   recorded_up=recorded_up, camera=cam,
+                                   keep_root_motion=True,
+                                   schedule="one_per_pose",
+                                   allow_fallback=False,
                                    on_line=self._on_line)
         except Exception as e:      # surface any failure to the UI thread
             res = e
@@ -450,7 +458,8 @@ class MainWindow(QMainWindow):
         worker = _ExportWorker(poses, out, self.model.project.name,
                                self.model.project.fps, self.model.current,
                                head3d=heads, filled=filled,
-                               recorded_up=self._recorded_vertical())
+                               recorded_up=self._recorded_vertical(),
+                               camera=self._left_camera())
         self._export_worker = worker       # keep a reference
         worker.status.connect(prog.setLabelText)
 
@@ -461,17 +470,43 @@ class MainWindow(QMainWindow):
                 QMessageBox.critical(self, "Export failed", str(res))
             elif res.ok:
                 items = [
-                    ("Video", res.mp4),
+                    ("Video — turntable", res.mp4),
+                    ("Video — from the left camera's own position",
+                     res.mp4_camera),
                     ("Character — rigged armature, matches the 3D view", res.fbx),
                     ("Motion capture", res.bvh)]
                 body = "\n\n".join(f"{lbl}:\n{p}" for lbl, p in items if p)
                 QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
             else:
-                QMessageBox.critical(self, "Export failed",
-                                     (res.stderr or res.stdout or "")[-1500:])
+                # Say WHY, from the reason the export carries, instead of the
+                # tail of Blender's log: nothing was written on purpose, and
+                # the user needs to know that rather than guess.
+                QMessageBox.critical(
+                    self, "Export failed",
+                    res.message or (res.stderr or res.stdout or "")[-1500:])
 
         worker.finished_res.connect(_finished)
         worker.start()
+
+    def _left_camera(self):
+        """The LEFT camera's intrinsics + pose, or None.
+
+        Feeds the fixed-camera preview render: the same viewpoint the client's
+        photographs were taken from, so "does the character follow the
+        keypoints?" can be answered by looking. Absent calibration it is simply
+        not rendered — never a guessed viewpoint presented as the real one.
+        """
+        import json
+        from pathlib import Path
+        try:
+            calib = Path(self.model.project_dir) / "calibration"
+            from pose3d.calib.intrinsics import Intrinsics
+            intr = Intrinsics.load(calib / "left_intrinsics.json")
+            ext = json.loads((calib / "extrinsics.json").read_text())["left"]
+            return {"K": intr.K.tolist(), "R": ext["R"], "t": ext["t"],
+                    "image_size": list(intr.image_size)}
+        except Exception:
+            return None
 
     def _toggle_fullscreen(self):
         """Toggle the 3D view filling the app window (in-app, not a popup).
