@@ -21,7 +21,11 @@ if ! ls "$VENDOR"/blender-*-linux-x64.tar.xz >/dev/null 2>&1; then
     exit 1
 fi
 # Same staging step the Windows release runs, so both deliveries carry exactly
-# the checkpoints rtmlib asks for rather than a hand-copied guess.
+# the checkpoints rtmlib asks for rather than a hand-copied guess — both pose
+# models (Halpe-26, which the app detects with, and the COCO-17 fallback) and
+# the shared YOLOX detector. The image bakes the whole folder in, so nothing
+# downloads at the client's run time; docker/smoketest.py runs the same
+# pose3d.selftest check that fails on a missing one.
 PY="${POSE3D_PYTHON:-$ROOT/.venv/bin/python}"
 [ -x "$PY" ] || PY=python3
 if ! "$PY" tools/fetch_weights.py --out "$VENDOR/rtmlib-cache"; then

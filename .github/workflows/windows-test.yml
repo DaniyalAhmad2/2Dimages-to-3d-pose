@@ -55,7 +55,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/models
-          key: rtmlib-weights-balanced-lightweight-v1
+          key: rtmlib-weights-balanced-lightweight-halpe-v2
 
       - name: Fetch pose weights
         run: |

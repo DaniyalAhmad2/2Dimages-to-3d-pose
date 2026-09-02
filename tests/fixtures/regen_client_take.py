@@ -11,13 +11,22 @@ script is the record of how it was made:
 It writes
 
     client_take/project.json          the 26 frames' kp2d / scores / corrected
-                                      / pose3d / fitted3d, no images
+                                      / head2d / head_scores / pose3d /
+                                      head3d / fitted3d / filled, no images
     client_take/calibration/*.json    the shipped calibration, byte for byte
     client_take/aruco_corners.json    the DICT_6X6_250 tags detected in each
                                       real image, so calibration work needs
                                       neither the photographs nor a detector
 
 Nothing here runs at test time: the ArUco detection happens once, now.
+
+With `--redetect` the take is re-detected and re-reconstructed with the
+CURRENT detector and pipeline before being trimmed. That is how the fixture is
+re-baselined when either changes, and it is not optional when the DETECTOR
+changes: switching to the Halpe-26 layout (detect.rtmpose.USE_HALPE26) moves
+the reconstructed body height 0.1195 -> 0.1302 m, and every "% of body height"
+threshold in tests/test_client_regression.py with it. The source project is
+only read; the new poses exist in memory and land in the fixture.
 """
 from __future__ import annotations
 
@@ -58,8 +67,17 @@ def trim_project(doc: dict) -> dict:
     """The project the tests need: poses and flags, no image data."""
     out = {"name": doc["name"], "fps": doc["fps"],
            "calibration_ref": doc.get("calibration_ref"), "frames": []}
+    # what the stored 2D IS, so the fixture cannot be measured under the wrong
+    # convention: "halpe26"/"skull" says HEAD is the skull vertex rather than
+    # the nose, which is what the retarget branches on
+    for key in ("keypoint_model", "head_source", "pipeline_version",
+                "smoothing", "detector"):
+        if doc.get(key) is not None:
+            out[key] = doc[key]
     for f in doc["frames"]:
-        out["frames"].append({
+        head2d = f.get("head2d") or {}
+        head_scores = f.get("head_scores") or {}
+        trimmed = {
             "frame_id": f["frame_id"],
             # kept as relative placeholders: they say which photographs the
             # fixture came from, and nothing in the tests opens them
@@ -72,8 +90,59 @@ def trim_project(doc: dict) -> dict:
             "fitted3d": f["fitted3d"],
             "corrected": {c: [bool(v) for v in f["corrected"][c]]
                           for c in CAMERAS},
-        })
+        }
+        # the face keypoints orient the head; without them the fixture cannot
+        # measure the path the app actually runs
+        if head2d:
+            trimmed["head2d"] = {
+                c: [[_round(v, KP_DECIMALS) for v in row]
+                    for row in head2d.get(c, [])] for c in CAMERAS}
+            trimmed["head_scores"] = {
+                c: [_round(v, SCORE_DECIMALS)
+                    for v in head_scores.get(c, [])] for c in CAMERAS}
+        if f.get("head3d") is not None:
+            trimmed["head3d"] = f["head3d"]
+        if f.get("filled") is not None:
+            trimmed["filled"] = [bool(v) for v in f["filled"]]
+        out["frames"].append(trimmed)
     return out
+
+
+def redetect(source: Path, doc: dict) -> dict:
+    """Re-run detection and reconstruction on the take, in memory.
+
+    Everything the shipped import does — the current detector, the current
+    pipeline — with the source project only READ: what comes back is a
+    project.json document, not a folder. Slow (CPU-only ONNX over 52
+    photographs), which is why it is opt-in.
+    """
+    import tempfile
+
+    from pose3d.core.io_project import load_project, save_project
+    from pose3d.detect.rtmpose import RTMPoseDetector
+    from pose3d.pipeline import run_full
+    from pose3d.quality import load_rig
+
+    project = load_project(source)
+    det = RTMPoseDetector(mode="balanced", device="cpu", feet=True)
+    project.detector = f"rtmpose-{det.mode}" + ("-feet" if det.feet else "")
+    project.head_source = getattr(det, "head_source", "nose")
+    print(f"  detecting {len(project.frames)} frames x {len(CAMERAS)} cameras "
+          f"with {project.detector} ({project.head_source} HEAD)…", flush=True)
+    report = run_full(project, det, load_rig(source / "calibration"),
+                      lambda p: cv2.imread(str(p)))
+    print(f"  {report.note() or 'fit clean'}")
+
+    with tempfile.TemporaryDirectory() as tmp:
+        new_doc = json.loads((save_project(project, Path(tmp))
+                              / "project.json").read_text())
+    # save_project stored absolute image paths (the images live in the source,
+    # not in the temp folder); the fixture wants the source's own relative
+    # placeholders back
+    images = {f["frame_id"]: f.get("images", {}) for f in doc["frames"]}
+    for f in new_doc["frames"]:
+        f["images"] = dict(images.get(f["frame_id"], {}))
+    return new_doc
 
 
 def detect_aruco(source: Path, doc: dict) -> dict:
@@ -106,10 +175,16 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("source", nargs="?", default=str(DEFAULT_SOURCE),
                     help=f"project folder to copy (default: {DEFAULT_SOURCE})")
+    ap.add_argument("--redetect", action="store_true",
+                    help="re-detect and re-reconstruct with the current "
+                         "detector and pipeline first (slow; re-baselines "
+                         "tests/test_client_regression.py)")
     args = ap.parse_args(argv)
 
     source = Path(args.source)
     doc = json.loads((source / "project.json").read_text())
+    if args.redetect:
+        doc = redetect(source, doc)
 
     FIXTURE.mkdir(parents=True, exist_ok=True)
     (FIXTURE / "calibration").mkdir(exist_ok=True)

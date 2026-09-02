@@ -127,6 +127,8 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
         "marker_length": project.marker_length,
         "detector": project.detector,
         "keypoint_model": project.keypoint_model,
+        # what the stored HEAD point is: see ProjectData.head_source
+        "head_source": project.head_source,
         "frames": [],
     }
     for f in project.frames:
@@ -178,6 +180,9 @@ def load_project(folder: str | Path) -> ProjectData:
         calibration_ref=doc.get("calibration_ref"), frames=frames,
         smoothing=doc.get("smoothing") or "none",
         keypoint_model=doc.get("keypoint_model") or "coco17",
+        # absent -> "nose": every project written before the key existed was
+        # detected with COCO-17, whose HEAD is the nose
+        head_source=doc.get("head_source") or "nose",
         # 0, not PIPELINE_VERSION: a file written before the key existed was
         # produced by the causal-EMA build and must be recomputed on open.
         pipeline_version=int(doc.get("pipeline_version", 0)),
