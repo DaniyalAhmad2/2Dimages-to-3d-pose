@@ -112,6 +112,40 @@ def sequence_up(poses: np.ndarray):
     return m / n if n > 1e-9 else None
 
 
+# A recorded vertical is three proxies averaged (geometry/gravity.py); their
+# pairwise spread is its uncertainty and is 8-14 deg on the client's rig. Above
+# this the proxies are not describing the same axis, so the subject's own body
+# line is the better answer.
+RECORDED_UP_MAX_SPREAD_DEG = 20.0
+
+
+def take_up(poses, recorded=None):
+    """The up-vector a whole take should be levelled on.
+
+    `recorded` is (up, source, spread_deg) as written at calibration time and
+    read back by `calib.resolve.load_world_up`, or None. It is preferred when
+    present and confident, because it is a property of the ROOM: it keeps a
+    lean held for the whole take, which `sequence_up` cannot (it averages the
+    lean away by construction).
+
+    Returns (up, source, spread_deg) — `source` is a label for the UI and
+    `spread_deg` is None when the answer came from the subject. A project
+    calibrated before the vertical was recorded gets exactly today's answer,
+    bit for bit.
+    """
+    if recorded is not None:
+        up, source, spread = recorded
+        if up is not None and spread is not None \
+                and spread <= RECORDED_UP_MAX_SPREAD_DEG:
+            up = np.asarray(up, float).ravel()
+            n = float(np.linalg.norm(up))
+            if n > 1e-9:
+                return up / n, source, float(spread)
+    if poses is None:
+        return None, "subject", None
+    return sequence_up(poses), "subject", None
+
+
 def de_tilt_matrix(up: np.ndarray) -> np.ndarray:
     """Minimal proper rotation (3x3) mapping the up-vector onto +Z.
 
@@ -119,6 +153,12 @@ def de_tilt_matrix(up: np.ndarray) -> np.ndarray:
     forward/side tilt WITHOUT spinning the figure's facing or mirroring it (a
     raised left hand stays a left hand). For an already-upright sequence this is
     ~identity.
+
+    ONE constant rotation is applied to the whole take, whatever `up` came
+    from. That is the guarantee the levelling rests on: the subject's per-frame
+    lean (10.83 deg median, 21.10 deg max on the client's take) passes through
+    untouched to 1.5e-11 deg, and only the take-wide tilt moves. Anything that
+    made this per-frame would be flattening the performance.
     """
     up = np.asarray(up, float)
     up = up / (np.linalg.norm(up) + 1e-12)

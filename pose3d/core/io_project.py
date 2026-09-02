@@ -124,6 +124,8 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
         # needs recomputing (pose3d.core.project.PIPELINE_VERSION)
         "pipeline_version": int(project.pipeline_version),
         "smoothing": project.smoothing,
+        "marker_length": project.marker_length,
+        "detector": project.detector,
         "keypoint_model": project.keypoint_model,
         "frames": [],
     }
@@ -179,6 +181,9 @@ def load_project(folder: str | Path) -> ProjectData:
         # 0, not PIPELINE_VERSION: a file written before the key existed was
         # produced by the causal-EMA build and must be recomputed on open.
         pipeline_version=int(doc.get("pipeline_version", 0)),
+        # absent in projects written before it was recorded
+        marker_length=doc.get("marker_length"),
+        detector=doc.get("detector"),
     )
     project.corrections = _read_corrections(folder)
     return project

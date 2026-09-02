@@ -49,8 +49,13 @@ def looks_assumed(intr) -> bool:
             and abs(K[0, 2] - w / 2.0) < 1.0 and abs(K[1, 2] - h / 2.0) < 1.0)
 
 
-def check_rig(rig) -> list[str]:
-    """Warnings about a calibration that will distort the 3D reconstruction."""
+def check_rig(rig, world_up=None) -> list[str]:
+    """Warnings about a calibration that will distort the 3D reconstruction.
+
+    `world_up` is the recorded vertical, (up, source, spread_deg), when the
+    project has one — it changes what the world frame's tilt COSTS, so it
+    changes the warning.
+    """
     if rig is None:
         return []
     msgs: list[str] = []
@@ -59,13 +64,20 @@ def check_rig(rig) -> list[str]:
     if tilt is not None and tilt > _TILT_WARN_DEG:
         # The world frame's up comes from one ArUco tag, and tags taped at
         # different rotations define different ups, so this is not on its own
-        # a reason to distrust the reconstruction — the view levels on the
-        # subject instead (orient.sequence_up). Say what it costs.
-        msgs.append(
-            f"Calibration's nominal up is {tilt:.0f}° off vertical — the world "
-            f"frame comes from one marker tag, whose rotation is arbitrary. "
-            f"The 3D view levels on the subject instead, so a lean held for "
-            f"the whole take will read as upright.")
+        # a reason to distrust the reconstruction. What matters is what the
+        # view levels on INSTEAD, so say that, and say what it costs.
+        if world_up is not None and world_up[0] is not None:
+            msgs.append(
+                f"Calibration's nominal up is {tilt:.0f}° off vertical — the "
+                f"world frame comes from one marker tag, whose rotation is "
+                f"arbitrary. The 3D view uses the vertical recorded from the "
+                f"{world_up[1]} instead (±{world_up[2]:.0f}°).")
+        else:
+            msgs.append(
+                f"Calibration's nominal up is {tilt:.0f}° off vertical — the "
+                f"world frame comes from one marker tag, whose rotation is "
+                f"arbitrary. The 3D view levels on the subject instead, so a "
+                f"lean held for the whole take will read as upright.")
 
     assumed = [cam for cam, k in rig.intr.items() if looks_assumed(k)]
     if assumed:

@@ -175,6 +175,13 @@ class JointAccuracyList(QWidget):
         return float(valid.mean()) if valid.size else float("nan")
 
 
+_SUBJECT_VERTICAL = (
+    "Vertical: estimated from the subject, because this project has no "
+    "recorded vertical (calibrated before it was recorded, or the estimates "
+    "disagreed too much to use). A lean held through the whole take reads as "
+    "upright.")
+
+
 class Sidebar(QWidget):
     runDetection = Signal()
     recalibrate = Signal()
@@ -213,10 +220,7 @@ class Sidebar(QWidget):
         lay.addWidget(self.calib_warn)
         # which vertical the 3D view/export is levelled against — the answer
         # to "is the model tilted, or is that what the images show?"
-        self.vertical_ref = QLabel(
-            "Vertical: estimated from the subject, because the marker tags do "
-            "not agree on which way is up. A lean held through the whole take "
-            "reads as upright.")
+        self.vertical_ref = QLabel(_SUBJECT_VERTICAL)
         self.vertical_ref.setWordWrap(True)
         self.vertical_ref.setStyleSheet("color:#8a91a3; font-size:11px;")
         self.vertical_ref.hide()
@@ -277,6 +281,20 @@ class Sidebar(QWidget):
         self.calib_warn.setToolTip("\n\n".join(warnings))
         self.calib_warn.setVisible(bool(warnings))
 
-    def show_levelling_note(self, on: bool):
-        """Show how the 3D view decided which way is up (see orient.py)."""
+    def show_levelling_note(self, on: bool, source: str = "subject",
+                            spread_deg: float | None = None):
+        """Say which vertical the 3D view levelled on, and how sure it is.
+
+        A recorded vertical comes with a number (the spread between the proxies
+        it averages) and the number is the point: "±14 deg" is a fact the user
+        can weigh, "levelled" is not.
+        """
+        if source and source != "subject" and spread_deg is not None:
+            self.vertical_ref.setText(
+                f"Vertical: recorded at calibration from the {source}, "
+                f"±{spread_deg:.0f}° between those estimates. The 3D view and "
+                f"the export both use it, so a lean held all take stays a "
+                f"lean.")
+        else:
+            self.vertical_ref.setText(_SUBJECT_VERTICAL)
         self.vertical_ref.setVisible(bool(on))

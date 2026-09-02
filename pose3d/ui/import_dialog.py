@@ -190,6 +190,9 @@ class ImportDialog(QDialog):
                 intr_left=il, intr_right=ir, ext_left=el, ext_right=er)
 
             rig = cal.rig
+            # what the numbers mean, kept with the project: the tag size the
+            # extrinsics were scaled by is not recoverable from anything else
+            project.marker_length = float(self.marker.value())
             if not cal.ok:
                 prog.close()
                 cont = QMessageBox.warning(
@@ -208,6 +211,8 @@ class ImportDialog(QDialog):
             # keypoints (and anything else it learns to write) are not dropped
             # on the floor by a duplicate loop that only knew about kp2d
             det = self._ensure_detector()
+            project.detector = (
+                f"rtmpose-{det.mode}" + ("-feet" if det.feet else ""))
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
             from pose3d.pipeline import detect_project
@@ -234,7 +239,7 @@ class ImportDialog(QDialog):
                 from pose3d.pipeline import fit_project, triangulate_project
                 dropped = triangulate_project(project, rig)
                 report = fit_project(project, smooth=smooth)
-                save_rig(rig, folder / "calibration")
+                save_rig(rig, folder / "calibration", cal.report)
 
             save_project(project, folder)
             prog.close()

@@ -155,7 +155,7 @@ def test_view_and_export_agree_on_which_joints_are_posed():
     assert view_mask[2, WRIST] and filled[2, WRIST]
     assert not view_mask[4, WRIST] and not filled[4, WRIST]
 
-    frames, _ = _character_bone_frames(poses, 0, None, filled)
+    frames, _ = _character_bone_frames(poses, 0, None, filled=filled)
     if frames is None:
         import pytest
         pytest.skip("bundled character asset unavailable")

@@ -129,6 +129,13 @@ class ProjectData:
     # A project built in memory is by definition current; load_project
     # overrides this with what the file says (0 for files predating the key).
     pipeline_version: int = PIPELINE_VERSION
+    # the ArUco tag edge the extrinsics were scaled by (metres); None on a
+    # project imported before it was recorded.
+    marker_length: float | None = None
+    # which detector produced the 2D (provenance, e.g. "rtmpose-balanced");
+    # None on a project imported before it was recorded. keypoint_model above
+    # is the LAYOUT the pipeline reasons about; this is the model's name.
+    detector: str | None = None
 
     def frame_ids(self) -> list[str]:
         return [f.frame_id for f in self.frames]
