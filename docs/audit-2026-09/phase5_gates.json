@@ -1,5 +1,5 @@
 {
-  "generated_by": "tests/test_head_source.py::measure_gate_table_on_fixture + tools/measure_head_gates.gate_table",
+  "generated_by": "tests/test_head_source.py::measure_gate_table_on_fixture -> tools.measure_head_gates.measure_project + tools.measure_head_gates.gate_table",
   "reproduce": "QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/test_head_source.py -k gate_table",
   "what_this_is": "The SHIPPING gate table for the Halpe-26 skull HEAD (Phase 5b), measured on the committed fixture tests/fixtures/client_take, reconstructed from its 2D by the shipped pipeline \u2014 the client's 26-frame take, re-detected with Halpe-26 on 2026-09-03 \u2014 so every number here is re-derivable in CI without the client's photographs. The pre-registered table, the COCO-17 baseline column and the run that produced them are docs/audit-2026-09/phase5_metrics.json, which is evidence and is unedited: it still records the verdict as 6 of 7, because that is what the table fixed in advance said.",
   "take": "tests/fixtures/client_take (Imported_Session, 26 frames)",
@@ -98,7 +98,9 @@
   "fixture_run": {
     "label": "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)",
     "head_source": "skull",
+    "readback": "tail",
     "n_frames": 26,
+    "neck_policy": "derived",
     "height_m": 0.1302290963914518,
     "scale": 111.37927439916115,
     "retarget_no_face_pct": {
@@ -167,7 +169,24 @@
     },
     "bone_cv_median_pct": 5.234031144201781,
     "bone_cv_max_pct": 7.86503605240381,
-    "epipolar_median_px": 4.674843034187729
+    "epipolar_median_px": 4.674843034187729,
+    "epipolar_p90_px": 12.810102975667432,
+    "gaps": {
+      "missing": [
+        [
+          "0013",
+          "LEFT_ELBOW"
+        ],
+        [
+          "0021",
+          "LEFT_ANKLE"
+        ]
+      ],
+      "n_missing": 2,
+      "missing_pct": 0.5128205128205128,
+      "rejected": 0,
+      "filled": 2
+    }
   },
   "re_measured": {
     "when": "2026-09-03, Phase 5b round 3, after Phases 6.1-6.5 merged into the same tree",

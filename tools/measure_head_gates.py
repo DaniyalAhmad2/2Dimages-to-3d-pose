@@ -256,14 +256,35 @@ def face_to_mesh(npz: Path, project_dir: Path, head_source: str,
 
 def measure(label: str, npz: Path, project_dir: Path, head_source: str,
             readback: str | None = None, neck: str | None = None) -> dict:
-    """Every number the gate table needs, for one (model, policy) run."""
+    """Every number the gate table needs, for one cached (model, policy) run.
+
+    The npz loader around `measure_project`; the measuring itself is that
+    function, so a caller holding a ProjectData — CI, measuring the committed
+    fixture with no images and no detector — reproduces this exactly instead
+    of re-implementing it. See tests/test_head_source.py.
+    """
+    from pose3d import quality as Q
+
+    return measure_project(label, _project_from(npz, head_source),
+                           Q.load_rig(project_dir / "calibration"),
+                           readback=readback, neck=neck)
+
+
+def measure_project(label: str, p, rig, readback: str | None = None,
+                    neck: str | None = None) -> dict:
+    """Every number the gate table needs, for one already-reconstructed take.
+
+    `p` is a ProjectData whose `pose3d`/`fitted3d`/`head3d` are filled in —
+    by the pipeline, from a cache, or by CI running the pipeline over the
+    committed fixture — and `p.head_source` is the convention it was detected
+    under, which decides how the character reads its HEAD.
+    """
     from pose3d import quality as Q
     from pose3d.core.project import CAMERAS
     from pose3d.geometry import character as chmod
     from pose3d.geometry.character import Character
 
-    p = _project_from(npz, head_source)
-    rig = Q.load_rig(project_dir / "calibration")
+    head_source = p.head_source
     delivered = np.stack([f.fitted3d for f in p.frames])
     measured = np.stack([f.pose3d for f in p.frames])
     kp2d = {c: np.stack([f.kp2d[c] for f in p.frames]) for c in CAMERAS}

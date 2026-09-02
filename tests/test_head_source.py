@@ -18,6 +18,12 @@ from pose3d.core.skeleton import Joint
 from tests.gates import needs_character
 from tests.synth import sample_skeleton_3d
 
+#: The process-wide head convention as `pose3d.geometry.character` ships it,
+#: read once at import so the autouse fixture below restores THAT rather than
+#: whatever a test left set.
+_IMPORTED_DEFAULT = __import__(
+    "pose3d.geometry.character", fromlist=["x"]).default_head_source()
+
 
 def _pitch_head(pose, deg):
     """Pitch the HEAD point forward about the NECK by `deg`."""
@@ -48,11 +54,33 @@ def _aim_error(character, pose):
 
 # --- the policy plumbing (no rig asset needed) -----------------------------
 
+@pytest.fixture(autouse=True)
+def _no_leaked_head_default():
+    """The process-wide default is module state, and every test here that
+    touches it restores it in a `finally`. This is the belt as well: no test
+    in this file may inherit a convention from another one (or from the order
+    pytest happened to run them in), and none may leave one behind for the
+    rest of the suite.
+
+    It restores the value the module was IMPORTED with, so
+    `test_the_default_head_source_is_the_legacy_convention` still measures the
+    real default rather than one this fixture chose.
+    """
+    from pose3d.geometry import character as ch
+
+    ch.set_default_head_source(_IMPORTED_DEFAULT)
+    try:
+        yield
+    finally:
+        ch.set_default_head_source(_IMPORTED_DEFAULT)
+
+
 def test_the_default_head_source_is_the_legacy_convention():
     """Every project written before `head_source` existed was COCO-17, whose
     HEAD is the nose. Guessing anything else would silently re-pose them."""
     from pose3d.geometry import character as ch
 
+    assert _IMPORTED_DEFAULT == "nose"      # what the module ships with
     assert ch.default_head_source() == "nose"
     try:
         ch.set_default_head_source("skull")
@@ -77,7 +105,7 @@ def test_a_tool_cannot_leak_a_head_convention_into_the_process():
     """
     from pose3d.geometry import character as ch
 
-    assert ch.default_head_source() == "nose"
+    assert ch.default_head_source() == "nose"      # the fixture above, not luck
     with ch.head_source_default("skull"):
         assert ch.default_head_source() == "skull"
         assert ch.Character().head_source == "skull"   # what a bare build gets
@@ -464,55 +492,25 @@ def measure_gate_table_on_fixture() -> dict:
     regression in the triangulation or the bone fit moves these numbers too,
     not only one in the retarget.
 
-    Returns the same dict shape `measure_head_gates.measure` returns, so the
-    scoring function is the shipped one and not a copy of it.
+    The measuring is `measure_head_gates.measure_project` — the same function
+    the tool's own `measure` calls once it has loaded its npz cache, so the
+    scoring AND the measurement are the shipped ones and neither can drift
+    from what the evidence was written with. All this adds is the take.
     """
     from pathlib import Path as _P
 
     from pose3d import pipeline
     from pose3d import quality as Q
     from pose3d.core.io_project import load_project
-    from pose3d.core.project import CAMERAS
-    from pose3d.geometry.character import Character
-    from tools.measure_head_gates import _head_aim_error
+    from tools.measure_head_gates import measure_project
 
     fixture = _P(__file__).resolve().parent / "fixtures" / "client_take"
     p = load_project(fixture)
     rig = Q.load_rig(fixture / "calibration")
     pipeline.triangulate_project(p, rig)
     pipeline.fit_project(p)                  # shipped defaults: no smoothing
-    delivered = np.stack([f.fitted3d for f in p.frames])
-    measured = np.stack([f.pose3d for f in p.frames])
-    kp2d = {c: np.stack([f.kp2d[c] for f in p.frames]) for c in CAMERAS}
-
-    height = Q.subject_height(delivered)
-    R = Q.de_tilt_rotation(delivered)
-    up = delivered @ R.T
-    head3d = np.stack([f.head3d for f in p.frames]) @ R.T
-
-    ch = Character(head_source=p.head_source)
-    scale = ch.fit_to_subject(up)
-    r_no = Q.retarget_error(ch, up, height, scale, None)
-    r_face = Q.retarget_error(ch, up, height, scale, head3d)
-    bl = Q.bone_length_stats(measured)
-    return {
-        "label": "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)",
-        "head_source": p.head_source, "n_frames": len(p.frames),
-        "height_m": float(height), "scale": float(scale),
-        "retarget_no_face_pct": {k: v["median_pct_height"]
-                                 for k, v in r_no["per_joint"].items()},
-        "retarget_with_face_pct": {k: v["median_pct_height"]
-                                   for k, v in r_face["per_joint"].items()},
-        "retarget_median_pct": {"no_face": r_no["median_pct_height"],
-                                "with_face": r_face["median_pct_height"]},
-        "head_aim_no_face": _head_aim_error(ch, up, None),
-        "head_aim_with_face": _head_aim_error(ch, up, head3d),
-        "bone_cv_pct": {bl["bones"][k]["name"]: bl["bones"][k]["cv_pct"]
-                        for k in bl["bones"]},
-        "bone_cv_median_pct": bl["median_cv_pct"],
-        "bone_cv_max_pct": bl["max_cv_pct"],
-        "epipolar_median_px": Q.body_epipolar(kp2d, rig)["median_px"],
-    }
+    return measure_project(
+        "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)", p, rig)
 
 
 def test_the_pre_registered_gate_table_is_still_what_it_was():

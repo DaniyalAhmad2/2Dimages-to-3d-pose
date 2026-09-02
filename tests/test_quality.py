@@ -67,8 +67,11 @@ def baseline():
 def test_the_baseline_is_the_client_take(baseline):
     """What the two damage tests are measured against."""
     assert baseline.n_frames == 26
-    assert baseline.bone_cv["median_cv_pct"] == pytest.approx(5.4, abs=0.6)
-    assert baseline.epipolar["median_px"] == pytest.approx(4.9, abs=0.6)
+    # re-centred on the take as the app now reconstructs it: Halpe-26
+    # detection (Phase 5b) through the data-driven cross-view gate (Phase 6.2),
+    # which refuses two of its pairs. Bands are +-11 % and +-13 % of those.
+    assert baseline.bone_cv["median_cv_pct"] == pytest.approx(5.23, abs=0.6)
+    assert baseline.epipolar["median_px"] == pytest.approx(4.67, abs=0.6)
 
 
 def test_bone_cv_responds_to_a_wrong_rig(baseline):
@@ -78,26 +81,35 @@ def test_bone_cv_responds_to_a_wrong_rig(baseline):
     This is the acceptance test for the whole phase: that error costs the
     reprojection gauge 2.9 points and never changes its band, so if nothing on
     screen moved for it, nothing on screen describes the reconstruction.
-    Today: 5.30 % -> 6.66 %, a 26 % rise.
+    Today: 5.23 % -> 6.66 %, a 27 % rise.
 
     It read 5.44 % -> 8.18 % (a 50 % rise) while the fixture was detected with
     COCO-17. Phase 5b re-detected it with Halpe-26: the INTACT take is
-    unchanged to two figures (5.30 %), while the DAMAGED one is markedly
-    steadier (8.18 % -> 6.66 %) because Halpe's keypoints survive the 15 deg
-    error better. So the signal shrinks while the gauge stays right, and the
-    bar follows the measurement down by the same 10-15 % margin the rest of
-    the suite uses — the gauge would have to stop responding almost entirely
-    to slip under it.
+    unchanged to two figures, while the DAMAGED one is markedly steadier
+    (8.18 % -> 6.66 %) because Halpe's keypoints survive the 15 deg error
+    better. So the signal shrank, and lowering the bar to match it (1.30 ->
+    1.12) is what made this a weaker acceptance test than it was: a 12 %
+    response to a 15 deg error would now pass.
+
+    So the strength is taken back from the DAMAGE instead of the bar. The
+    response is monotone in the error — 12 deg 1.16, 15 deg 1.27, 18 deg 1.40,
+    20 deg 1.51, 25 deg 1.80 — and a gauge whose response halved would still
+    clear 1.12 at 15 deg while failing 1.31 at 20 deg. Both are asserted, each
+    with the suite's usual 10-15 % margin under today's measurement.
     """
-    damaged = _measure(
-        lambda rig: setattr(rig.ext["right"], "R",
-                            _rotation([0, 1, 0], 15.0) @ rig.ext["right"].R))
+    def turned(deg):
+        return _measure(
+            lambda rig: setattr(rig.ext["right"], "R",
+                                _rotation([0, 1, 0], deg) @ rig.ext["right"].R))
+
     before = baseline.bone_cv["median_cv_pct"]
-    after = damaged.bone_cv["median_cv_pct"]
-    rise = after / before
-    assert rise >= 1.12, (                      # today 1.26
-        f"bone-length spread only moved {100 * (rise - 1):.0f} % for a 15 deg "
-        f"camera error ({before:.2f} % -> {after:.2f} %)")
+    for deg, bar, today in ((15.0, 1.12, 1.27), (20.0, 1.31, 1.51)):
+        after = turned(deg).bone_cv["median_cv_pct"]
+        rise = after / before
+        assert rise >= bar, (                   # today 1.27 / 1.51
+            f"bone-length spread only moved {100 * (rise - 1):.0f} % for a "
+            f"{deg:.0f} deg camera error ({before:.2f} % -> {after:.2f} %); "
+            f"it moved {100 * (today - 1):.0f} % when this was written")
 
 
 def test_epipolar_responds_to_a_wrong_focal(baseline):
@@ -106,9 +118,12 @@ def test_epipolar_responds_to_a_wrong_focal(baseline):
     the wrong size and shape — but the two views stop agreeing about where a
     keypoint has to lie, which is what the epipolar row reports.
 
-    Today: epipolar 4.91 px -> 6.23 px (+27 %), bone spread 5.44 % -> 5.58 %
-    (+3 %). Neither row alone would have caught both this and the 15 deg
-    rotation above.
+    Today: epipolar 4.67 px -> 5.48 px (+17 %), bone spread 5.23 % -> 5.44 %
+    (+4 %). Neither row alone would have caught both this and the 15 deg
+    rotation above. (It read +27 % / +3 % under COCO-17; the ratio shrank
+    with the re-detection, and the `epi >= 1.15` bar below is now only 2 %
+    under the measurement instead of the usual 10-15 % — recorded, not
+    lowered, because lowering it is the one direction that cannot be right.)
     """
     def shrink(rig):
         for cam in CAMERAS:
@@ -136,7 +151,7 @@ def test_epipolar_responds_to_a_wrong_focal(baseline):
 # --- the symmetry wording (F34) --------------------------------------------
 
 def test_symmetry_flags_the_client_takes_forearm_and_names_a_keypoint(baseline):
-    """The take's forearms measure 6.7 % apart on a subject moulded
+    """The take's forearms measure 6.8 % apart on a subject moulded
     symmetrically, so it must be flagged — and the sentence must send the user
     to a KEYPOINT, not to the calibration.
 
@@ -146,7 +161,7 @@ def test_symmetry_flags_the_client_takes_forearm_and_names_a_keypoint(baseline):
     the rig: a rig error moves both sides together.
     """
     notes = symmetry_notes(baseline)
-    assert notes, "the take's 6.7 % forearm asymmetry was not flagged"
+    assert notes, "the take's 6.8 % forearm asymmetry was not flagged"
     text = " ".join(notes)
     assert "forearm" in text
     assert JOINT_NAMES[int(Joint.LEFT_WRIST)] in text
