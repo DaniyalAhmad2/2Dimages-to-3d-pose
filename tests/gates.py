@@ -40,6 +40,19 @@ def needs_blender():
                  "Blender binary not found")
 
 
+def needs_panoptic():
+    """The CMU Panoptic sample: the only ground truth in the repo.
+
+    Downloaded, not committed (see README_RUN.md), so a fresh checkout skips —
+    but CI, which fetches it, must not report green having never checked the
+    geometry against real ground truth.
+    """
+    data = Path(__file__).resolve().parent.parent / "data"
+    have = (data / "hdPose3d").is_dir() and (data / "hdVideos").is_dir()
+    return _gate(have, "POSE3D_REQUIRE_PANOPTIC",
+                 "CMU Panoptic sample data not downloaded")
+
+
 def needs_character():
     from pose3d.config import character_blend
     return _gate(character_blend() is not None, "POSE3D_REQUIRE_ASSETS",

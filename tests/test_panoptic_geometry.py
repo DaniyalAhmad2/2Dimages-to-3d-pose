@@ -10,7 +10,10 @@ For each frame:
   6. Run bone-length fit over the noisy sequence and report stabilisation.
 
 This exercises real intrinsics/distortion/extrinsics and real human motion.
-Run: .venv/bin/python -m tests.validate_panoptic_geometry
+
+Collected by pytest (gated on the downloaded dataset) so CI actually runs it;
+still runnable on its own for the printed report:
+    .venv/bin/python -m tests.test_panoptic_geometry
 """
 from __future__ import annotations
 
@@ -28,6 +31,7 @@ from pose3d.geometry.bonefit import (
 )
 from pose3d.geometry.triangulate import reprojection_error, triangulate_points
 from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS
+from tests.gates import needs_panoptic
 from tests.synth import project  # cv2 projectPoints wrapper
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -138,6 +142,20 @@ def main():
     out = DATA / "geometry_validation_summary.json"
     out.write_text(json.dumps(summary, indent=2))
     print(f"\nWrote {out}")
+
+
+@needs_panoptic()
+def test_panoptic_geometry():
+    """Run the whole validation and hold it to the one thing that admits no
+    tolerance: with a perfect detector, two-view triangulation against real
+    Panoptic calibration must return the ground truth exactly."""
+    main()
+    summary = json.loads((DATA / "geometry_validation_summary.json").read_text())
+    assert summary["frames"] > 0
+    # today 2.7e-5 mm — pure float noise on a 4 m dome. The bound is a micron
+    # rather than 15 % above the measurement because what varies here is the
+    # BLAS's last bits, not anything geometric.
+    assert summary["ideal_max_mm"] < 1e-3, summary
 
 
 if __name__ == "__main__":

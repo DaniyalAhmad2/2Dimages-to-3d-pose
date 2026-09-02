@@ -11,7 +11,9 @@ directly comparable with no alignment.
 Frame sync is verified by reprojecting the GT into each image and checking it
 overlaps the person; a small offset search corrects any indexing mismatch.
 
-Run: .venv/bin/python -m tests.validate_panoptic_rtmpose
+Collected by pytest (gated on the downloaded dataset and the ONNX weights) so
+CI actually runs it; still runnable on its own for the printed report:
+    .venv/bin/python -m tests.test_panoptic_rtmpose
 """
 from __future__ import annotations
 
@@ -27,6 +29,7 @@ from pose3d.datasets.panoptic import (
 )
 from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS
 from pose3d.geometry.triangulate import triangulate_points
+from tests.gates import needs_panoptic, needs_weights
 from tests.synth import project
 
 DATA = Path(__file__).resolve().parent.parent / "data"
@@ -128,6 +131,19 @@ def _save_overlay(bgr, det_xy, gt_xy, out: Path):
         if not np.isnan(p).any():
             cv2.circle(img, tuple(p.astype(int)), 4, (0, 0, 255), -1)  # det red
     cv2.imwrite(str(out), img)
+
+
+@needs_panoptic()
+@needs_weights()
+def test_panoptic_rtmpose():
+    """The whole product path on real images. No accuracy threshold here — the
+    error depends on the detector weights, and the client take's own thresholds
+    live in test_client_regression.py — but the detector must find every joint
+    of a clearly visible person in both views, or the numbers above are noise."""
+    main()
+    results = json.loads((DATA / "rtmpose_validation_summary.json").read_text())
+    assert results, "no frames were evaluated"
+    assert all(r["detected"] == NUM_JOINTS for r in results), results
 
 
 if __name__ == "__main__":

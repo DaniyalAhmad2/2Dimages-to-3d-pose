@@ -81,8 +81,6 @@ jobs:
           QT_QPA_PLATFORM: offscreen
         run: |
           uv run python -m pytest tests/ -q `
-            --ignore=tests/validate_panoptic_geometry.py `
-            --ignore=tests/validate_panoptic_rtmpose.py `
             --ignore=tests/build_demo_project.py
 
       - name: Self-test from source

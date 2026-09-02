@@ -58,9 +58,9 @@ run the interpreter directly, or pass `uv run --no-sync`.
 
 ```bash
 # geometry core vs real dome calibration + real 3D poses (no images needed)
-.venv/bin/python -m tests.validate_panoptic_geometry
+.venv/bin/python -m tests.test_panoptic_geometry
 # full pipeline: RTMPose on real images -> triangulate -> vs ground truth
-.venv/bin/python -m tests.validate_panoptic_rtmpose
+.venv/bin/python -m tests.test_panoptic_rtmpose
 # rebuild the demo project + dashboard screenshot + export
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m tests.build_demo_project
 ```
@@ -69,16 +69,17 @@ QT_QPA_PLATFORM=offscreen .venv/bin/python -m tests.build_demo_project
 
 ```bash
 QT_QPA_PLATFORM=offscreen .venv/bin/python -m pytest tests/ -q \
-  --ignore=tests/validate_panoptic_geometry.py \
-  --ignore=tests/validate_panoptic_rtmpose.py \
   --ignore=tests/build_demo_project.py
 ```
+
+The Panoptic validations above are collected as tests too, so they run
+whenever the dataset has been downloaded and skip when it has not.
 
 Tests needing Blender, the character rig or the ONNX weights **skip** when
 those are absent, which is right on a laptop and wrong in CI — the entire
 export path would report green having never run. Set the matching variable to
 turn a skip into a failure (see `tests/gates.py`); the Windows workflow sets
-all three:
+all three (`POSE3D_REQUIRE_PANOPTIC=1` does the same for the dataset above):
 
 ```bash
 POSE3D_REQUIRE_BLENDER=1 POSE3D_REQUIRE_ASSETS=1 POSE3D_REQUIRE_WEIGHTS=1 …

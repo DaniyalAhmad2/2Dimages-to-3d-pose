@@ -107,3 +107,96 @@ def test_export_with_video(tmp_path):
     cap.release()
     assert ok and frame is not None, "could not read a rendered frame"
     assert float(frame.std()) > 2.0, "rendered frame is blank (no geometry)"
+
+
+# --- the delivered file itself, parsed (no Blender) ------------------------
+# Everything below reads tests/fixtures/imported_session.bvh.gz, the BVH the
+# client actually received for the take in tests/fixtures/client_take. Reading
+# it needs nothing installed, so these run on every machine and every CI job —
+# which is the point: the export path's defects (F13) survived because its only
+# tests were "Blender exited 0 and the file is not empty".
+#
+# NOTE for Phase 3: that file was exported on 2026-07-28, one day before commit
+# b83c91e swapped the bundled rig for the current 19-bone one. It therefore
+# still carries the old rig's fingers and orphan IK helper bones. The pinned
+# hips below are unchanged on today's rig; the helper-bone translation is not —
+# a fresh export has none, so Phase 3 must re-record that fact from a new file
+# (tools/check_export_fidelity.py prints it) rather than trust the constant.
+
+DELIVERED_POSES = 26                  # the client take's 26 photographed poses
+DELIVERED_FRAMES = 772                # 1 + 25*30 + 21, at 30 fps
+RIG_HEIGHT = 14.4228                  # Character().rig_h for the bundled rig
+
+# The largest non-hips position channel in the delivered file, as a % of rig
+# height: an orphan IK helper bone carries the root motion that `to_rig` refuses
+# to give the hips. Phase 3 gives the hips real root motion and pins the helper
+# bones at rest; set this to 1.0 then and the assertion below is Phase 3's gate
+# unchanged.
+MAX_NON_HIPS_TRANSLATION_PCT = 42.5   # today 42.49 %, on shin.R.001
+
+
+@pytest.fixture(scope="module")
+def delivered():
+    from tests import bvh_util
+    return bvh_util.parse(bvh_util.DELIVERED_BVH)
+
+
+def test_the_delivered_file_is_one_stepped_frame_run_per_pose(delivered):
+    from tests import bvh_util
+    assert delivered.n_frames == DELIVERED_FRAMES
+    assert delivered.n_frames == bvh_util.expected_frames(DELIVERED_POSES)
+    assert delivered.fps == pytest.approx(30.0, abs=0.01)
+
+
+def test_each_captured_pose_is_held_exactly(delivered):
+    """The stop-motion hold must be a hold: 21 frames of the same numbers, not
+    a slow drift that reads as the figure breathing."""
+    from tests import bvh_util
+    for i, (first, last) in enumerate(bvh_util.stepped_holds(DELIVERED_POSES)):
+        block = delivered.motion[first:last + 1]
+        assert last - first == bvh_util.HOLD
+        assert np.array_equal(block, np.repeat(block[:1], len(block), axis=0)), \
+            f"pose {i}'s hold drifts by {np.abs(block - block[0]).max()}"
+
+
+def test_the_hips_never_move_in_the_delivered_file(delivered):
+    """F13: `to_rig` pins the pelvis at the rig's rest hips on every frame, so
+    the figure's 116 %-of-height travel across the take is simply absent from
+    the file the client imports."""
+    hips = delivered.positions("hips")
+    assert hips.shape == (delivered.n_frames, 3)
+    assert np.array_equal(hips, np.repeat(hips[:1], len(hips), axis=0))
+
+
+def test_the_in_betweens_do_not_overshoot_the_poses_they_connect(delivered):
+    """The eased transitions are fine and must stay fine: a bone that swings
+    past a captured pose before settling onto it is a visible artefact and
+    would be the first thing blamed for 'the character does not follow'."""
+    from tests import bvh_util
+    overshoot = bvh_util.channel_overshoot(delivered, DELIVERED_POSES)
+    assert float(overshoot.max()) <= 5.0    # today 3.795 deg
+
+
+def test_a_helper_bone_carries_the_root_motion(delivered):
+    """The translation the hips do not get has to go somewhere: it lands on an
+    orphan IK helper bone, which is not motion any importer will use."""
+    ranges = {}
+    for j in delivered.joints:
+        p = delivered.positions(j.name)
+        if p.shape[1] == 3 and j.name != "hips":
+            ranges[j.name] = float(np.max(p.max(0) - p.min(0)))
+    name, worst = max(ranges.items(), key=lambda kv: kv[1])
+    pct = 100.0 * worst / RIG_HEIGHT
+    assert pct <= MAX_NON_HIPS_TRANSLATION_PCT, f"{name} carries {pct:.1f} %"
+    if MAX_NON_HIPS_TRANSLATION_PCT > 1.0:
+        # still today's file, so also pin the fact rather than just its bound
+        assert name == "shin.R.001"
+        assert pct >= 0.99 * MAX_NON_HIPS_TRANSLATION_PCT, f"{pct:.2f} %"
+
+
+@needs_character()
+def test_the_recorded_rig_height_is_still_the_bundled_rigs():
+    """RIG_HEIGHT above is a number, not a measurement, so say out loud which
+    rig it came from and fail if that rig is replaced."""
+    from pose3d.geometry.character import Character
+    assert Character().rig_h == pytest.approx(RIG_HEIGHT, abs=0.001)
