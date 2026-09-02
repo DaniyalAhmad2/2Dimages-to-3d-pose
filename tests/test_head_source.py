@@ -417,18 +417,27 @@ def test_the_convention_moves_before_anything_is_re_posed(qapp, monkeypatch):
 #
 # `docs/audit-2026-09/phase5_metrics.json` is the PRE-REGISTERED run: the table
 # fixed before anything was measured, and what `tools/measure_head_gates.py`
-# measured against it on the client take. It is evidence and stays unedited.
+# measured against it on the client take. Its `gates`, its 6-of-7 verdict and
+# every number in it are evidence and stay exactly as measured. It also carries
+# the restatement — `restated_gate`, and `switch.ships_on_note` — because a
+# reader who opens only the evidence must not be left thinking the switch is
+# off; that is a record ALONGSIDE the pre-registered table, never a re-scoring
+# of it, and the first test below is what holds those two apart.
 #
 # `docs/audit-2026-09/phase5_gates.json` is the SHIPPING table: the same seven
 # gates with the seventh restated on review, re-derived from the committed
 # fixture rather than from the images, which is why the three tests below can
 # check it in CI in about a second.
+#
+# Both files quote `tools.measure_head_gates.RESTATED_GATE` verbatim, so the
+# restatement has ONE set of words and the tests check every copy against it.
 
 _METRICS = "phase5_metrics.json"
 _GATES = "phase5_gates.json"
 #: The one gate that was restated after measurement, and the only bar in the
-#: table that is not the one fixed in advance. See `phase5_gates.json` for the
-#: reasoning; `pose3d.detect.rtmpose.USE_HALPE26` carries it too.
+#: table that is not the one fixed in advance. The reasoning is
+#: `tools.measure_head_gates.RESTATED_GATE`, quoted into both evidence files;
+#: `pose3d.detect.rtmpose.USE_HALPE26` carries it too.
 RESTATED = ("neck_lshoulder_bone_cv_pct", 6.5)
 
 
@@ -525,6 +534,48 @@ def test_the_pre_registered_gate_table_is_still_what_it_was():
     failed = [g["key"] for g in doc["gates"] if not g["pass"]]
     assert failed == [RESTATED[0]]
     assert doc["switch"]["constant"] == "pose3d.detect.rtmpose.USE_HALPE26"
+    # ...and `ships_on` is this table's own arithmetic, so it stays False even
+    # though the app ships the switch ON. That is exactly the trap the file
+    # has to defuse in its own words, next to the flag.
+    assert doc["switch"]["ships_on"] is False
+    assert "USE_HALPE26 = True" in doc["switch"]["ships_on_note"]
+    assert "restated" in doc["switch"]["ships_on_note"]
+
+
+def test_the_evidence_file_records_the_restatement_beside_the_table():
+    """The restated gate is written into the pre-registered file too.
+
+    The controller's ruling has to be findable from the evidence a reader
+    actually opens, and `phase5_metrics.json` is that file — it is the run
+    whose seventh gate failed. So it carries `restated_gate` (the rule, who
+    decided it, the reasoning, the cost if wrong, what would reopen it) and a
+    note on `switch.ships_on`, and BOTH sit beside the pre-registered table
+    rather than inside it: the gate row for that key still reads
+    "<= 5.15 % (the COCO-17 baseline)" and still says `pass: false`.
+
+    That is the whole difference between recording a decision and rewriting
+    the measurement it was taken against, and this test is where it is held.
+    """
+    import tools.measure_head_gates as gates
+
+    doc = _audit(_METRICS)
+    key, bar = RESTATED
+    restated = doc["restated_gate"]
+
+    # the words are the module's, not a paraphrase that can drift from it
+    for field, value in gates.RESTATED_GATE.items():
+        assert restated[field] == value, field
+    assert restated["key"] == key
+    assert restated["rule"] == f"<= {bar} %"
+    assert restated["reason"].strip() and restated["cost_if_wrong"].strip()
+    assert restated["what_would_reopen_it"].strip()
+
+    # the pre-registered row it restates is untouched, and still a failure
+    row = next(g for g in doc["gates"] if g["key"] == key)
+    assert row["rule"] == restated["pre_registered_rule"] == gates.GATES[key]
+    assert row["pass"] is False
+    assert restated["measured"] == pytest.approx(row["measured"])
+    assert restated["measured"] > 5.15 and restated["measured"] <= bar
 
 
 def test_the_switch_ships_on_the_restated_gate_table():
@@ -536,10 +587,12 @@ def test_the_switch_ships_on_the_restated_gate_table():
     derived: it made "no worse than today, at all, on this bone" the rule, and
     0.83 pp of it is ~0.13 mm on a 16 mm bone and about one standard error of
     a CV at n=26. The restatement is recorded, with its reasoning and its
-    cost, in `phase5_gates.json`; it is the ONLY bar in the table that is not
-    the pre-registered one, and moving the switch means facing that file.
+    cost, in `phase5_gates.json` and — beside the table it restates, never
+    inside it — in `phase5_metrics.json`; it is the ONLY bar in the table
+    that is not the pre-registered one, and moving the switch means facing it.
     """
     from pose3d.detect import rtmpose
+    from tools.measure_head_gates import RESTATED_GATE as RESTATED_GATE_WORDS
 
     doc = _audit(_GATES)
     pre = _audit(_METRICS)
@@ -552,6 +605,10 @@ def test_the_switch_ships_on_the_restated_gate_table():
         next(g["rule"] for g in pre["gates"] if g["key"] == key)
     assert restated["reason"].strip(), "a restated gate needs its reasoning"
     assert restated["cost_if_wrong"].strip()
+    # the shipping table and the evidence quote the SAME restatement, word for
+    # word, from `tools.measure_head_gates.RESTATED_GATE`
+    for field, value in RESTATED_GATE_WORDS.items():
+        assert restated[field] == value == pre["restated_gate"][field], field
 
     # exactly one bar was moved, and every other rule is still verbatim the
     # pre-registered one

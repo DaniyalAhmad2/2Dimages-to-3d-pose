@@ -5,7 +5,19 @@
  "frames": 26,
  "switch": {
   "constant": "pose3d.detect.rtmpose.USE_HALPE26",
-  "ships_on": false
+  "ships_on": false,
+  "ships_on_note": "This flag is the PRE-REGISTERED table's own arithmetic and it stays False: 6 of the 7 gates fixed in advance passed. It is not the shipping state. The seventh was restated on review (see `restated_gate` below, and docs/audit-2026-09/phase5_gates.json for the same seven gates re-measured on the committed fixture), and the app ships with pose3d.detect.rtmpose.USE_HALPE26 = True."
+ },
+ "restated_gate": {
+  "key": "neck_lshoulder_bone_cv_pct",
+  "pre_registered_rule": "<= 5.15 % (the COCO-17 baseline)",
+  "rule": "<= 6.5 %",
+  "decided_by": "controller ruling, 2026-09-03, after the measurement",
+  "reason": "The 5.15 % bar was the COCO-17 measurement itself, not a tolerance anybody had derived: it made the rule 'no worse than today, at all, on this one bone'. The 0.83 pp it moves is about 0.13 mm on a 16 mm bone and roughly one standard error of a coefficient of variation at n=26, set against an ~11 pp improvement (12.73 -> 1.54 % of body height) on the most visible joint in the take. Restated to 6.5 %, which leaves the measured 5.98 % a real margin to regress into before the gate is silent.",
+  "cost_if_wrong": "The neck-shoulder bone length wobbles 0.8 pp more frame to frame than it did under COCO-17. It is a RAW-measurement statistic: the bone fit holds that length rigid, so the delivered pose and the exported file do not inherit the wobble; what it can cost is a slightly noisier quality readout on that bone.",
+  "what_would_reopen_it": "neck-Lshoulder CV above 6.5 % on the fixture, or the derived NECK showing the same spread in the DELIVERED pose rather than the raw one.",
+  "recorded_in": "docs/audit-2026-09/phase5_gates.json (the shipping table), pose3d.detect.rtmpose.USE_HALPE26, and tests/test_head_source.py",
+  "measured": 5.98204176801027
  },
  "gates": [
   {
