@@ -1,6 +1,6 @@
 {
   "phase": "1 + 1b — remove the causal EMA; flagged gap fill; drag == batch; version stamp and non-destructive re-detect",
-  "measured_on": "2026-09-02",
+  "measured_on": "2026-09-02 (fix round 3)",
   "take": "workspace/pose3d_projects/Imported_Session (gitignored; committed as tests/fixtures/client_take)",
   "subject_height_m": 0.1194,
   "how_measured": {
@@ -21,7 +21,7 @@
       "id": "delivered_is_the_fit",
       "gate": "max |delivered - refit(smoothing off)| <= 3 % of body height",
       "baseline": "21.8 % of height (25.7 mm)",
-      "measured": "0.0002 % of height (solver noise)",
+      "measured": "0.0 % of height — bit-identical. Both sides are now freshly fitted from the fixture's 2D (default settings vs smoothing explicitly off), so the gate fires the day smoothing is re-enabled by default on this path.",
       "status": "met",
       "test": "tests/test_client_regression.py::test_the_delivered_pose_is_the_pose_the_fit_produced"
     },
@@ -31,7 +31,8 @@
       "baseline": "1.04 % median / 6.35 % max",
       "measured": "0.148 % median / 0.362 % max (worst bone: pelvis-Rhip)",
       "status": "met",
-      "test": "acceptance harness (the suite gates the RAW spread in tests/test_client_regression.py::test_raw_bone_lengths_are_consistent_across_frames)"
+      "test": "acceptance harness (the suite gates the RAW spread in tests/test_client_regression.py::test_raw_bone_lengths_are_consistent_across_frames)",
+      "raw_spread_gated_in_the_suite": "5.27 % median / 9.52 % max, measured on the RECONSTRUCTED take (triangulate + fit from the fixture's 2D) and on OBSERVATIONS ONLY: fix round 3 stopped the gap fill writing into Frame.pose3d, so no invented joint enters a 'measured' number. Thresholds 6.0 / 10.5 in test_raw_bone_lengths_are_consistent_across_frames."
     },
     {
       "id": "left_forearm_frame_0013",
@@ -67,25 +68,37 @@
     {
       "id": "gap_fill",
       "gate_as_planned": "the posed-joint jump at a filled joint stays under 2 % of body height",
-      "gate": "RESTATED by the controller (fix round 1x): a filled joint is FLAGGED (Frame.filled, drawn hollow/amber, counted separately, read by the export) and its error is BELOW the hold-previous error of the behaviour it replaces.",
+      "gate": "RESTATED by the controller (fix round 1x, reaffirmed in round 3): a filled joint is FLAGGED (Frame.filled, drawn hollow/amber, counted separately, read by the export) and its error is BELOW the hold-previous error of the behaviour it replaces — AND the fill never enters the measurement: fill_gaps returns the bone fit's INPUT (a copy) plus the flags, Frame.pose3d stays NaN at the gap, and the interpolated joint reaches the user only through fitted3d.",
       "why_restated": "2 % of height is below this take's noise floor — the subject's own median inter-frame motion is 9.36 mm = 7.9 % of height — so no interpolation of any kind can meet the planned gate. The decision-relevant quantity is how wrong the fill is where the truth IS known.",
       "measured": {
         "n_samples": 354,
-        "midpoint_of_the_neighbours_pct_height": {"median": 4.40, "p90": 13.29, "max": 50.40},
-        "hold_the_previous_frame_pct_height": {"median": 8.04, "p90": 23.19, "max": 59.11},
-        "fills_on_this_take": ["0012 RIGHT_KNEE", "0021 LEFT_ANKLE"],
+        "midpoint_of_the_neighbours_pct_height": {
+          "median": 4.4,
+          "p90": 13.29,
+          "max": 50.4
+        },
+        "hold_the_previous_frame_pct_height": {
+          "median": 8.04,
+          "p90": 23.19,
+          "max": 59.11
+        },
+        "fills_on_this_take": [
+          "0012 RIGHT_KNEE",
+          "0021 LEFT_ANKLE"
+        ],
         "flagged": 2,
-        "unflagged_inventions": 0
+        "unflagged_inventions": 0,
+        "measurement_untouched": "pose3d still NaN at both fills after fit_project; quality.gaps reports n_missing 2 alongside filled 2"
       },
       "status": "met (midpoint halves the hold-previous error at the median and at p90, and every fill is flagged)",
       "rollback": "fill_gaps(project, max_gap=0) ships the gap as a visible hole; the `filled` plumbing then simply never lights up.",
-      "test": "tests/test_gap_fill.py::test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame"
+      "test": "tests/test_gap_fill.py::test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame, ::test_the_fill_never_writes_into_the_measurement, ::test_a_recovered_joint_is_a_measurement_again, tests/test_client_regression.py::test_an_interpolated_joint_is_not_counted_as_a_measurement, tests/test_pipeline_fit.py::test_the_live_path_fills_the_gap_exactly_as_the_batch_path_does"
     },
     {
       "id": "fabricated_joints",
       "gate": "no joint is invented without a flag",
       "baseline": "2 (frames 0012 and 0021 reported 15/15 reconstructed joints while two were copies of the previous frame)",
-      "measured": "0 unflagged; 2 flagged fills",
+      "measured": "0 unflagged; 2 flagged fills, and neither of them is in Frame.pose3d — the raw bone-length CV is back to the observations' own 5.27 % / 9.52 %",
       "status": "met"
     },
     {
@@ -110,16 +123,24 @@
       "measured": "5/5 survive, 0 flags lie",
       "status": "met",
       "test": "tests/test_pipeline_fit.py::test_redetect_keeps_corrections"
+    },
+    {
+      "id": "the_regression_net_runs_the_code",
+      "gate": "ADDED by the controller (fix round 3, Phase 0 finding): every threshold in tests/test_client_regression.py is measured on a take this build RECONSTRUCTS from the fixture's 2D + calibration, not on the arrays the fixture stores",
+      "why": "bone_cv, symmetry, subject_height and the epipolar figures used to be read off frozen arrays, which no code change can move: a sign or DLT regression in geometry.triangulate would have left the net green.",
+      "measured": "triangulate_project + fit_project inside the module fixture; the fresh pose3d matches the stored one to 2.4e-7 m (pinned), the fresh fitted3d is 21.5 % of height from the pose the client was sent (pinned, so the fixture cannot be silently regenerated on a fixed build); subject height 0.11940 on the reconstruction against 0.11778 on the stored pose",
+      "status": "met",
+      "test": "tests/test_client_regression.py::test_the_reconstruction_is_measured_not_replayed and every threshold in that file"
     }
   ],
   "reported_not_gated": {
     "retarget_median_pct_height": {
       "before": 1.51,
-      "after": 1.6,
-      "note": "a RISE is the correct outcome: the smoothed pose scored better only because the character faithfully followed a pose that had drifted off the keypoints."
+      "after": 1.65,
+      "note": "a RISE is the correct outcome: the smoothed pose scored better only because the character faithfully followed a pose that had drifted off the keypoints. Fix round 3: 1.65 measured on the reconstructed take (1.62 on the fixture's stored pose); the suite's bound is 1.9."
     },
     "inter_frame_motion_mm": {
-      "before": 7.60,
+      "before": 7.6,
       "after": 9.27,
       "note": "+22 % (the audit predicted +17 % for a refit without the gap fill; the two filled joint-frames add the rest). That 22 % is the entirety of what the smoother was buying."
     },
