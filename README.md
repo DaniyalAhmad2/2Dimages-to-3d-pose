@@ -166,6 +166,14 @@ crashes and library errors go.
 quarantines a file out of `_internal\` because the build is unsigned. Check the
 quarantine list.
 
+**"Failed to load Python DLL ... `_internal\python312.dll`. LoadLibrary: The
+specified module could not be found."** A file is missing from `_internal\`.
+Extract the `.zip` again to a short path on `C:` — `C:\Pose3D` — rather than
+Downloads, Documents or anywhere OneDrive syncs, where "files on-demand" can
+leave placeholders instead of real files, and check the anti-virus quarantine
+for anything from `_internal\`. Only if it still fails, install the
+[Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+
 **Export fails, or the app says a folder is read-only.** Export somewhere you
 own — `workspace\` inside the extracted folder is the default and always works.
 Program Files and most network drives do not.

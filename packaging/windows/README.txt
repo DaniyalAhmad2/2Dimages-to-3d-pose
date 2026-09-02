@@ -8,12 +8,13 @@ does not need an internet connection.
 Running it
 ----------
 
-1. Extract this whole folder somewhere you can write to — your Desktop or
-   Documents is ideal.
+1. Extract this whole folder somewhere you can write to. A short path
+   straight on your C: drive — C:\Pose3D — is the safest choice.
 
    Do NOT run it from inside the .zip, and do not put it in "Program Files":
    the app saves projects and exports next to itself, and Windows blocks
-   writing there.
+   writing there. Avoid folders OneDrive syncs (often Desktop and Documents):
+   it can leave placeholder stubs instead of real files.
 
 2. Double-click Pose3D.exe.
 
@@ -60,7 +61,7 @@ If the app closes unexpectedly or an export fails, a file called
 pose3d-log.txt is written next to Pose3D.exe. Send that file over and it will
 usually say exactly what happened.
 
-Two things worth checking first:
+Three things worth checking first:
 
 * Exporting to a folder you cannot write to (a network drive, a locked
   folder) will be refused up front, with a message saying so. Export into
@@ -69,3 +70,15 @@ Two things worth checking first:
 * Anti-virus software occasionally quarantines files out of _internal\
   because the app is unsigned. If the app stops launching after having
   worked, that is the usual cause.
+
+* "Failed to load Python DLL ... _internal\python312.dll. LoadLibrary: The
+  specified module could not be found." means a file is missing from
+  _internal\, not that anything is wrong with your Windows.
+
+  Extract the .zip again to a short path on your C: drive (C:\Pose3D), not
+  Downloads, Documents or anywhere under OneDrive, and check your anti-virus
+  quarantine for files from _internal\.
+
+  Only if that does not fix it, install the Microsoft Visual C++
+  Redistributable (x64) from Microsoft:
+  https://aka.ms/vs/17/release/vc_redist.x64.exe
