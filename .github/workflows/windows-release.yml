@@ -62,6 +62,15 @@ jobs:
           uv run pwsh tools/make_windows_bundle.ps1 `
             -Dist dist/Pose3D -Out build/Pose3D-Windows
 
+      - name: Audit the bundle's DLL dependencies
+        # The release gate for the fault the self-test structurally cannot see.
+        # This runner has the Visual C++ runtime and much of what Qt links
+        # against installed system-wide, so a DLL missing from _internal\ still
+        # loads here and only fails on a clean machine — as "Failed to load
+        # Python DLL ... The specified module could not be found." did on the
+        # client's. Checks the bundle against itself, never against the runner.
+        run: uv run python tools/check_bundle_deps.py build/Pose3D-Windows
+
       - name: Self-test the assembled bundle
         # The whole point of this job. Runs the exe the client will run, with
         # PATH-visible Blender and the rtmlib cache deliberately NOT available,

@@ -11,6 +11,7 @@
 # make_windows_bundle.ps1): Blender in blender/, the pose weights in models/,
 # and an empty workspace/. pose3d.runtime.app_dir() resolves all three relative
 # to the executable.
+import os
 import sys
 from pathlib import Path
 
@@ -42,6 +43,70 @@ for src, _ in datas:
             "The build would succeed and the app would then fail at run time, "
             "so stop here instead.")
 
+# --- the Visual C++ runtime ---------------------------------------------
+# python312.dll, and most of Qt, onnxruntime and OpenCV, link against the MSVC
+# runtime. It is NOT part of Windows: a machine that has never installed a
+# Visual C++ application does not have it, and every DLL that needs it then
+# fails to load with "The specified module could not be found" — which is
+# exactly the dialog the client saw for _internal\python312.dll.
+#
+# PyInstaller's dependency scan happens to collect these already, so today's
+# bundle has them. Nothing made that a requirement, though, and the failure
+# mode is invisible on the build machine, where the runtime is installed
+# system-wide. So name them, and stop the build rather than ship without them.
+# Redistributing them beside the application is what Microsoft's Visual C++
+# redistributable licence permits.
+#
+# concrt140.dll is deliberately absent: nothing in this bundle imports it
+# today, and tools/check_bundle_deps.py fails the build if that ever changes.
+VC_RUNTIME = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+
+
+def _vc_runtime_dirs():
+    """Where to look, best source first."""
+    # python-build-standalone (what uv installs, and what CI builds with)
+    # ships the runtime next to python312.dll, which is the copy that DLL was
+    # actually linked against and the one PyInstaller bundles. sys.base_prefix
+    # is where that lives; a uv venv's Scripts\ may or may not have a copy too.
+    yield Path(sys.executable).parent
+    yield Path(sys.base_prefix)
+    for var in ("ProgramFiles", "ProgramFiles(x86)"):
+        root = os.environ.get(var)
+        if root:
+            # e.g. .../Microsoft Visual Studio/2022/Enterprise/VC/Redist/MSVC/
+            #      14.44.35112/x64/Microsoft.VC143.CRT — newest last, so
+            #      reverse to prefer it.
+            yield from sorted(
+                (Path(root) / "Microsoft Visual Studio").glob(
+                    "*/*/VC/Redist/MSVC/*/x64/Microsoft.VC*.CRT"),
+                reverse=True)
+    yield Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+
+
+def vc_runtime():
+    """The runtime DLLs, as (source, destination) pairs for `binaries`."""
+    found, missing = [], []
+    for name in VC_RUNTIME:
+        for folder in _vc_runtime_dirs():
+            dll = folder / name
+            if dll.is_file():
+                found.append((str(dll), "."))
+                break
+        else:
+            missing.append(name)
+    if missing:
+        raise SystemExit(
+            "pose3d.spec: cannot find the Visual C++ runtime "
+            f"({', '.join(missing)}).\n"
+            "Looked beside the interpreter, in the Visual Studio redist "
+            "folders and in System32. The bundle would launch here and fail "
+            "on a clean Windows machine, so stop here instead.\n"
+            "Install the Visual C++ redistributable, or build with a "
+            "python-build-standalone interpreter (uv's default), which ships "
+            "the runtime beside python.exe.")
+    return found
+
+
 hiddenimports = [
     "OpenGL",
     "pyqtgraph.opengl",
@@ -61,7 +126,7 @@ if not IS_WINDOWS:
 a = Analysis(
     ["pose3d/app.py"],
     pathex=["."],
-    binaries=[],
+    binaries=vc_runtime() if IS_WINDOWS else [],
     datas=datas,
     hiddenimports=hiddenimports,
     # PyInstaller >= 6.5 refuses to bundle two Qt bindings at once, and pulling
@@ -70,6 +135,22 @@ a = Analysis(
               "IPython", "notebook"],
     noarchive=False,
 )
+
+if IS_WINDOWS:
+    # PyInstaller's PyOpenGL hook copies the whole OpenGL/DLLS folder: freeglut
+    # and gle built for three MSVC generations, 32- and 64-bit. Only one pair
+    # can ever be opened — OpenGL.platform.win32 hardcodes vc = 'vc14' and
+    # picks by pointer size — and the vc9/vc10 builds import msvcr90.dll and
+    # msvcr100.dll, runtimes we do not ship and Windows does not provide.
+    # Shipping DLLs whose dependencies cannot be satisfied is what stops a
+    # bundle being auditable (tools/check_bundle_deps.py), so drop the ones
+    # PyOpenGL would never open. Nothing here imports OpenGL.GLUT or OpenGL.GLE
+    # in the first place; keeping the vc14 pair means that stays a source
+    # decision rather than a packaging one.
+    a.datas = [entry for entry in a.datas
+               if "opengl/dlls/" not in entry[0].replace("\\", "/").lower()
+               or entry[0].lower().endswith("64.vc14.dll")]
+
 pyz = PYZ(a.pure)
 
 exe = EXE(

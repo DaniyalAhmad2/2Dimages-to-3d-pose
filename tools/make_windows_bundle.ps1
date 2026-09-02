@@ -53,6 +53,17 @@ try {
     Write-Host "==> app"
     Copy-Item -Recurse -Force (Join-Path $Dist "*") $Out
 
+    # Before anything else lands here: every DLL the app imports must be in the
+    # bundle or part of Windows itself. A build machine has the Visual C++
+    # runtime and Qt's dependencies installed system-wide and so cannot notice
+    # one missing from _internal\ — the client's machine notices, with
+    # "Failed to load Python DLL ... The specified module could not be found."
+    # Run now, while $Out holds only the app: Blender is a separate release
+    # with its own C runtime and is not ours to audit.
+    Write-Host "==> dependency audit"
+    & python tools/check_bundle_deps.py $Out
+    if ($LASTEXITCODE -ne 0) { throw "check_bundle_deps.py failed" }
+
     # --- Blender ---------------------------------------------------------
     if (-not $SkipBlender) {
         $short = ($BlenderVersion -split '\.')[0..1] -join '.'
