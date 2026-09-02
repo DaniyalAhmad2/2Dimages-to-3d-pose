@@ -666,7 +666,12 @@ class ProjectModel(QObject):
         `invalidate_readouts`: the camera views ask for it on every frame
         change, and it must be the SAME number the gate itself used or a
         purple dot would quote a threshold nothing was measured against.
+
+        NaN without a calibration: there is no gate, because nothing was
+        gated.
         """
+        if self.rig is None:
+            return float("nan")
         if self._epi_thr is None:
             from pose3d.pipeline import epipolar_threshold
             self._epi_thr = float(
