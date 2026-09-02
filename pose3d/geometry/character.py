@@ -315,6 +315,10 @@ class Character:
         self._rest_torso = (d / n if n > 1e-9 and not np.isnan(d).any()
                             else self.tail[self.hips_idx] - self.head[self.hips_idx])
         self._rest_ref = self._rest_roll_refs(rj)
+        # The rig's rest ankle-to-sole height, which is what the 3D view drops
+        # the ankle by to stand the character on the ground. 0.71217 rig units
+        # on the bundled rig = 4.94 % of its 14.4228 height.
+        self.ankle_sole_drop = self._rest_ankle_sole_drop(rj)
         self._rest_head = self._rest_head_basis()
         # The neck BONE's rest angle off the torso line, for the legacy
         # no-face-keypoints fallback: _bone_fk aims the bone axis at the
@@ -432,6 +436,12 @@ class Character:
             if d is not None:
                 out[b] = d
         return out
+
+    def _rest_ankle_sole_drop(self, rj):
+        """How far the rig's rest ankles sit above its soles, in rig units."""
+        z = [rj[int(j)][2] for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
+        z = [q for q in z if np.isfinite(q)]
+        return float(min(z) - self.verts0[:, 2].min()) if z else 0.0
 
     def _resolve_joint_sources(self):
         """{canonical joint: (bone index, 'head'|'tail'|'mid')} for this rig."""
@@ -745,6 +755,15 @@ class Character:
         knee = root + L1 * (cos_a * u + sin_a * w)
         return knee, root + u * dc
 
+    def _frame_scale(self, up_pose, valid):
+        """The uniform scale for one frame: the take-wide fit once
+        `fit_to_subject` has run, else this frame's own height ratio."""
+        if self._scale is not None:
+            return self._scale
+        vpts = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[valid]
+        our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
+        return self.rig_h / our_h
+
     def _skin_matrices(self, up_pose, valid, head_pts=None):
         """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
@@ -769,12 +788,7 @@ class Character:
                 return None, None, None, None
             pelvis = np.mean(hips, axis=0)
 
-        if self._scale is not None:
-            scale = self._scale
-        else:
-            vpts = up_pose[valid]
-            our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
-            scale = self.rig_h / our_h
+        scale = self._frame_scale(up_pose, valid)
 
         ls, rs = J(j.LEFT_SHOULDER), J(j.RIGHT_SHOULDER)
         Rz = np.eye(3)
@@ -901,6 +915,15 @@ class Character:
         """Rig space -> the pose space the caller supplied."""
         pts = np.atleast_2d(np.asarray(pts, float))
         return pelvis + (Rz.T @ (pts - self.hips_world).T).T / scale
+
+    def ground_drop(self, up_pose, valid) -> float:
+        """The rig's rest ankle-to-sole height in the CALLER's pose units.
+
+        Grounding on the sole beneath the ankle, rather than on whichever mesh
+        vertex is lowest this frame, is what stops the figure bobbing against
+        the grid; see `pose3d.ui.view3d.ground_datum`.
+        """
+        return self.ankle_sole_drop / self._frame_scale(up_pose, valid)
 
     def pose_and_joints(self, up_pose, valid, head_pts=None):
         """(verts, faces, joints) — mesh and canonical joints of the posed rig.
