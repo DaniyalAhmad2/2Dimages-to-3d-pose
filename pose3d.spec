@@ -33,6 +33,13 @@ datas = [
 # Weights staged into the source tree by tools/fetch_weights.py get bundled;
 # otherwise they are shipped beside the exe and found at run time. Either way
 # the app must not have to download them. See pose3d/detect/models.py.
+# The globs deliberately take EVERY staged checkpoint: BOTH pose models
+# (the COCO-17 one the app detects with today and the Halpe-26 one) plus the
+# shared YOLOX detector. Both are bundled whichever way detect.rtmpose's
+# USE_HALPE26 stands, so flipping that constant needs no build change and can
+# never produce a bundle that downloads a model on the client's machine.
+# fetch_weights.py decides what the set is, and pose3d.selftest fails the
+# build if either model is missing.
 datas += collect_data_files("pose3d.detect", includes=["models/*.onnx"])
 datas += collect_data_files("pose3d", includes=["assets/models/*.onnx"])
 

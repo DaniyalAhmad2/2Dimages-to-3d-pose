@@ -71,15 +71,27 @@ def check_character_rig() -> str:
 def check_pose_weights_offline() -> str:
     """The client may have no network, and a windowed build cannot survive
     rtmlib's download path at all — it writes progress to a stderr that does
-    not exist there."""
+    not exist there.
+
+    BOTH pose models are required, whichever one the app is currently set to
+    detect with (detect.rtmpose.USE_HALPE26). Checking only one of them is how
+    the Halpe-26 checkpoint came to be missing from every bundle ever built,
+    and requiring both means flipping that switch needs no build change.
+    """
     from pose3d.detect import models
-    w = models.resolve()
-    if w is None:
-        looked = "\n".join(f"    {d}" for d in models.search_dirs())
-        raise AssertionError(
-            "pose weights are not in this build, so the first detection would "
-            f"try to download {len(models.required_files())} files. Looked in:\n{looked}")
-    return f"{Path(w.pose).name} + {Path(w.det).name}"
+    found = []
+    for feet in (True, False):
+        w = models.resolve(feet=feet)
+        if w is None:
+            looked = "\n".join(f"    {d}" for d in models.search_dirs())
+            want = ", ".join(models.required_files(feet=feet))
+            raise AssertionError(
+                f"the {'Halpe-26' if feet else 'COCO-17'} pose weights are not "
+                "in this build, so the first detection would try to download "
+                f"them ({want}). Looked in:\n{looked}")
+        found.append(w)
+    return (f"{Path(found[0].pose).name} + {Path(found[1].pose).name} "
+            f"+ {Path(found[0].det).name}")
 
 
 def check_qt_opengl() -> str:

@@ -126,6 +126,13 @@ class ProjectData:
     # which detector layout the 2D came from; "coco17" derives NECK/PELVIS as
     # shoulder/hip midpoints, "halpe26" detects them natively.
     keypoint_model: str = "coco17"
+    # what the canonical HEAD point IS in this project: "nose" (COCO-17) or
+    # "skull" (Halpe-26's own head point, on the skull axis). The retarget
+    # corrects a nose HEAD for its ~45 deg forward anatomical offset and must
+    # not correct a skull one, so this is a semantic fact about the stored
+    # data, not a preference. Absent in a file written before the key existed
+    # -> "nose", which is what those files hold.
+    head_source: str = "nose"
     # A project built in memory is by definition current; load_project
     # overrides this with what the file says (0 for files predating the key).
     pipeline_version: int = PIPELINE_VERSION

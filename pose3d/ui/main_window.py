@@ -76,6 +76,12 @@ class MainWindow(QMainWindow):
             import cv2
             load_image = lambda p: cv2.imread(p)
         self.load_image = load_image
+        # The 3D view and the Blender export each build their own Character
+        # and never see this project, so the head convention it was detected
+        # under is published process-wide here, once, before anything is drawn.
+        # Both then read the same value and stay pose-identical.
+        from pose3d.geometry.character import set_default_head_source
+        set_default_head_source(getattr(model.project, "head_source", "nose"))
         self.setWindowTitle("Pose3D — Animation Dashboard")
         self.resize(1540, 920)
         self.statusBar().showMessage("Ready")
@@ -273,6 +279,8 @@ class MainWindow(QMainWindow):
                 from pose3d.detect.rtmpose import RTMPoseDetector
                 self.statusBar().showMessage("Loading RTMPose model…")
                 QApplication.processEvents()
+                # which pose model this is (COCO-17 / Halpe-26) is
+                # RTMPoseDetector's own default: see detect.rtmpose.USE_HALPE26
                 self.detector = RTMPoseDetector(mode="balanced", device="cpu")
             except Exception as e:
                 self.statusBar().showMessage(f"Detector unavailable: {e}", 8000)
@@ -286,6 +294,10 @@ class MainWindow(QMainWindow):
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
         QApplication.processEvents()
         try:
+            # BEFORE redetect_all, which re-poses and redraws as it goes: the
+            # 2D is about to be replaced, so what HEAD means is replaced with
+            # it, and nothing may be posed under the old convention.
+            self._adopt_head_source(det)
             self.model.redetect_all(det, self.load_image)
         finally:
             QApplication.restoreOverrideCursor()
@@ -304,6 +316,28 @@ class MainWindow(QMainWindow):
         finally:
             QApplication.restoreOverrideCursor()
         self._refresh_views()
+
+    def _adopt_head_source(self, det):
+        """Record the head convention a re-detection is about to write.
+
+        `redetect_all` replaces every 2D point, so a project detected as
+        COCO-17 becomes a Halpe-26 one; leaving `head_source` behind would have
+        the retarget correct a skull HEAD for the nose's forward offset.
+        """
+        from pose3d.geometry.character import set_default_head_source
+        source = det.head_source
+        self.model.project.head_source = source
+        set_default_head_source(source)
+        # The 3D view builds its Character once and keeps it; the Blender
+        # export builds a fresh one per export and would read the new
+        # convention immediately. Drop the cached one when the convention
+        # actually moves, or the preview and the export would pose the same
+        # frame differently — the one thing they may never do. It is rebuilt,
+        # and re-fitted by _apply_view_orientation, on the next draw.
+        view = getattr(self, "view3d", None)
+        cached = getattr(view, "_character", None)
+        if cached is not None and cached.head_source != source:
+            view._character = None
 
     def _on_recalibrate(self):
         self.model.recompute_all()

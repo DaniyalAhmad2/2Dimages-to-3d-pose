@@ -119,3 +119,24 @@ def test_bundled_path_gives_the_same_numbers_as_rtmlib():
     assert np.asarray(kp_a).shape == (1, 17, 2)
     assert np.allclose(np.asarray(kp_a), np.asarray(kp_b))
     assert np.allclose(np.asarray(sc_a), np.asarray(sc_b))
+
+
+def test_staging_carries_both_pose_models(monkeypatch, tmp_path):
+    """The Halpe-26 checkpoint used to be behind a --feet flag no delivery
+    passed, so every bundle shipped without it. Whether the app runs that model
+    is one constant (detect.rtmpose.USE_HALPE26); whether the bundle CONTAINS
+    it must not be a second decision, or flipping the constant ships a build
+    that downloads on first use."""
+    import sys
+
+    import tools.fetch_weights as fw
+
+    staged = []
+    monkeypatch.setattr(
+        fw, "stage",
+        lambda out, mode, feet, allow_download: staged.append((mode, feet)) or [])
+    monkeypatch.setattr(sys, "argv",
+                        ["fetch_weights.py", "--out", str(tmp_path),
+                         "--no-download"])
+    fw.main()
+    assert staged == [("balanced", False), ("balanced", True)]

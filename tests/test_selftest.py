@@ -173,3 +173,25 @@ def test_video_is_a_separate_check_that_can_be_skipped_entirely():
     names = [n for n, _ in selftest.checks(video=True)]
     assert "export BVH + FBX" in names and "render preview video" in names
     assert "render preview video" not in [n for n, _ in selftest.checks(video=False)]
+
+
+def test_both_pose_models_must_be_in_the_build(monkeypatch):
+    """The bundle has to carry the model the app RUNS, not just the one it
+    used to run. Checking only one configuration is how a delivery could ship
+    without the other and fall through to rtmlib's downloader on the client's
+    machine — the exact failure detect/models.py exists to prevent."""
+    from pose3d.detect import models
+
+    asked = []
+
+    def only_coco(mode="balanced", feet=False):
+        asked.append(feet)
+        return None if feet else models.Weights(
+            det="yolox.onnx", det_input_size=(640, 640),
+            pose="rtmpose.onnx", pose_input_size=(192, 256))
+
+    monkeypatch.setattr(models, "resolve", only_coco)
+    with pytest.raises(AssertionError) as e:
+        selftest.check_pose_weights_offline()
+    assert "Halpe-26" in str(e.value)
+    assert True in asked

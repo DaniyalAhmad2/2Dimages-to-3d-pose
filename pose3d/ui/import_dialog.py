@@ -213,6 +213,11 @@ class ImportDialog(QDialog):
             det = self._ensure_detector()
             project.detector = (
                 f"rtmpose-{det.mode}" + ("-feet" if det.feet else ""))
+            # what this detector's canonical HEAD point IS, so the retarget
+            # cannot correct a skull HEAD for the nose's forward offset.
+            # KeypointDetector declares the attribute, so a detector that
+            # forgets it cannot silently fall back to "nose".
+            project.head_source = det.head_source
             prog.setMaximum(len(project.frames))
             prog.setLabelText("Detecting keypoints…")
             from pose3d.pipeline import detect_project
@@ -266,6 +271,8 @@ class ImportDialog(QDialog):
     def _ensure_detector(self):
         if self._detector is None:
             from pose3d.detect.rtmpose import RTMPoseDetector
+            # which pose model this is (COCO-17 / Halpe-26) is
+            # RTMPoseDetector's own default: see detect.rtmpose.USE_HALPE26
             self._detector = RTMPoseDetector(mode="balanced", device="cpu")
         return self._detector
 

@@ -6,6 +6,10 @@ carry the same files and neither downloads anything at run time.
 
     python tools/fetch_weights.py --out docker/vendor/rtmlib-cache
 
+Stages the checkpoints for BOTH pose models — COCO-17 and Halpe-26, either of
+which the app can be set to detect with — plus the shared YOLOX person
+detector.
+
 Files already present are left alone, so this is cheap to re-run and works
 offline once a machine has them. With no network and nothing cached it exits
 non-zero rather than producing a bundle that would download on the client's
@@ -58,17 +62,22 @@ def main() -> int:
                     help="folder to stage the .onnx files into")
     ap.add_argument("--mode", default="balanced",
                     choices=("lightweight", "balanced", "performance"))
-    ap.add_argument("--feet", action="store_true",
-                    help="also stage the Halpe-26 (with feet) pose model")
     ap.add_argument("--no-download", action="store_true",
                     help="fail rather than reach the network")
     a = ap.parse_args()
 
     print(f"staging into {a.out}")
+    # BOTH pose models, always. The Halpe-26 checkpoint used to sit behind a
+    # --feet flag that no delivery passed, so every bundle ever built shipped
+    # without it and would have fallen through to rtmlib's downloader on the
+    # client's machine the moment the app asked for that model — the exact
+    # failure pose3d/detect/models.py exists to prevent. Which model the app
+    # runs is one constant (detect.rtmpose.USE_HALPE26); what the bundle
+    # CONTAINS must not be a second decision. The YOLOX person detector is
+    # shared, so this is one extra file (55.7 MB).
     staged = stage(a.out, a.mode, feet=False, allow_download=not a.no_download)
-    if a.feet:
-        staged += stage(a.out, a.mode, feet=True,
-                        allow_download=not a.no_download)
+    staged += stage(a.out, a.mode, feet=True,
+                    allow_download=not a.no_download)
 
     total = sum(p.stat().st_size for p in set(staged))
     print(f"{len(set(staged))} file(s), {total / 1e6:.0f} MB")

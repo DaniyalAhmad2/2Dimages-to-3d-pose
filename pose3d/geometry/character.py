@@ -30,12 +30,42 @@ _MID = "MID"        # midpoint(pelvis, neck) — the torso split point
 _EAR_MID = "EAR_MID"  # midpoint of the ears — a real point on the skull axis
 
 # LEGACY fallback only — used when a frame has no face keypoints (projects
-# saved before they existed, or the manual detector). The canonical HEAD is
-# then the NOSE, which sits ~45 deg forward of the torso line on real
-# captures, so aiming the neck straight at it would pitch the head down
-# permanently; _head_aim_target rotates the target back by this anatomical
-# offset. Dies when face keypoints are universal.
+# saved before they existed, or the manual detector) AND the canonical HEAD is
+# the NOSE (`head_source == "nose"`, i.e. a COCO-17 project). The nose sits
+# ~45 deg forward of the torso line on real captures, so aiming the neck
+# straight at it would pitch the head down permanently; _head_aim_target
+# rotates the target back by this anatomical offset.
+#
+# A Halpe-26 project's HEAD is the SKULL VERTEX, which is already on the head's
+# axis, so this correction must not be applied to it — that would be a second
+# correction on data that needs none. It is not merely redundant there: it only
+# ever looked harmless because `max(rest_pitch + theta - _NOSE_PITCH, 0)`
+# saturates at 0 for a skull-axis point, which throws the measured pitch away.
 _NOSE_PITCH = np.radians(45.0)
+
+# What the canonical HEAD is, when nobody says. "nose" is the legacy answer and
+# the truthful default: every project written before `head_source` existed was
+# COCO-17. `pose3d.ui.main_window` sets this from the open project, so the
+# live 3D view and the Blender export — which both build their own Character
+# and never see a ProjectData — stay pose-identical by construction.
+HEAD_SOURCES = ("nose", "skull")
+_DEFAULT_HEAD_SOURCE = "nose"
+
+
+def set_default_head_source(source: str | None) -> None:
+    """Set the head convention a `Character()` built with no argument uses."""
+    global _DEFAULT_HEAD_SOURCE
+    source = source or "nose"
+    if source not in HEAD_SOURCES:
+        raise ValueError(f"head_source must be one of {HEAD_SOURCES}, "
+                         f"not {source!r}")
+    _DEFAULT_HEAD_SOURCE = source
+
+
+def default_head_source() -> str:
+    """The head convention a `Character()` built with no argument uses."""
+    return _DEFAULT_HEAD_SOURCE
+
 
 # Pipeline role -> candidate bone names, tried in order. Covers the legacy
 # Blender meta-rig (what we ship), Rigify, and Mixamo/UE naming so a replacement
@@ -169,12 +199,12 @@ _ROLL_WEIGHT = 1.0
 # a bone's head is the exact FK position carried by its parent, so the reported
 # skeleton is guaranteed consistent with the mesh. Fallbacks are used when the
 # rig lacks the bone (e.g. no hand bone -> the forearm's tail is the wrist).
+# HEAD is deliberately absent: what it is read back from depends on what the
+# capture's HEAD point IS, so it lives in _HEAD_FROM_RIG and is filled in per
+# head_source by _resolve_joint_sources.
 _JOINT_FROM_RIG = {
     Joint.PELVIS: (("hips", "head"),),
     Joint.NECK: (("neck", "head"), ("chest", "tail")),
-    # the head bone's tail sits on the mesh surface; its midpoint sits inside
-    # the skull, which is what an overlay needs
-    Joint.HEAD: (("head", "mid"),),
     Joint.LEFT_SHOULDER: (("upper_arm.L", "head"),),
     Joint.RIGHT_SHOULDER: (("upper_arm.R", "head"),),
     Joint.LEFT_ELBOW: (("forearm.L", "head"), ("upper_arm.L", "tail")),
@@ -187,6 +217,29 @@ _JOINT_FROM_RIG = {
     Joint.RIGHT_KNEE: (("shin.R", "head"), ("thigh.R", "tail")),
     Joint.LEFT_ANKLE: (("foot.L", "head"), ("shin.L", "tail")),
     Joint.RIGHT_ANKLE: (("foot.R", "head"), ("shin.R", "tail")),
+}
+
+# Where HEAD is read back from, per head_source. A nose HEAD has no counterpart
+# on the rig at all (the rig has no face), so the head bone's MIDPOINT — inside
+# the skull, roughly the centre of the head — is the honest stand-in. A skull
+# HEAD is Halpe's head point, at the top of the skull, which is exactly where
+# the head bone's TAIL sits; reading the midpoint for it would report the head
+# half a bone short of where the capture says it is. This is not only a
+# readout: `rest_joints` feeds the uniform scale fit and the rest references,
+# so it must name the same anatomy the capture does.
+#
+# Measured on the client take rather than assumed, and deliberately NOT on the
+# head-position metric alone (F03's refuter showed that one misleads — its
+# variant improved the head metric while tripling the visible nose-to-mesh
+# distance). Skull HEAD, mid -> tail: HEAD retarget 3.42 -> 1.54 % of height
+# with no face points and 3.93 -> 1.67 % with them; head aim error 4.95 ->
+# 3.83 deg max (1.22 -> 1.19 median); whole-body retarget median 1.57 ->
+# 1.49 %; and the refuter's own metric flat — reconstructed nose to nearest
+# mesh vertex 1.24 -> 1.20 mm, ear 1.22 -> 1.19 mm.
+# `tools/measure_head_gates.py --variants` re-derives all of those.
+_HEAD_FROM_RIG = {
+    "nose": (("head", "mid"),),
+    "skull": (("head", "tail"),),
 }
 
 # Legs weigh double when fitting the uniform scale: feet not reaching the floor
@@ -260,7 +313,21 @@ def _bend_weight(bend_deg):
 
 
 class Character:
-    def __init__(self, path=_ASSET):
+    """The bundled rig, posed to mimic a reconstructed skeleton.
+
+    `head_source` says what the capture's canonical HEAD point is — "nose"
+    (COCO-17) or "skull" (Halpe-26's head point, on the skull axis). It
+    changes two things and nothing else: where HEAD is read back from on the
+    rig, and whether the legacy no-face-keypoints neck aim applies the nose's
+    anatomical offset. Defaults to the process-wide `default_head_source()`,
+    which is "nose" unless the application has said otherwise.
+    """
+
+    def __init__(self, path=_ASSET, head_source: str | None = None):
+        self.head_source = head_source or default_head_source()
+        if self.head_source not in HEAD_SOURCES:
+            raise ValueError(f"head_source must be one of {HEAD_SOURCES}, "
+                             f"not {self.head_source!r}")
         d = np.load(path, allow_pickle=True)
         self.verts0 = d["verts"].astype(float)          # (V,3) rest, world
         self.faces = d["faces"].astype(np.int32)
@@ -463,7 +530,10 @@ class Character:
     def _resolve_joint_sources(self):
         """{canonical joint: (bone index, 'head'|'tail'|'mid')} for this rig."""
         out = {}
-        for j, cands in _JOINT_FROM_RIG.items():
+        sources = dict(_JOINT_FROM_RIG)
+        # the one joint whose rig point depends on what the capture's HEAD is
+        sources[Joint.HEAD] = _HEAD_FROM_RIG[self.head_source]
+        for j, cands in sources.items():
             for role, which in cands:
                 if role in self.role:
                     out[int(j)] = (self.role[role], which)
@@ -533,18 +603,26 @@ class Character:
 
     # --- posing ------------------------------------------------------------
     def _head_aim_target(self, J, pelvis):
-        """LEGACY neck target when a frame has no face keypoints.
+        """Neck target when a frame has no face keypoints.
 
-        The canonical HEAD is the nose; its direction off the torso line is
-        shifted so the anatomical neutral (_NOSE_PITCH) lands on the rig's own
-        rest head pitch, clamped at the torso line (with one head point,
-        "looking up" cannot be told apart from skull-convention data, so it
-        saturates at neutral). Computed in pose space — angles survive the
-        rigid + uniform-scale to_rig map. This is exactly the behaviour of the
-        last build before face keypoints existed, so old projects and the
-        manual detector are unchanged.
+        With a SKULL head_source the captured HEAD is already on the head's
+        axis, so it IS the target: the neck aims straight at it, with no
+        anatomical offset and no clamp. That is the whole of the head fix on
+        the no-face-keypoints path.
+
+        With a NOSE head_source (COCO-17, and every project written before
+        head_source existed) the target is the nose, whose direction off the
+        torso line is shifted so the anatomical neutral (_NOSE_PITCH) lands on
+        the rig's own rest head pitch, clamped at the torso line (with one
+        head point, "looking up" cannot be told apart from skull-convention
+        data, so it saturates at neutral). Computed in pose space — angles
+        survive the rigid + uniform-scale to_rig map. This is exactly the
+        behaviour of the last build before face keypoints existed, so old
+        projects and the manual detector are unchanged, bit for bit.
         """
         h, n = J(Joint.HEAD), J(Joint.NECK)
+        if self.head_source == "skull":
+            return h                       # already on the skull axis
         if h is None or n is None or pelvis is None \
                 or not np.isfinite(np.asarray(pelvis)).all():
             return None                    # nothing to correct against: inherit

@@ -1,16 +1,26 @@
-"""Canonical skeleton definition and COCO-17 -> canonical mapping.
+"""Canonical skeleton definition and detector -> canonical mappings.
 
-This is the single source of truth for joint identity in the whole app.
-Detectors emit COCO-17; we map to a canonical joint set that ADDS the
-derived joints the UI/mockup needs (neck, pelvis) and uses nose as the
-single head point (per client: one head point, not a 5-point face mesh).
+This is the single source of truth for joint identity in the whole app. Two
+detector layouts reach it, and each has its own mapping:
 
-COCO-17 has no neck / pelvis / head-top, so those are derived by the
-standard midpoint convention (same as OpenPose BODY_25 neck/mid-hip):
-    head   = nose
-    neck   = midpoint(left_shoulder, right_shoulder)
-    pelvis = midpoint(left_hip, right_hip)
+* COCO-17 (`derive_joints`) is what the app detects with today. It has no
+  neck / pelvis / head-top at all, so those are derived by the standard
+  midpoint convention (same as OpenPose BODY_25 neck/mid-hip):
+      head   = nose
+      neck   = midpoint(left_shoulder, right_shoulder)
+      pelvis = midpoint(left_hip, right_hip)
+* Halpe-26 (`map_halpe26`) is the other layout the detector can run
+  (`detect.rtmpose.USE_HALPE26`). It carries a native head point — the skull
+  vertex — which is taken as `Joint.HEAD`, while NECK and PELVIS stay 2D
+  midpoints; see `map_halpe26` for why the three are not decided together.
+
 Derived-joint confidence = min(parent confidences) (conservative).
+
+Which of the two produced a project decides how its HEAD may be used
+downstream: a skull-vertex HEAD sits on the head's axis, a nose does not.
+That is recorded per project as `head_source` (see `HEAD_SOURCE`) and read by
+`pose3d.geometry.character`, so the two conventions can never be corrected
+for twice.
 """
 from __future__ import annotations
 
@@ -59,7 +69,7 @@ class Joint(IntEnum):
     COCO-17 based; feet are intentionally excluded (they are unreliable when
     the subject's feet are near/outside the frame).
     """
-    HEAD = 0          # nose
+    HEAD = 0          # Halpe-26: the skull vertex; COCO-17: the nose
     NECK = 1          # derived: midpoint(shoulders)
     LEFT_SHOULDER = 2
     RIGHT_SHOULDER = 3
@@ -142,6 +152,10 @@ def derive_joints(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Map COCO-17 keypoints to the canonical joint set.
 
+    COCO-17 has no head-top, neck or pelvis, so HEAD is the nose and the other
+    two are midpoints. This is the layout the app detects through today;
+    `map_halpe26` is the alternative (see `detect.rtmpose.USE_HALPE26`).
+
     Parameters
     ----------
     coco_xy : (17, 2) float array of pixel coords in COCO-17 order.
@@ -177,41 +191,125 @@ def derive_joints(
 
 
 # --- Halpe-26 (RTMPose BodyWithFeet) -> canonical --------------------------
-# Halpe26 order: 0-16 = COCO17, 17 head, 18 neck, 19 hip(pelvis),
-# 20 L big toe, 21 R big toe, 22 L small toe, 23 R small toe, 24 L heel, 25 R heel
-HALPE26_TO_CANONICAL: dict[int, Joint] = {
-    17: Joint.HEAD,           # native head
-    18: Joint.NECK,           # native neck
-    5: Joint.LEFT_SHOULDER,
-    6: Joint.RIGHT_SHOULDER,
-    7: Joint.LEFT_ELBOW,
-    8: Joint.RIGHT_ELBOW,
-    9: Joint.LEFT_WRIST,
-    10: Joint.RIGHT_WRIST,
-    19: Joint.PELVIS,         # native mid-hip
-    11: Joint.LEFT_HIP,
-    12: Joint.RIGHT_HIP,
-    13: Joint.LEFT_KNEE,
-    14: Joint.RIGHT_KNEE,
-    15: Joint.LEFT_ANKLE,
-    16: Joint.RIGHT_ANKLE,
-    # feet (Halpe indices 20/21) intentionally excluded
+# Halpe26 order: 0-16 = COCO17, 17 head (skull vertex), 18 neck, 19 hip
+# (pelvis), 20 L big toe, 21 R big toe, 22 L small toe, 23 R small toe,
+# 24 L heel, 25 R heel.
+HALPE26_NAMES: list[str] = COCO17_NAMES + [
+    "head", "neck", "hip",
+    "left_big_toe", "right_big_toe", "left_small_toe", "right_small_toe",
+    "left_heel", "right_heel",
+]
+HALPE26_INDEX: dict[str, int] = {n: i for i, n in enumerate(HALPE26_NAMES)}
+NUM_HALPE26 = len(HALPE26_NAMES)
+
+# The joints Halpe-26 and COCO-17 agree about, index for index. HEAD, NECK and
+# PELVIS are deliberately absent: those three are the policy (see map_halpe26).
+_DIRECT_FROM_HALPE26: dict[Joint, int] = {
+    joint: idx for joint, idx in _DIRECT_FROM_COCO.items()
+    if joint is not Joint.HEAD
 }
 
+# Which Halpe index each policy takes for the three joints that have a choice.
+# "native" is the model's own point; "derived" is the 2D midpoint convention
+# `derive_joints` uses; "nose" is COCO's head point.
+_HALPE26_POLICY_INDEX: dict[Joint, dict[str, int]] = {
+    Joint.HEAD: {"native": HALPE26_INDEX["head"],   # the skull vertex
+                 "nose": HALPE26_INDEX["nose"]},
+    Joint.NECK: {"native": HALPE26_INDEX["neck"]},
+    Joint.PELVIS: {"native": HALPE26_INDEX["hip"]},
+}
+# Parents of the two joints the midpoint convention derives.
+_HALPE26_DERIVED_FROM: dict[Joint, tuple[int, int]] = {
+    Joint.NECK: (HALPE26_INDEX["left_shoulder"], HALPE26_INDEX["right_shoulder"]),
+    Joint.PELVIS: (HALPE26_INDEX["left_hip"], HALPE26_INDEX["right_hip"]),
+}
 
-def map_halpe26(kp: np.ndarray, scores: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-    """Map Halpe-26 keypoints to the canonical joint set (incl. feet).
+# What a given HEAD policy means anatomically — the value persisted in
+# project.json as `head_source`, which is what tells the retarget whether the
+# canonical HEAD is a point on the skull axis or the nose (see
+# pose3d.geometry.character).
+HEAD_SOURCE: dict[str, str] = {"native": "skull", "nose": "nose"}
 
-    kp : (26, 2), scores : (26,). All canonical joints are direct (no
-    derivation) since Halpe26 provides native neck/pelvis/head + feet.
+#: The shipped policy, and `map_halpe26`'s defaults (bound from here, so this
+#: dict is the single place the app's choice lives). Reverting HEAD to the
+#: COCO convention — the rollback for this whole change — is one edit here.
+HALPE26_POLICY: dict[str, str] = {
+    "head": "native", "neck": "derived", "pelvis": "derived"}
+
+#: What `head_source` a project detected under HALPE26_POLICY gets.
+HALPE26_HEAD_SOURCE: str = HEAD_SOURCE[HALPE26_POLICY["head"]]
+
+
+def map_halpe26(kp: np.ndarray, scores: np.ndarray,
+                head: str = HALPE26_POLICY["head"],
+                neck: str = HALPE26_POLICY["neck"],
+                pelvis: str = HALPE26_POLICY["pelvis"],
+                ) -> tuple[np.ndarray, np.ndarray]:
+    """Map Halpe-26 keypoints to the canonical joint set, under a POLICY.
+
+    The three joints Halpe detects natively are the only ones worth arguing
+    about, and the argument does not come out the same way for all three, so
+    each is a separate knob rather than one "use Halpe" flag:
+
+    * ``head="native"`` takes Halpe's own head point (the skull vertex).
+      Measured on the client take that is the single largest available win:
+      HEAD retarget error 12.65 -> 3.93 % of body height with no face
+      keypoints, and the neck-head bone-length CV on the rigid mannequin
+      9.53 -> 3.85 %, which was the worst bone in the whole baseline.
+      ``head="nose"`` is the COCO-17 convention and the one-line rollback.
+    * ``neck="derived"``/``pelvis="derived"`` keep the per-view 2D midpoints,
+      because Halpe's native neck is NOT the shoulder midpoint: taking it
+      regresses the neck-Lshoulder bone CV 5.15 -> 8.13 %. The midpoints cost
+      essentially nothing geometrically (triangulating the midpoint of the
+      projections rather than projecting the 3D midpoint is 0.25 mm at NECK
+      and 0.08 mm at PELVIS) and are better conditioned (derived NECK
+      epipolar 1.51 px against its parents' 3.86).
+
+    Feet (Halpe 20-25) are intentionally not mapped: the canonical joint set
+    has no foot joints.
+
+    Parameters
+    ----------
+    kp : (26, 2) float array of pixel coords in Halpe-26 order.
+    scores : (26,) float array of per-keypoint confidence in [0, 1].
+    head : "native" (skull vertex) or "nose".
+    neck, pelvis : "derived" (2D midpoint of the parents) or "native".
+
+    Returns
+    -------
+    xy : (NUM_JOINTS, 2) float array in canonical Joint order.
+    scores : (NUM_JOINTS,) float array; derived joints use min(parents).
     """
-    kp = np.asarray(kp, dtype=float).reshape(26, 2)
-    scores = np.asarray(scores, dtype=float).reshape(26)
+    kp = np.asarray(kp, dtype=float).reshape(NUM_HALPE26, 2)
+    scores = np.asarray(scores, dtype=float).reshape(NUM_HALPE26)
+    policy = {Joint.HEAD: head, Joint.NECK: neck, Joint.PELVIS: pelvis}
+
     xy = np.full((NUM_JOINTS, 2), np.nan, dtype=float)
     sc = np.zeros(NUM_JOINTS, dtype=float)
-    for h_idx, joint in HALPE26_TO_CANONICAL.items():
-        xy[int(joint)] = kp[h_idx]
-        sc[int(joint)] = scores[h_idx]
+    for joint, idx in _DIRECT_FROM_HALPE26.items():
+        xy[int(joint)] = kp[idx]
+        sc[int(joint)] = scores[idx]
+
+    for joint, choice in policy.items():
+        if choice == "derived":
+            parents = _HALPE26_DERIVED_FROM.get(joint)
+            if parents is None:
+                raise ValueError(
+                    f"{joint.name} has no midpoint convention to derive it "
+                    f"from; use {sorted(_HALPE26_POLICY_INDEX[joint])}")
+            a, b = parents
+            xy[int(joint)] = (kp[a] + kp[b]) / 2.0
+            sc[int(joint)] = min(scores[a], scores[b])
+            continue
+        idx = _HALPE26_POLICY_INDEX[joint].get(choice)
+        if idx is None:
+            allowed = sorted(set(_HALPE26_POLICY_INDEX[joint])
+                             | ({"derived"} if joint in _HALPE26_DERIVED_FROM
+                                else set()))
+            raise ValueError(f"{joint.name} policy must be one of {allowed}, "
+                             f"not {choice!r}")
+        xy[int(joint)] = kp[idx]
+        sc[int(joint)] = scores[idx]
     return xy, sc
 
 

@@ -52,7 +52,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: .cache/models
-          key: rtmlib-weights-balanced-v1
+          key: rtmlib-weights-balanced-halpe-v2
 
       - name: Build the executable
         run: uv run pyinstaller pose3d.spec --noconfirm --clean

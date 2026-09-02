@@ -136,3 +136,73 @@ def test_smoothing_choice_round_trips(tmp_path):
     p.smoothing = "ema0.6"
     save_project(p, tmp_path)
     assert load_project(tmp_path).smoothing == "ema0.6"
+
+
+# --- Halpe-26 / head_source ------------------------------------------------
+
+def test_head_source_round_trips(tmp_path):
+    """What the canonical HEAD point IS has to survive save/load: the retarget
+    corrects a nose HEAD for the nose's ~45 deg forward offset and must not
+    correct a skull one, so guessing it would double-correct the head."""
+    import json
+
+    p = _make_project()
+    assert p.head_source == "nose"            # the safe default in memory
+    p.keypoint_model = "halpe26"
+    p.head_source = "skull"
+    save_project(p, tmp_path)
+
+    doc = json.loads((tmp_path / "project.json").read_text())
+    assert doc["head_source"] == "skull"
+
+    q = load_project(tmp_path)
+    assert q.head_source == "skull"
+    assert q.keypoint_model == "halpe26"
+
+    # a file written before the key existed is a COCO-17 project, whose HEAD
+    # is the nose — that is a fact about the data, not a default to be clever
+    # about, so it must load as "nose" rather than as anything else
+    doc.pop("head_source")
+    (tmp_path / "project.json").write_text(json.dumps(doc))
+    assert load_project(tmp_path).head_source == "nose"
+
+
+def test_halpe_frame_loses_nothing(tmp_path):
+    """Halpe-26 detections must survive storage unchanged.
+
+    `_json_to_arr` truncates rows past NUM_JOINTS, so a 26-row array would be
+    silently cut. It cannot happen — `map_halpe26` reduces the 26 keypoints to
+    the 15 canonical joints before anything is stored, and head2d is 5 rows by
+    construction — and this is the test that keeps that true.
+    """
+    from pose3d.core.skeleton import (
+        NUM_HEAD_KP, extract_head, map_halpe26,
+    )
+
+    rng = np.random.default_rng(4)
+    kp = rng.uniform(0, 3000, (26, 2))
+    scores = rng.uniform(0.2, 1.0, 26)
+    xy, sc = map_halpe26(kp, scores)
+    hxy, hsc = extract_head(kp, scores)
+    assert xy.shape == (NUM_JOINTS, 2) and hxy.shape == (NUM_HEAD_KP, 2)
+
+    p = ProjectData(name="halpe", keypoint_model="halpe26", head_source="skull")
+    f = Frame(frame_id="0001")
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        f.kp2d[cam] = xy.copy()
+        f.scores[cam] = sc.copy()
+        f.head2d[cam] = hxy.copy()
+        f.head_scores[cam] = hsc.copy()
+    p.frames.append(f)
+
+    save_project(p, tmp_path)
+    g = load_project(tmp_path).frames[0]
+
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        assert np.allclose(g.kp2d[cam], xy, equal_nan=True)
+        assert np.allclose(g.scores[cam], sc, equal_nan=True)
+        assert np.allclose(g.head2d[cam], hxy, equal_nan=True)
+        assert np.allclose(g.head_scores[cam], hsc, equal_nan=True)
+        # nothing was dropped off the end of either array
+        assert g.kp2d[cam].shape == (NUM_JOINTS, 2)
+        assert g.head2d[cam].shape == (NUM_HEAD_KP, 2)
