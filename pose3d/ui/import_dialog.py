@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (
 
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.calib.resolve import (
-    load_extrinsics_json, resolve_calibration, save_rig,
+    finalize_world_up, load_extrinsics_json, resolve_calibration, save_rig,
 )
 from pose3d.core.importer import build_project, match_frames
 from pose3d.core.io_project import save_project
@@ -240,6 +240,11 @@ class ImportDialog(QDialog):
                 dropped = triangulate_project(project, rig)
                 report = fit_project(project, smooth=smooth)
                 save_rig(rig, folder / "calibration", cal.report)
+                # The calibration was resolved before any of the above, so its
+                # recorded vertical had no poses to take its SENSE from and
+                # fell back to "the phones were held upright". Now there are
+                # poses: settle it on the body and rewrite the two files.
+                finalize_world_up(project, folder / "calibration")
 
             save_project(project, folder)
             prog.close()

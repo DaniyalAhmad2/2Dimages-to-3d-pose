@@ -111,6 +111,14 @@ class ProjectModel(QObject):
         smoothing = self.project.smoothing
         report = fit_project(self.project, smooth=smoothing != "none",
                              alpha=_smoothing_alpha(smoothing))
+        if self.project_dir:
+            # the recorded vertical's SENSE is decided by the poses, and the
+            # poses have just changed (see calib.resolve.finalize_world_up).
+            # A no-op unless the answer actually moved.
+            from pathlib import Path
+
+            from pose3d.calib.resolve import finalize_world_up
+            finalize_world_up(self.project, Path(self.project_dir) / "calibration")
         self.set_frame(self.current)
         msg = f"Recalculated 3D for {len(self.project.frames)} frames"
         notes = [n for n in (rejection_note(dropped, len(self.project.frames)),

@@ -282,12 +282,21 @@ class Sidebar(QWidget):
         self.calib_warn.setVisible(bool(warnings))
 
     def show_levelling_note(self, on: bool, source: str = "subject",
-                            spread_deg: float | None = None):
+                            spread_deg: float | None = None,
+                            recorded=None):
         """Say which vertical the 3D view levelled on, and how sure it is.
 
         A recorded vertical comes with a number (the spread between the proxies
         it averages) and the number is the point: "±14 deg" is a fact the user
         can weigh, "levelled" is not.
+
+        `recorded` is the (up, source, spread) read from the calibration
+        folder, whether or not the view used it. When it exists but carries no
+        spread — one proxy survived, so nothing disagreed with it and nothing
+        confirmed it either — the note says UNVERIFIED. It must never say
+        "±0°": that is the wording for three estimates agreeing exactly, and
+        printing it for one unchecked estimate sells the weakest evidence the
+        app can hold as the strongest.
         """
         if source and source != "subject" and spread_deg is not None:
             self.vertical_ref.setText(
@@ -295,6 +304,14 @@ class Sidebar(QWidget):
                 f"±{spread_deg:.0f}° between those estimates. The 3D view and "
                 f"the export both use it, so a lean held all take stays a "
                 f"lean.")
+        elif (recorded is not None and recorded[0] is not None
+                and recorded[2] is None):
+            self.vertical_ref.setText(
+                f"Vertical: estimated from the subject. A vertical was "
+                f"recorded at calibration (from the {recorded[1]}) but is "
+                f"unverified — only one estimate, with nothing to check it "
+                f"against — so it is not used. A lean held through the whole "
+                f"take reads as upright.")
         else:
             self.vertical_ref.setText(_SUBJECT_VERTICAL)
         self.vertical_ref.setVisible(bool(on))

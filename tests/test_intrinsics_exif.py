@@ -151,10 +151,17 @@ def test_keyless_file_does_not_become_measured(tmp_path):
     assert Intrinsics.load(tmp_path / "m.json").source == "measured"
 
 
-def test_a_checkerboard_never_overwrites_a_measured_calibration():
+def test_a_checkerboard_never_overwrites_a_measured_calibration(monkeypatch):
     """The one-time override is gated on provenance: a guess is replaced, a
     real calibration is not, so re-running the import cannot quietly demote a
-    camera that was properly calibrated."""
+    camera that was properly calibrated.
+
+    `calibrate_checkerboard` is stubbed rather than fed a real board: the
+    assertion is that the override RAN and returned what the board measured.
+    An earlier version asserted only that some ValueError came back from an
+    empty image list, which would have passed just as happily if the gate were
+    inverted and the guess were the thing being kept."""
+    from pose3d.calib import intrinsics as intrinsics_mod
     from pose3d.calib.intrinsics import checkerboard_override
 
     measured = Intrinsics(K=np.eye(3), dist=np.zeros((1, 5)),
@@ -164,5 +171,25 @@ def test_a_checkerboard_never_overwrites_a_measured_calibration():
 
     guessed = Intrinsics(K=np.eye(3), dist=np.zeros((1, 5)),
                          image_size=(640, 480), source="assumed")
-    with pytest.raises(ValueError):        # ...and a guess does go to calibrate
-        checkerboard_override(guessed, [], (9, 6))
+    measured_k = Intrinsics(K=np.array([[610.0, 0, 318.0], [0, 612.0, 242.0],
+                                        [0, 0, 1.0]]),
+                            dist=np.array([[0.02, -0.004, 0, 0, 0]]),
+                            image_size=(640, 480), rms=0.31, source="measured")
+    calls = []
+
+    def fake_calibrate(images, pattern_size, square_size=1.0):
+        calls.append((pattern_size, square_size))
+        return measured_k
+
+    monkeypatch.setattr(intrinsics_mod, "calibrate_checkerboard", fake_calibrate)
+    # ...and a guess IS replaced, by the calibration the board measured
+    got = checkerboard_override(guessed, [np.zeros((480, 640), np.uint8)],
+                                (9, 6), 0.025)
+    assert got is measured_k and got.source == "measured"
+    assert calls == [((9, 6), 0.025)]
+
+    # a board shot at a different resolution is not this camera's calibration
+    other = Intrinsics(K=np.eye(3), dist=np.zeros((1, 5)),
+                       image_size=(1920, 1080), source="assumed")
+    with pytest.raises(ValueError, match="capture resolution"):
+        checkerboard_override(other, [np.zeros((480, 640), np.uint8)], (9, 6))

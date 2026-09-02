@@ -311,16 +311,26 @@ class MainWindow(QMainWindow):
         self._refresh_views(); self._refresh_timeline_status()
         self._refresh_calibration_status()
 
-    def _refresh_calibration_status(self):
+    def _recorded_vertical(self):
+        """The vertical recorded in this project's calibration folder, or None.
+
+        Read from disk every time rather than cached: the sidebar, the 3D view
+        and the export must all state the SAME vertical, and a cache set as a
+        side effect of drawing the view makes the export's answer depend on
+        whether the view happened to be refreshed first.
+        """
         from pathlib import Path
 
-        from pose3d.calib.quality import check_rig
         from pose3d.calib.resolve import load_world_up
-        recorded = None
-        if self.model.project_dir:
-            recorded = load_world_up(Path(self.model.project_dir) / "calibration")
+        if not self.model.project_dir:
+            return None
+        return load_world_up(Path(self.model.project_dir) / "calibration")
+
+    def _refresh_calibration_status(self):
+        from pose3d.calib.quality import check_rig
         self.sidebar.set_calibrated(self.model.rig is not None,
-                                    check_rig(self.model.rig, recorded))
+                                    check_rig(self.model.rig,
+                                              self._recorded_vertical()))
 
     def _on_import(self):
         from PySide6.QtWidgets import QMessageBox
@@ -406,7 +416,7 @@ class MainWindow(QMainWindow):
         worker = _ExportWorker(poses, out, self.model.project.name,
                                self.model.project.fps, self.model.current,
                                head3d=heads, filled=filled,
-                               recorded_up=getattr(self, "_recorded_up", None))
+                               recorded_up=self._recorded_vertical())
         self._export_worker = worker       # keep a reference
         worker.status.connect(prog.setLabelText)
 
@@ -531,14 +541,8 @@ class MainWindow(QMainWindow):
         else the subject's own body line as before. The sidebar states which,
         and how uncertain it is.
         """
-        from pathlib import Path
-
-        from pose3d.calib.resolve import load_world_up
         from pose3d.geometry.orient import take_up, de_tilt_matrix
-        recorded = None
-        if self.model.project_dir:
-            recorded = load_world_up(Path(self.model.project_dir) / "calibration")
-        self._recorded_up = recorded          # the export levels on it too
+        recorded = self._recorded_vertical()  # the export reads it too
         frames = self.model.project.frames
         poses = [f.fitted3d for f in frames
                  if f.fitted3d is not None and not np.isnan(f.fitted3d).all()]
@@ -547,7 +551,8 @@ class MainWindow(QMainWindow):
                                      recorded)
         if up is not None:
             R = de_tilt_matrix(up)
-        self.sidebar.show_levelling_note(R is not None, source, spread)
+        self.sidebar.show_levelling_note(R is not None, source, spread,
+                                         recorded)
         self.view3d.set_orientation(R)
         if poses:
             # size the character to this subject (same fit the export uses)

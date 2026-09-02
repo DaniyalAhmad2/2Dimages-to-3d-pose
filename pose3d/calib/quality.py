@@ -54,7 +54,8 @@ def check_rig(rig, world_up=None) -> list[str]:
 
     `world_up` is the recorded vertical, (up, source, spread_deg), when the
     project has one — it changes what the world frame's tilt COSTS, so it
-    changes the warning.
+    changes the warning. A recorded vertical with an UNKNOWN spread (None) is
+    not used by the view, so it does not change the warning either.
     """
     if rig is None:
         return []
@@ -66,7 +67,8 @@ def check_rig(rig, world_up=None) -> list[str]:
         # different rotations define different ups, so this is not on its own
         # a reason to distrust the reconstruction. What matters is what the
         # view levels on INSTEAD, so say that, and say what it costs.
-        if world_up is not None and world_up[0] is not None:
+        if (world_up is not None and world_up[0] is not None
+                and world_up[2] is not None):
             msgs.append(
                 f"Calibration's nominal up is {tilt:.0f}° off vertical — the "
                 f"world frame comes from one marker tag, whose rotation is "
