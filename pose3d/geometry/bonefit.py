@@ -137,7 +137,6 @@ def fit_bone_lengths(
     x0 = raw3d.copy()
     centroid = np.nanmean(raw3d, axis=0)
     x0[~observed] = centroid
-    x0 = np.nan_to_num(x0, nan=0.0)
 
     free = solvable_joints(observed)
     idx = np.flatnonzero(free)
@@ -158,7 +157,7 @@ def fit_bone_lengths(
     # it needs residuals >= variables. Freezing the dangling joints removes
     # three variables each while keeping every data residual, which is what
     # puts a sparse frame back on the lm path (a 10-joint frame took 747 ms on
-    # trf and takes ~20 ms here). trf stays as the fallback for the pathological
+    # trf and takes ~6 ms here). trf stays as the fallback for the pathological
     # case — a long unobserved chain strung between two distant observations.
     n_res = 3 * int(observed.sum()) + len(bones)
     method = "lm" if n_res >= 3 * len(idx) else "trf"

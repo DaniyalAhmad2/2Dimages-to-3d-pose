@@ -201,13 +201,14 @@ def fill_gaps(project: ProjectData, max_gap: int = 1) -> int:
 
     A joint that is missing for a single frame but present either side is
     almost always a momentary detection failure, not the joint leaving the
-    scene. Setting it to the midpoint of its two neighbours restores a
-    continuous limb without inventing anything the take does not contain:
-    the value is symmetric (no lag, no forward leak) and it is recorded in
-    `Frame.filled`, so the 3D view, the camera views, the reconstructed-joint
-    count and the export all know it was interpolated. Gaps longer than
-    `max_gap`, and gaps that run off either end of the take, stay NaN — a
-    visible hole is the honest answer there.
+    scene. Interpolating linearly between the two neighbours (for the default
+    max_gap=1, their midpoint) restores a continuous limb without inventing
+    anything the take does not contain: the value is symmetric — no lag, no
+    forward leak, unlike the stale value the old smoother carried across a
+    dropout — and it is recorded in `Frame.filled`, so the 3D view, the camera
+    views, the reconstructed-joint count and the export all know it was
+    interpolated. Gaps longer than `max_gap`, and gaps that run off either end
+    of the take, stay NaN — a visible hole is the honest answer there.
 
     Re-runnable: previously filled joints are cleared back to NaN first, so
     the flags always describe the current 2D.
@@ -231,9 +232,10 @@ def fill_gaps(project: ProjectData, max_gap: int = 1) -> int:
                 run += 1
             # flanked by observations on both sides, and short enough?
             if t > 0 and run < len(frames) and (run - t) <= max_gap:
-                mid = 0.5 * (frames[t - 1].pose3d[j] + frames[run].pose3d[j])
+                a, b = frames[t - 1].pose3d[j], frames[run].pose3d[j]
                 for k in range(t, run):
-                    frames[k].pose3d[j] = mid
+                    w = (k - t + 1) / (run - t + 1)
+                    frames[k].pose3d[j] = (1 - w) * a + w * b
                     frames[k].filled[j] = True
                     filled += 1
             t = run

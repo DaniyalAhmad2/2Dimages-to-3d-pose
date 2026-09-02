@@ -87,7 +87,11 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
     for i, pose in enumerate(poses3d):
         valid = ~np.isnan(pose).any(1)
         if filled is not None:
-            valid |= np.asarray(filled[i], bool) & ~np.isnan(pose).any(1)
+            # A joint fill_gaps flagged has a value, so this changes nothing
+            # today; it is here so the coupling is explicit and checked. The
+            # `& valid` is the guarantee: a flag can never conjure a joint the
+            # pose does not have, whatever a caller passes in.
+            valid |= np.asarray(filled[i], bool) & valid
         if not valid.any():
             bone_frames.append(None); continue
         up = pose @ R                       # upright; centring is irrelevant here

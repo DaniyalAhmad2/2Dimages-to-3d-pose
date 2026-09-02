@@ -181,9 +181,12 @@ class View3D(gl.GLViewWidget):
             self._draw_skeleton(self._scatter, self._lines, v, valid,
                                 self.JOINT_COLOR, filled)
 
-        # reference overlay: what the cameras actually measured
-        self._draw_skeleton(self._cap_scatter, self._cap_lines, v, valid,
-                            self.CAPTURE_COLOR, filled)
+        # Reference overlay: what the cameras actually MEASURED — so a joint
+        # that was interpolated across a dropout is simply absent from it,
+        # rather than sitting there in the same amber as everything else.
+        measured = valid if filled is None else valid & ~np.asarray(filled, bool)
+        self._draw_skeleton(self._cap_scatter, self._cap_lines, v, measured,
+                            self.CAPTURE_COLOR)
         self._set_body(verts, faces)
 
         if not self._framed:

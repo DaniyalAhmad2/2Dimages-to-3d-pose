@@ -37,8 +37,8 @@ _DERIVED_OF: dict[int, int] = {
 class ProjectModel(QObject):
     frameChanged = Signal(int)                 # current frame index
     joint2dChanged = Signal(str, int)          # cam, joint (after edit)
-    pose3dChanged = Signal(object, object, object)   # fitted pose, face kp,
-                                                    # per-joint filled flags
+    # fitted pose, face keypoints, per-joint gap-filled flags
+    pose3dChanged = Signal(object, object, object)
     accuracyChanged = Signal(object)           # (NUM_JOINTS,) reproj error px
     historyChanged = Signal()                  # undo/redo availability
 
@@ -204,13 +204,13 @@ class ProjectModel(QObject):
         self.historyChanged.emit()
 
     # --- geometry ---
-    def _resolve_joint(self, joint: int, cam: str | None = None) -> None:
+    def _resolve_joint(self, joint: int, cam: str) -> None:
         """Re-triangulate one edited point and re-fit this frame.
 
         `joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
         (the camera views and the correction stack share this convention).
-        `cam` is the view whose 2D was edited; derived joints are re-derived
-        there. None means "in every view", used for a plain re-solve.
+        `cam` is the view whose 2D was edited; a derived joint is re-derived
+        in that view only, since that is the only one whose parents moved.
         """
         if self.rig is None:
             return
@@ -245,7 +245,7 @@ class ProjectModel(QObject):
         self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
         self.accuracyChanged.emit(self._accuracy(self.current))
 
-    def _sync_derived(self, f, joint: int, cam: str | None) -> list[int]:
+    def _sync_derived(self, f, joint: int, cam: str) -> list[int]:
         """Move NECK/PELVIS with the shoulder/hip that defines them.
 
         Same reasoning (and same undo behaviour) as the HEAD/nose sync above:
@@ -261,17 +261,14 @@ class ProjectModel(QObject):
         if derived is None:
             return []
         a, b = _DERIVED_FROM[derived]
-        moved = False
-        for c in (CAMERAS if cam is None else (cam,)):
-            if f.corrected[c][derived]:
-                continue
-            pa, pb = f.kp2d[c][a], f.kp2d[c][b]
-            if np.isnan(pa).any() or np.isnan(pb).any():
-                continue
-            f.kp2d[c][derived] = (pa + pb) / 2.0
-            f.scores[c][derived] = min(f.scores[c][a], f.scores[c][b])
-            moved = True
-        return [derived] if moved else []
+        if f.corrected[cam][derived]:
+            return []
+        pa, pb = f.kp2d[cam][a], f.kp2d[cam][b]
+        if np.isnan(pa).any() or np.isnan(pb).any():
+            return []
+        f.kp2d[cam][derived] = (pa + pb) / 2.0
+        f.scores[cam][derived] = min(f.scores[cam][a], f.scores[cam][b])
+        return [derived]
 
     def _retriangulate(self, f, joint: int) -> None:
         xyz = triangulate_one(

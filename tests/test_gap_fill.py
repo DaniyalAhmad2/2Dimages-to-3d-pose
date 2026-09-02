@@ -16,7 +16,7 @@ from tests.synth import sample_skeleton_3d
 WRIST = int(Joint.LEFT_WRIST)
 
 
-def _sequence(n=6, offsets=None):
+def _sequence(n=6):
     """A project whose frame t has the subject shifted t * 0.1 m along x."""
     gt = sample_skeleton_3d()
     project = ProjectData(name="gaps")
@@ -155,10 +155,28 @@ def test_view_and_export_agree_on_which_joints_are_posed():
     assert view_mask[2, WRIST] and filled[2, WRIST]
     assert not view_mask[4, WRIST] and not filled[4, WRIST]
 
-    frames, names = _character_bone_frames(poses, 0, None, filled)
+    frames, _ = _character_bone_frames(poses, 0, None, filled)
     if frames is None:
         import pytest
         pytest.skip("bundled character asset unavailable")
     # the export posed the frame whose joint was filled, and the one whose
     # joint is genuinely missing is posed from the rest of the skeleton
     assert frames[2] is not None and frames[4] is not None
+
+
+def test_the_measured_overlay_omits_a_filled_joint():
+    """The reference overlay is "what the cameras measured", so a joint that
+    was interpolated must not appear in it at all."""
+    from pose3d.ui.view3d import View3D
+
+    pts = sample_skeleton_3d()
+    valid = np.ones(NUM_JOINTS, bool)
+    filled = np.zeros(NUM_JOINTS, bool)
+    filled[WRIST] = True
+    scatter, lines = _FakeItem(), _FakeItem()
+
+    measured = valid & ~filled
+    View3D._draw_skeleton(scatter, lines, pts, measured, View3D.CAPTURE_COLOR)
+
+    assert len(scatter.kwargs["pos"]) == NUM_JOINTS - 1
+    assert not any(np.allclose(p, pts[WRIST]) for p in scatter.kwargs["pos"])
