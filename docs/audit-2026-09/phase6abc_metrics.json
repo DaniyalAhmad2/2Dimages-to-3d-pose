@@ -1,0 +1,84 @@
+{
+ "generated_by": "measured live on the fixture during the Phase 6.1/6.2/6.3 fix round; every number is re-measured and asserted by the test named on it, which is the durable reproduction",
+ "reproduce": "pytest tests/test_cross_view.py tests/test_bonefit.py tests/test_camera_view_accuracy.py; every number below is asserted by a named test",
+ "take": "tests/fixtures/client_take (the client's own 2D + shipped rig)",
+ "frames": 26,
+ "gates": [
+  {
+   "gate": "cross-view gate width",
+   "key": "epipolar_gate_px",
+   "rule": "clip(6 x median Sampson, 25 px, 1.4 % of the smaller image's diagonal) \u2014 25-30 px on this take",
+   "baseline": 71.50092631567789,
+   "measured": 29.448987294061244,
+   "pass": true,
+   "unit": "px",
+   "test": "test_cross_view.py::test_the_client_take_is_gated_on_its_own_distribution"
+  },
+  {
+   "gate": "pairs the gate drops on a good take",
+   "key": "pairs_rejected",
+   "rule": "0 of 388",
+   "baseline": 0,
+   "measured": 0,
+   "pass": true,
+   "unit": "pairs",
+   "test": "test_cross_view.py::test_the_client_take_is_gated_on_its_own_distribution"
+  },
+  {
+   "gate": "observations recoverable after a bad calibration",
+   "key": "observations_recovered_pct",
+   "rule": "100 % (save -> reload -> recompute with a good rig)",
+   "baseline": 0.0,
+   "measured": 100.0,
+   "pass": true,
+   "unit": "%",
+   "test": "test_cross_view.py::test_a_bad_rig_does_not_destroy_kp2d",
+   "note": "a 12 deg left-camera error rejects 388 of 778 observations; none is deleted"
+  },
+  {
+   "gate": "the sidebar quotes the gate that was applied",
+   "key": "sidebar_threshold_px",
+   "rule": "quality.body_epipolar['threshold_px'] == pipeline.epipolar_threshold(rig, project), on a good rig AND on a 12 deg one",
+   "baseline": 555.7679,
+   "measured": 29.448987294061244,
+   "pass": true,
+   "unit": "px",
+   "test": "test_cross_view.py::test_the_sidebar_quotes_the_gate_that_was_applied",
+   "note": "the baseline is what the row reported on the 12 deg rig, with frac_over_threshold = 0.0, on a take the gate had emptied"
+  },
+  {
+   "gate": "whole-take blackout damage (the fallback TABLE, gate held)",
+   "key": "blackout_damage_max_mm_gate_held",
+   "rule": "<= 2.5 mm",
+   "baseline": 190.73,
+   "measured": 1.9710941219039502,
+   "pass": true,
+   "unit": "mm",
+   "test": "test_bonefit.py::test_fallback_lengths_scale_to_the_subject",
+   "note": "RESTATED: measured with the cross-view gate held at the undamaged take's own value, because the acceptance is on the fallback table and 6.2's gate re-sizes itself on the damaged distribution. p99 1.377 mm, median 0.0096 mm"
+  },
+  {
+   "gate": "whole-take blackout damage (end to end, gate free)",
+   "key": "blackout_damage_max_mm_end_to_end",
+   "rule": "reported, not gated: <= 9 mm with the cause named",
+   "baseline": 190.73,
+   "measured": 6.992663924979601,
+   "pass": true,
+   "unit": "mm",
+   "test": "test_bonefit.py::test_fallback_lengths_scale_to_the_subject",
+   "note": "the extra 5 mm over the held-gate number is 6.2, not 6.3: losing 26 pairs narrows the gate 29.449 -> 28.439 px, which rejects two pairs of this take's own tail (max 29.384 px) and gap-fills the two joints they carried. p99 1.737 mm, median 0.0412 mm"
+  }
+ ],
+ "reported": {
+  "sampson_median_px": 4.908164549010207,
+  "sampson_p99_px": 23.96803746803734,
+  "sampson_max_px": 29.384092826958252,
+  "per_image_allowance_px": {
+   "left": 71.50092631567789,
+   "right": 35.84
+  },
+  "gate_margin_over_tail_px": 0.06489446710299163,
+  "gate_after_one_joint_is_blacked_out_px": 28.4385,
+  "shape_neutrality": "0 of 625 keys differ on the real client take (workspace/pose3d_projects/Imported_Session) between 5e20578 and this commit; the whole of 6abc moves one key against 3c60b9c, epipolar.threshold_px 71.50092631567789 -> 29.447564677872062"
+ }
+}
