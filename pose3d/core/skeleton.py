@@ -315,6 +315,46 @@ def map_halpe26(kp: np.ndarray, scores: np.ndarray,
     return xy, sc
 
 
+# --- what each layout DERIVES, as opposed to detects ------------------------
+#: The canonical parents of every joint the midpoint convention derives, in
+#: CANONICAL indices — `map_halpe26` and `derive_joints` each hold the same
+#: pairing in their own detector's indices, and this is the form anything
+#: working on an already-mapped pose needs (the UI's manual correction, above
+#: all: dragging a shoulder has to move the neck that IS its midpoint).
+DERIVED_MIDPOINT_PARENTS: dict[Joint, tuple[Joint, Joint]] = {
+    Joint.NECK: (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER),
+    Joint.PELVIS: (Joint.LEFT_HIP, Joint.RIGHT_HIP),
+}
+
+#: COCO-17 has no neck or pelvis keypoint at all, so both are always derived.
+_COCO17_DERIVED: frozenset[Joint] = frozenset(DERIVED_MIDPOINT_PARENTS)
+
+
+def derived_joints(keypoint_model: str | None) -> frozenset[Joint]:
+    """Which canonical joints this layout DERIVES as a 2D midpoint.
+
+    The question "is this joint a measurement or an arithmetic consequence of
+    two others?" has one answer per layout and it must be asked HERE, of the
+    policy, not inferred from the layout's name. Halpe-26 detects a neck and a
+    hip natively, but `HALPE26_POLICY` does not take them (its native neck is
+    not the shoulder midpoint and regresses the neck-Lshoulder bone CV 5.15 ->
+    8.13 % — see `map_halpe26`), so under the shipped policy BOTH layouts
+    derive NECK and PELVIS. Reading `keypoint_model != "coco17"` instead is
+    what let the manual-correction path stop re-deriving them the moment the
+    detector switch was flipped: a dragged shoulder left a 28 px stale NECK
+    that was then triangulated and bone-fitted.
+
+    An unknown or missing layout is treated as COCO-17, which is what every
+    project written before `keypoint_model` existed was detected with.
+    """
+    if keypoint_model != "halpe26":
+        return _COCO17_DERIVED
+    return frozenset(
+        joint for joint, key in ((Joint.HEAD, "head"), (Joint.NECK, "neck"),
+                                 (Joint.PELVIS, "pelvis"))
+        if HALPE26_POLICY[key] == "derived")
+
+
 # --- RAG (red/amber/green) confidence banding ------------------------------
 RAG_GREEN_MIN = 0.60
 RAG_AMBER_MIN = 0.35

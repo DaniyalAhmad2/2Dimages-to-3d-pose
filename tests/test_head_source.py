@@ -657,3 +657,143 @@ def test_the_gate_table_still_reads_the_same_on_the_committed_fixture():
         # and each still satisfies the bar it ships under
         bar = RESTATED[1] if r["key"] == RESTATED[0] else None
         assert (r["measured"] <= bar if bar is not None else r["pass"]), r["key"]
+
+
+# --- the correction path: what a HEAD drag may touch ------------------------
+
+def _fixture_model(head_source: str):
+    """The committed take, reconstructed, held by a `ProjectModel`.
+
+    `head_source` is the convention the project claims. The fixture IS a skull
+    project; asking for "nose" relabels that same data, which is exactly the
+    comparison wanted here — the two branches then differ ONLY in the
+    convention, and the fixture's 86 px gap between the canonical HEAD (the
+    skull vertex) and the nose face keypoint makes a wrong copy impossible to
+    miss. A genuine COCO-17 project has that gap at 0 px by construction,
+    which is why the nose branch is a no-op there and a corruption here.
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+
+    from pathlib import Path as _P
+
+    from pose3d import pipeline
+    from pose3d.core.io_project import load_project
+    from pose3d.quality import load_rig
+    from pose3d.ui.model import ProjectModel
+
+    fixture = _P(__file__).resolve().parent / "fixtures" / "client_take"
+    p = load_project(fixture)
+    assert p.head_source == "skull" and p.keypoint_model == "halpe26"
+    p.head_source = head_source
+    if head_source == "nose":
+        p.keypoint_model = "coco17"
+    rig = load_rig(fixture / "calibration")
+    pipeline.triangulate_project(p, rig)
+    pipeline.fit_project(p)
+    model = ProjectModel(p, rig)
+    model.set_frame(0)
+    return model
+
+
+def _drag_the_head(model, dx=5.0):
+    """Drag the canonical HEAD `dx` px right in the LEFT view."""
+    from pose3d.core.project import CAM_LEFT
+
+    f = model.frame()
+    xy = f.kp2d[CAM_LEFT][int(Joint.HEAD)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.HEAD),
+                       float(xy[0]) + dx, float(xy[1]))
+    return f
+
+
+def test_dragging_a_skull_head_leaves_the_nose_where_it_was():
+    """The canonical HEAD and the nose are two different detections here.
+
+    `_resolve_joint` copies a dragged HEAD into `head2d[cam][0]` — the nose,
+    `skeleton.HEAD_KP_NAMES[0]` — because under COCO-17 they ARE the same
+    point. Under the layout the app now ships they are 86.0 px apart on frame
+    0 of this fixture, so that copy teleported the nose onto the skull vertex:
+    a 5 px drag moved head2d['left'][0] from [1800.689, 1763.494] to
+    [1805.689, 1682.491], head3d[0] was re-triangulated from it, the head
+    basis (built from nose + ears) turned with it, and `save_project` wrote
+    all of it to disk. Silent wrong data on an ordinary user action.
+    """
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+
+    model = _fixture_model("skull")
+    f = model.frame()
+    gap = float(np.linalg.norm(f.kp2d[CAM_LEFT][int(Joint.HEAD)]
+                               - f.head2d[CAM_LEFT][0]))
+    assert gap == pytest.approx(86.0, abs=0.5), gap     # today 86.00 px
+
+    before2d = {c: f.head2d[c].copy() for c in (CAM_LEFT, CAM_RIGHT)}
+    before3d = f.head3d.copy()
+    head2d_before = f.kp2d[CAM_LEFT][int(Joint.HEAD)].copy()
+
+    _drag_the_head(model)
+
+    # the drag did its job on the joint the user actually dragged...
+    assert f.kp2d[CAM_LEFT][int(Joint.HEAD)][0] == \
+        pytest.approx(head2d_before[0] + 5.0)
+    # ...and touched no face keypoint, in either view, in 2D or in 3D
+    for c in (CAM_LEFT, CAM_RIGHT):
+        assert np.array_equal(f.head2d[c], before2d[c], equal_nan=True), c
+    assert np.array_equal(f.head3d, before3d, equal_nan=True)
+
+
+def test_dragging_a_nose_head_still_moves_the_nose_face_point():
+    """...and the sync is not removed, only gated.
+
+    Under the nose convention the canonical HEAD IS `head2d[cam][0]`, so a
+    drag that did not move it would leave the head orientation built from a
+    nose the user has just contradicted — the defect the sync was added for.
+    One Ctrl+Z still reverses both, because the sync is re-derived in
+    `_resolve_joint` rather than pushed as a second correction.
+    """
+    from pose3d.core.project import CAM_LEFT
+
+    model = _fixture_model("nose")
+    f = _drag_the_head(model)
+
+    assert np.array_equal(f.head2d[CAM_LEFT][0],
+                          f.kp2d[CAM_LEFT][int(Joint.HEAD)])
+
+    before = f.head2d[CAM_LEFT][0].copy()
+    model.undo()
+    assert np.array_equal(f.head2d[CAM_LEFT][0],
+                          f.kp2d[CAM_LEFT][int(Joint.HEAD)])
+    assert not np.array_equal(f.head2d[CAM_LEFT][0], before)
+
+
+def test_the_neck_follows_a_shoulder_drag_under_the_shipped_layout():
+    """The other half of the same defect, on the client's own take.
+
+    `_sync_derived` used to early-return for any project whose
+    `keypoint_model` is not "coco17", on the belief that Halpe-26 detects
+    NECK/PELVIS natively. It does — but `skeleton.HALPE26_POLICY` does not
+    take those points (`map_halpe26` says why), so NECK is the shoulder
+    midpoint under both layouts and the early return simply stopped
+    maintaining it: a 40 px shoulder drag left NECK 28 px from the midpoint it
+    is defined to be, and the bone fit was then solved against that. The
+    synthetic cover is tests/test_pipeline_fit.py, parametrised over both
+    layouts; this is the same thing on the real take.
+    """
+    from pose3d.core.project import CAM_LEFT
+
+    model = _fixture_model("skull")
+    f = model.frame()
+    for parent, derived, other in (
+            (Joint.LEFT_SHOULDER, Joint.NECK, Joint.RIGHT_SHOULDER),
+            (Joint.LEFT_HIP, Joint.PELVIS, Joint.RIGHT_HIP)):
+        xy = f.kp2d[CAM_LEFT][int(parent)]
+        model.set_joint_2d(CAM_LEFT, int(parent),
+                           float(xy[0]) - 40.0, float(xy[1]))
+        want = 0.5 * (f.kp2d[CAM_LEFT][int(parent)]
+                      + f.kp2d[CAM_LEFT][int(other)])
+        assert np.allclose(f.kp2d[CAM_LEFT][int(derived)], want), (
+            f"{derived.name} left "
+            f"{np.linalg.norm(f.kp2d[CAM_LEFT][int(derived)] - want):.1f} px "
+            f"from the midpoint it is defined to be")

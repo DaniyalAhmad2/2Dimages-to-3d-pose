@@ -17,7 +17,7 @@ import pytest
 from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, Frame, ProjectData
-from pose3d.core.skeleton import NUM_JOINTS, Joint
+from pose3d.core.skeleton import HALPE26_HEAD_SOURCE, NUM_JOINTS, Joint
 from pose3d.detect.base import Detection
 from pose3d.detect.base import KeypointDetector
 from pose3d.geometry.triangulate import triangulate_one
@@ -30,9 +30,28 @@ pytest.importorskip("PySide6")
 from pose3d.ui.model import ProjectModel  # noqa: E402
 
 
-def _take(n=6):
+#: The two joint layouts the app can hold a project in, with the head
+#: convention each records. They are NOT interchangeable in the correction
+#: path — `ProjectModel` reads both — and everything below that exercises a
+#: drag runs under both, because the app now ships "halpe26" while the default
+#: `ProjectData` (and every project imported before the switch) is "coco17".
+LAYOUTS = {"coco17": "nose", "halpe26": HALPE26_HEAD_SOURCE}
+
+
+@pytest.fixture(params=sorted(LAYOUTS))
+def layout(request):
+    return request.param
+
+
+def _take(n=6, keypoint_model="coco17"):
     """A calibrated project of `n` frames of a moving subject, reconstructed
-    exactly as the app reconstructs an import."""
+    exactly as the app reconstructs an import.
+
+    `keypoint_model` is the layout the project records. The 2D is identical
+    either way — under `skeleton.HALPE26_POLICY` both layouts derive NECK and
+    PELVIS as the same shoulder/hip midpoints — which is the whole point: what
+    changes with the label is what `ProjectModel` DOES about them.
+    """
     geo = default_two_cam()
     intr = Intrinsics(K=geo["K"], dist=geo["dist"], image_size=geo["size"])
     rig = CalibratedRig(intr, intr, Extrinsics(*geo["left"]),
@@ -40,7 +59,8 @@ def _take(n=6):
     gt = sample_skeleton_3d()
     centre = gt.mean(0)
 
-    data = ProjectData(name="fit")
+    data = ProjectData(name="fit", keypoint_model=keypoint_model,
+                       head_source=LAYOUTS[keypoint_model])
     for t in range(n):
         pose = (gt - centre) @ rot_about((0, 0, 1), 4.0 * t).T + centre \
             + np.array([0.0, 0.0, 0.02 * t])
@@ -64,10 +84,10 @@ def _take(n=6):
     return data, rig
 
 
-def test_zero_pixel_drag_is_a_no_op():
+def test_zero_pixel_drag_is_a_no_op(layout):
     """Re-placing every joint on the pixel it already sits on must change
     nothing at all. Today: median 4.92 mm, max 25.65 mm, 15/15 joints."""
-    data, rig = _take()
+    data, rig = _take(keypoint_model=layout)
     worst = 0.0
     for idx in range(len(data.frames)):
         model = ProjectModel(data, rig)
@@ -152,9 +172,9 @@ def test_placing_the_missing_point_by_hand_makes_it_a_measurement_again():
     assert np.isfinite(f.fitted3d[joint]).all()
 
 
-def test_a_drag_lands_on_the_same_pose_the_batch_path_would():
+def test_a_drag_lands_on_the_same_pose_the_batch_path_would(layout):
     """F10 by construction: one fit function, one set of targets."""
-    data, rig = _take()
+    data, rig = _take(keypoint_model=layout)
     model = ProjectModel(data, rig)
     model.set_frame(2)
     f = model.frame()
@@ -168,14 +188,21 @@ def test_a_drag_lands_on_the_same_pose_the_batch_path_would():
     assert np.allclose(f.fitted3d, after_drag, atol=1e-9)
 
 
-def test_derived_joint_follows_a_shoulder_drag():
+def test_derived_joint_follows_a_shoulder_drag(layout):
     """NECK is the midpoint of the shoulders, so it has to move with one.
 
     Today it does not: a 60 px shoulder drag leaves NECK 30 px stale in 2D and
     1.9-3.3 mm out in 3D, and the bone fit is then solved against a pose the
     user can see is contradictory.
+
+    Under BOTH layouts. Halpe-26 does detect a neck and a hip of its own, but
+    `skeleton.HALPE26_POLICY` does not take them, so its NECK and PELVIS are
+    the same midpoints COCO-17's are; a `keypoint_model != "coco17"` early
+    return in `_sync_derived` therefore stopped re-deriving them for the whole
+    shipped configuration, and on the client take it left the NECK 28 px stale
+    after a 40 px shoulder drag.
     """
-    data, rig = _take()
+    data, rig = _take(keypoint_model=layout)
     model = ProjectModel(data, rig)
     model.set_frame(1)
     f = model.frame()
@@ -199,8 +226,8 @@ def test_derived_joint_follows_a_shoulder_drag():
         assert err < 2e-4, f"{derived.name} 3D off by {1000 * err:.3f} mm"
 
 
-def test_one_undo_reverses_the_derived_joint_too():
-    data, rig = _take()
+def test_one_undo_reverses_the_derived_joint_too(layout):
+    data, rig = _take(keypoint_model=layout)
     model = ProjectModel(data, rig)
     model.set_frame(1)
     f = model.frame()
@@ -218,10 +245,10 @@ def test_one_undo_reverses_the_derived_joint_too():
     assert np.allclose(f.fitted3d, before3d, atol=1e-9)
 
 
-def test_a_hand_placed_derived_joint_is_not_overwritten():
+def test_a_hand_placed_derived_joint_is_not_overwritten(layout):
     """A correction outranks the derivation: if the user put the neck
     somewhere, dragging a shoulder must not move it back."""
-    data, rig = _take()
+    data, rig = _take(keypoint_model=layout)
     model = ProjectModel(data, rig)
     model.set_frame(1)
     f = model.frame()

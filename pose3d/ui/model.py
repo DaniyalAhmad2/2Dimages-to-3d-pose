@@ -14,7 +14,9 @@ from pose3d.core.corrections import CorrectionStack
 from pose3d.core.project import (
     CAM_LEFT, CAM_RIGHT, CAMERAS, PIPELINE_VERSION, ProjectData,
 )
-from pose3d.core.skeleton import Joint, NUM_JOINTS
+from pose3d.core.skeleton import (
+    DERIVED_MIDPOINT_PARENTS, Joint, NUM_JOINTS, derived_joints,
+)
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
@@ -55,13 +57,15 @@ class RejectedState(str):
         return self
 
 
-# Joints the detector does not see but derives as a midpoint of two it does
-# (skeleton.derive_joints). Dragging a shoulder therefore has to move the neck
-# with it, or the pose keeps a neck the user can see is in the wrong place and
-# the bone fit is solved against a contradiction.
+# Joints a layout does not measure but derives as the midpoint of two it does.
+# Dragging a shoulder therefore has to move the neck with it, or the pose keeps
+# a neck the user can see is in the wrong place and the bone fit is solved
+# against a contradiction. WHICH joints those are is per project and comes from
+# `skeleton.derived_joints`; this is only the parent pairing, which is the same
+# under both layouts.
 _DERIVED_FROM: dict[int, tuple[int, int]] = {
-    int(Joint.NECK): (int(Joint.LEFT_SHOULDER), int(Joint.RIGHT_SHOULDER)),
-    int(Joint.PELVIS): (int(Joint.LEFT_HIP), int(Joint.RIGHT_HIP)),
+    int(joint): (int(a), int(b))
+    for joint, (a, b) in DERIVED_MIDPOINT_PARENTS.items()
 }
 _DERIVED_OF: dict[int, int] = {
     parent: derived
@@ -471,12 +475,17 @@ class ProjectModel(QObject):
             self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
             self.accuracyChanged.emit(self._accuracy(self.current))
             return
-        if joint == HEAD_JOINT:
-            # The canonical HEAD and the nose face point are the same physical
-            # detection, so a nose drag must move both — otherwise the head's
-            # orientation (built from nose + ears) ignores the drag entirely.
-            # Synced here rather than as a second stack edit, so one Ctrl+Z
-            # reverses the whole drag (undo re-resolves and re-syncs).
+        if joint == HEAD_JOINT and self._head_is_the_nose():
+            # Under the nose convention the canonical HEAD and the nose face
+            # point ARE the same physical detection, so a drag must move both —
+            # otherwise the head's orientation (built from nose + ears) ignores
+            # it entirely. Synced here rather than as a second stack edit, so
+            # one Ctrl+Z reverses the whole drag (undo re-resolves and
+            # re-syncs). Under the skull convention they are two different
+            # detections ~86 px apart on frame 0 of the client take, and
+            # copying one onto the other would teleport the nose onto the skull
+            # vertex — silently, into head2d, which is persisted and is what
+            # the head basis is built from.
             for c in (CAM_LEFT, CAM_RIGHT):
                 if not np.isnan(f.head2d[c]).all():     # cam has face points
                     f.head2d[c][0] = f.kp2d[c][joint]
@@ -491,6 +500,18 @@ class ProjectModel(QObject):
         self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
         self.accuracyChanged.emit(self._accuracy(self.current))
 
+    def _head_is_the_nose(self) -> bool:
+        """Is this project's canonical HEAD the same point as the nose?
+
+        `head_source` is the project's own record of which convention it was
+        detected under ("nose" = COCO-17's nose, "skull" = Halpe-26's skull
+        vertex), and it is the ONLY thing that may answer this: a project
+        written before the key existed defaults to "nose", which is what it
+        was. Deciding it from the detector layout instead would make the
+        answer depend on a policy the project does not record.
+        """
+        return self.project.head_source == "nose"
+
     def _sync_derived(self, f, joint: int, cam: str) -> list[int]:
         """Move NECK/PELVIS with the shoulder/hip that defines them.
 
@@ -500,11 +521,18 @@ class ProjectModel(QObject):
         keeps one Ctrl+Z reversing the whole drag. A derived point the user
         has placed by hand in that view is left alone — their correction
         outranks the derivation.
+
+        WHICH joints are derived is the project's layout policy
+        (`skeleton.derived_joints`), never the layout's name: under the shipped
+        `HALPE26_POLICY` both layouts derive NECK and PELVIS, and an early
+        return on `keypoint_model != "coco17"` left a dragged shoulder with a
+        28 px stale NECK — triangulated and bone-fitted from a pose the user
+        can see is contradictory, and different from what the batch path
+        computes from the same 2D.
         """
-        if self.project.keypoint_model != "coco17":
-            return []                    # halpe26 detects neck/pelvis natively
         derived = _DERIVED_OF.get(int(joint))
-        if derived is None:
+        if derived is None or Joint(derived) not in derived_joints(
+                self.project.keypoint_model):
             return []
         a, b = _DERIVED_FROM[derived]
         if f.corrected[cam][derived]:

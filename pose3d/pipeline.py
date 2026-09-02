@@ -42,9 +42,15 @@ def _detector_keypoint_model(detector: KeypointDetector) -> str:
     """Which joint layout this detector emits.
 
     Read off the detector rather than declared by it: only RTMPose has the
-    choice today (`feet=True` selects Halpe-26, which detects neck/pelvis
-    natively instead of deriving them as midpoints), and a detector that grows
-    an explicit attribute is honoured first.
+    choice today (`feet=True` selects Halpe-26, which detects a skull-vertex
+    HEAD where COCO-17 has only the nose), and a detector that grows an
+    explicit attribute is honoured first.
+
+    The layout name does NOT say which joints are derived: Halpe-26 also
+    detects a neck and a hip, but `skeleton.HALPE26_POLICY` does not take
+    them, so under both layouts NECK and PELVIS are the 2D midpoints of the
+    shoulders/hips. Ask `skeleton.derived_joints(keypoint_model)` for that,
+    never this string.
     """
     declared = getattr(detector, "keypoint_model", None)
     if declared:

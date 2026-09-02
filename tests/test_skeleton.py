@@ -3,8 +3,9 @@ import numpy as np
 import pytest
 
 from pose3d.core.skeleton import (
-    BONES, COCO17_INDEX, HALPE26_HEAD_SOURCE, HALPE26_INDEX, HALPE26_POLICY,
-    HEAD_SOURCE, NUM_JOINTS, Joint, derive_joints, map_halpe26, rag_status,
+    BONES, COCO17_INDEX, DERIVED_MIDPOINT_PARENTS, HALPE26_HEAD_SOURCE,
+    HALPE26_INDEX, HALPE26_POLICY, HEAD_SOURCE, NUM_JOINTS, Joint,
+    derive_joints, derived_joints, map_halpe26, rag_status,
 )
 
 
@@ -160,3 +161,43 @@ def test_head_source_names_what_the_head_point_is():
     assert HEAD_SOURCE["native"] == "skull"
     assert HEAD_SOURCE["nose"] == "nose"
     assert HALPE26_HEAD_SOURCE == HEAD_SOURCE[HALPE26_POLICY["head"]]
+
+
+def test_which_joints_a_layout_derives_is_the_policy_not_the_name():
+    """`derived_joints` is the one answer to "is this joint arithmetic?".
+
+    Both shipped layouts derive NECK and PELVIS as the shoulder/hip midpoints
+    — Halpe-26 detects a neck and a hip natively but `HALPE26_POLICY` does not
+    take them — so anything that decides from the layout's NAME gets the
+    shipped configuration wrong. `ui.model._sync_derived` did, and stopped
+    maintaining the midpoints in the manual-correction path the moment the
+    detector switch was flipped.
+    """
+    coco = derived_joints("coco17")
+    assert coco == {Joint.NECK, Joint.PELVIS} == set(DERIVED_MIDPOINT_PARENTS)
+    assert derived_joints("halpe26") == coco         # under HALPE26_POLICY
+    # an unrecorded layout is the legacy one, which is what it was
+    assert derived_joints(None) == coco
+    assert derived_joints("") == coco
+
+    # and it FOLLOWS the policy: taking Halpe's native neck drops it out
+    saved = dict(HALPE26_POLICY)
+    try:
+        HALPE26_POLICY["neck"] = "native"
+        assert derived_joints("halpe26") == {Joint.PELVIS}
+        assert derived_joints("coco17") == coco      # COCO has no such choice
+    finally:
+        HALPE26_POLICY.clear()
+        HALPE26_POLICY.update(saved)
+
+    # the parents are canonical joints, and the pairing is the midpoint the
+    # two mappings build in their own detectors' indices
+    assert DERIVED_MIDPOINT_PARENTS[Joint.NECK] == (Joint.LEFT_SHOULDER,
+                                                    Joint.RIGHT_SHOULDER)
+    assert DERIVED_MIDPOINT_PARENTS[Joint.PELVIS] == (Joint.LEFT_HIP,
+                                                      Joint.RIGHT_HIP)
+    xy, sc = _fake_halpe()
+    mapped = map_halpe26(xy, sc)[0]
+    for joint, (a, b) in DERIVED_MIDPOINT_PARENTS.items():
+        assert np.allclose(mapped[int(joint)],
+                           0.5 * (mapped[int(a)] + mapped[int(b)]))
