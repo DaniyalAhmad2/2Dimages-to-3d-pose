@@ -4,23 +4,34 @@
 The audit could not answer that: Blender was never run against the client take,
 and the export's only tests were "exit code 0, file not empty". This runs the
 real export, reads the file back, evaluates forward kinematics in numpy and
-reports five things:
+reports:
 
-  (a) deviation from `Character.posed_joints` at each captured keyframe, as a
+  (a) deviation from the pose the app computed at each captured keyframe, as a
       % of body height, after ONE global similarity fit (the file is in the
-      .blend armature's space, the app's joints are in metres);
+      .blend armature's space, the app's joints are in metres) — against the
+      posed rig, against `Character.posed_joints`, and per keyframe;
   (b) per in-between frame: how far each bone leaves the slerp arc between its
       bracketing keys, how far it overshoots past either of them, and how far
       each Euler channel overshoots the interval its two keys span;
   (c) consecutive keyframe quaternion pairs with dot < 0 (hemisphere flips);
   (d) the largest non-hips translation channel, as a fraction of rig height;
-  (e) what the fallback path ships when the character asset is missing.
+  (e) what the export does when the character asset is missing;
+  (f) how far the 3D VIEW's own placement of the figure moves across the take,
+      which is the preview-vs-export gap: the export applies one rigid map for
+      the whole sequence, so anything the view does per frame is a
+      disagreement.
+
+It writes all of those to docs/audit-2026-09/phase3_metrics.json when
+--metrics is given, so before/after are comparable rather than remembered.
+`--no-root-motion --stepped` reproduces the pre-Phase-3 file, which is what
+makes the two labels a like-for-like comparison.
 
     POSE3D_BLENDER=/path/to/blender \\
         .venv/bin/python tools/check_export_fidelity.py
 
-Not part of CI: it needs Blender and takes minutes. The facts it measured on
-2026-09-01 are asserted every run, without Blender, in tests/test_export_smoke.py.
+Not part of CI: it needs Blender and takes minutes. The facts it measures are
+asserted in tests/test_export_smoke.py — the ones about the file the client
+already has on every run, the ones about a fresh export behind `needs_blender`.
 """
 from __future__ import annotations
 
@@ -36,30 +47,36 @@ sys.path.insert(0, str(REPO))
 from pose3d.config import blender_binary, character_blend          # noqa: E402
 from pose3d.core.io_project import load_project                    # noqa: E402
 from pose3d.core.skeleton import JOINT_NAMES                       # noqa: E402
+from pose3d.export import bvh as bvh_util                          # noqa: E402
 from pose3d.export.blender_export import export_animation          # noqa: E402
-from pose3d.geometry.character import Character                    # noqa: E402
+from pose3d.export.bvh import similarity                           # noqa: E402
+from pose3d.geometry.character import Character, take_pelvis_ref   # noqa: E402
 from pose3d.quality import de_tilt_rotation, subject_height        # noqa: E402
-from tests import bvh_util                                         # noqa: E402
 
 DEFAULT_PROJECT = REPO / "tests" / "fixtures" / "client_take"
 # Character().rig_h for the bundled rig; the audit's denominator for (d).
 RIG_HEIGHT = 14.4228
 
 
-def similarity(src: np.ndarray, dst: np.ndarray):
-    """Umeyama: the single (scale, R, t) that best maps src onto dst."""
-    mu_s, mu_d = src.mean(0), dst.mean(0)
-    a, b = src - mu_s, dst - mu_d
-    U, S, Vt = np.linalg.svd(a.T @ b / len(src))
-    d = np.sign(np.linalg.det(U @ Vt))
-    D = np.diag([1.0, 1.0, d])
-    R = (U @ D @ Vt).T
-    scale = float(S @ np.diag([1, 1, d]).diagonal() / (a ** 2).sum() * len(src))
-    return scale, R, dst.mean(0) - scale * R @ mu_s
+def report_keyframe_fidelity(bvh, character, up, valid, holds, out,
+                             pelvis_ref=None) -> None:
+    """(a) the FK skeleton in the file vs the pose the app computed.
 
+    Three numbers, because they answer three different questions:
 
-def report_keyframe_fidelity(bvh, character, up, valid, n_poses) -> None:
-    """(a) the FK skeleton in the file vs the joints the app draws."""
+      a1  the file vs the RIG-space pose the exporter actually posed (skin
+          matrices through `pelvis_ref`), under ONE global similarity fit for
+          the whole take. This is the phase's gate: it is the only one that
+          fails if the root translation is dropped, because the fit is shared
+          across frames and cannot re-place each of them.
+      a2  the file vs `Character.posed_joints`, i.e. the pose in the CAPTURE's
+          own space, again under one global fit. This is larger, and the
+          difference is not the export's: `_skin_matrices` yaw-aligns every
+          frame to the rig, so the exported character never turns while the
+          subject does. Recorded, not fixed, here.
+      a3  a similarity fit PER keyframe: pure shape, with each frame's own
+          placement forgiven.
+    """
     # Only the canonical joints the rig reports at a bone HEAD: BVH forward
     # kinematics gives head positions, and the one joint read off a bone's
     # midpoint (HEAD) has no counterpart there.
@@ -71,18 +88,21 @@ def report_keyframe_fidelity(bvh, character, up, valid, n_poses) -> None:
         else:
             skipped.append(JOINT_NAMES[j])
 
-    holds = bvh_util.stepped_holds(n_poses)
-    src, dst, index, per_frame = [], [], [], []
+    src, dst, rig_dst, index, per_frame = [], [], [], [], []
     for k, (row, _) in enumerate(holds):
         fk = bvh.forward_kinematics(row)
         app = character.posed_joints(up[k], valid[k], None)
-        if app is None:
+        skin = character._skin_matrices(up[k], valid[k],
+                                        pelvis_ref=pelvis_ref)[0]
+        if app is None or skin is None:
             continue
+        rig = character._joints_from_skin(skin)
         a, b = [], []
         for j, bi in mapping.items():
             if valid[k][j] and np.isfinite(app[j]).all():
                 a.append(fk[bi])
                 b.append(app[j])
+                rig_dst.append(rig[j])
                 index.append((k, j))
         src.extend(a)
         dst.extend(b)
@@ -92,34 +112,49 @@ def report_keyframe_fidelity(bvh, character, up, valid, n_poses) -> None:
         s, R, t = similarity(a, b)
         per_frame.append(np.linalg.norm((s * (R @ a.T).T + t) - b, axis=1))
     src, dst = np.asarray(src), np.asarray(dst)
-    scale, R, t = similarity(src, dst)
-    err = np.linalg.norm((scale * (R @ src.T).T + t) - dst, axis=1)
+    rig_dst = np.asarray(rig_dst)
     per_frame = np.concatenate(per_frame)
     height = float(np.median([p[v, 2].max() - p[v, 2].min()
                               for p, v in zip(up, valid) if v.sum() >= 2]))
 
-    print(f"(a) BVH forward kinematics vs Character.posed_joints, "
-          f"{len(mapping)} joints x {n_poses} keyframes, "
-          f"body height {height:.4f} m")
-    print(f"    ONE global similarity fit (scale {scale:.6f}): median "
-          f"{100 * np.median(err) / height:.3f} % of height, p90 "
-          f"{100 * np.percentile(err, 90) / height:.3f} %, max "
-          f"{100 * err.max() / height:.3f} %")
-    worst = int(np.argmax(err))
-    print(f"    worst: pose {index[worst][0]} {JOINT_NAMES[index[worst][1]]}")
-    print(f"    a similarity fit PER KEYFRAME instead: median "
+    def _fit(a, b, unit):
+        s, R, t = similarity(a, b)
+        e = np.linalg.norm((s * (R @ a.T).T + t) - b, axis=1)
+        return s, 100 * e / unit
+
+    # a1: rig units, so the yardstick is the subject's height through the same
+    # uniform scale the character was fitted with
+    _s1, e1 = _fit(src, rig_dst, height * character._scale)
+    _s2, e2 = _fit(src, dst, height)
+    out["a1_bvh_vs_posed_rig_median_pct"] = float(np.median(e1))
+    out["a1_bvh_vs_posed_rig_p90_pct"] = float(np.percentile(e1, 90))
+    out["a1_bvh_vs_posed_rig_max_pct"] = float(e1.max())
+    out["a2_bvh_vs_view_capture_median_pct"] = float(np.median(e2))
+    out["a2_bvh_vs_view_capture_max_pct"] = float(e2.max())
+    out["a3_per_keyframe_max_pct"] = 100 * float(per_frame.max()) / height
+    out["a_body_height_m"] = height
+
+    print(f"(a) BVH forward kinematics vs the app's pose, {len(mapping)} "
+          f"joints x {len(holds)} keyframes, body height {height:.4f} m")
+    print(f"    a1 vs the posed RIG (one global fit): median "
+          f"{np.median(e1):.4f} % of height, p90 {np.percentile(e1, 90):.4f} %, "
+          f"max {e1.max():.4f} %")
+    print(f"    a2 vs Character.posed_joints (one global fit): median "
+          f"{np.median(e2):.3f} % of height, max {e2.max():.3f} % — the "
+          f"remainder is the per-frame yaw the retarget removes, not the "
+          f"export's")
+    worst = int(np.argmax(e2))
+    print(f"       worst: pose {index[worst][0]} {JOINT_NAMES[index[worst][1]]}")
+    print(f"    a3 a similarity fit PER KEYFRAME: median "
           f"{100 * np.median(per_frame) / height:.6f} % of height, max "
           f"{100 * per_frame.max() / height:.6f} %")
-    print("    -> the gap between those two lines is placement, not pose: the "
-          "file holds the shape the view shows and drops where it stood.")
     if skipped:
         print(f"    not comparable (not a bone head in the file): "
               f"{', '.join(skipped)}")
 
 
-def report_interpolation(bvh, n_poses) -> None:
+def report_interpolation(bvh, holds, out) -> None:
     """(b) and (c): what the in-betweens do, and hemisphere flips."""
-    holds = bvh_util.stepped_holds(n_poses)
     arc_dev, endpoint_over, flips = [], [], 0
     for j in bvh.joints:
         order = [c for c in j.channels if c.endswith("rotation")]
@@ -141,19 +176,27 @@ def report_interpolation(bvh, n_poses) -> None:
                 endpoint_over.append(max(0.0, a - theta, c - theta))
     arc_dev = np.asarray(arc_dev)
     endpoint_over = np.asarray(endpoint_over)
-    chan = bvh_util.channel_overshoot(bvh, n_poses).ravel()
+    chan = bvh_util.channel_overshoot(bvh, len(holds), holds=holds).ravel()
+    out["b_inbetween_samples"] = int(len(arc_dev))
+    out["b_overshoot_max_deg"] = float(chan.max()) if chan.size else 0.0
+    out["c_quaternion_flips"] = int(flips)
 
     print(f"(b) in-betweens: {len(arc_dev)} (bone, frame) samples")
-    print(f"    off the slerp arc:  max {arc_dev.max():.4f} deg, "
-          f"p99 {np.percentile(arc_dev, 99):.4f}")
-    print(f"    past an endpoint:   max {endpoint_over.max():.4f} deg")
-    print(f"    Euler-channel overshoot: max {chan.max():.4f} deg, "
+    if not len(arc_dev):
+        print("    none: one keyframe per pose, so there is nothing between "
+              "them to leave the arc")
+    else:
+        print(f"    off the slerp arc:  max {arc_dev.max():.4f} deg, "
+              f"p99 {np.percentile(arc_dev, 99):.4f}")
+        print(f"    past an endpoint:   max {endpoint_over.max():.4f} deg")
+    print(f"    Euler-channel overshoot: max "
+          f"{(chan.max() if chan.size else 0.0):.4f} deg, "
           f"{int((chan > 1e-9).sum())} of {chan.size} samples nonzero")
     print(f"(c) consecutive keyframe quaternion pairs with dot < 0: {flips}")
 
 
-def report_translation(bvh) -> None:
-    """(d) which bone carries the motion the hips should have."""
+def report_translation(bvh, out, expected_travel=None) -> None:
+    """(d) what the hips carry, and the largest translation on anything else."""
     ranges = {}
     for j in bvh.joints:
         p = bvh.positions(j.name)
@@ -162,22 +205,82 @@ def report_translation(bvh) -> None:
     hips = ranges.get("hips", float("nan"))
     others = {k: v for k, v in ranges.items() if k != "hips"}
     name, worst = max(others.items(), key=lambda kv: kv[1])
+    out["d_hips_translation_range_rig_units"] = hips
+    out["d_hips_translation_range_pct_rig_height"] = 100 * hips / RIG_HEIGHT
+    out["d_largest_non_hips_bone"] = name
+    out["d_largest_non_hips_pct_rig_height"] = 100 * worst / RIG_HEIGHT
     print(f"(d) hips translation range {hips:.6f} rig units "
           f"({100 * hips / RIG_HEIGHT:.2f} % of the {RIG_HEIGHT} rig height)")
+    if expected_travel is not None:
+        out["d_expected_hips_travel_rig_units"] = float(expected_travel)
+        err = abs(hips - expected_travel) / (expected_travel or 1.0)
+        out["d_hips_vs_pelvis_travel_error_pct"] = 100 * float(err)
+        print(f"    the subject's own pelvis travel x the fitted scale is "
+              f"{expected_travel:.6f}: {100 * err:.3f} % apart")
     print(f"    largest non-hips: {name} {worst:.6f} = "
           f"{100 * worst / RIG_HEIGHT:.4f} % of rig height")
     for k, v in sorted(others.items(), key=lambda kv: -kv[1])[:4]:
         print(f"      {k:<14} {v:.6f}")
 
 
-def report_fallback(poses, out_dir, blender, timeout) -> None:
+def report_placement(ch, up, valid, out) -> None:
+    """(f) the preview-vs-export placement gap, both rules.
+
+    OLD: the view centred on the mean of the valid joints and re-seated the
+    ground under the posed ankle every frame. NEW (Phase 3): one take-wide
+    pelvis and one take-wide seat — the same rigid map `keep_root_motion` gives
+    the export, so the gap is zero by construction and the number below says
+    what it used to be.
+
+    The seat is `view3d.ground_datum`'s ankle branch, inlined rather than
+    imported: this tool must stay runnable without a Qt/OpenGL stack.
+    """
+    from pose3d.core.skeleton import Joint
+    drop = ch.ground_drop(up[0], valid[0])
+    off = []
+    for k in range(len(up)):
+        pose, v = up[k], valid[k]
+        _verts, _f, cj = ch.pose_and_joints(np.where(v[:, None], pose, np.nan), v)
+        if cj is None:
+            continue
+        z = [cj[int(j)][2] for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
+        z = [q for q in z if np.isfinite(q)]
+        seat = (min(z) - drop) if z else float(pose[v][:, 2].min())
+        off.append([pose[v][:, 0].mean(), pose[v][:, 1].mean(), seat])
+    off = np.asarray(off, float)
+    old = float(np.max(off.max(0) - off.min(0)) * ch._scale)
+    vertical = float(100 * np.ptp(off[:, 2]) * ch._scale / RIG_HEIGHT)
+    out["f_view_placement_ptp_old_rule_pct_rig_height"] = 100 * old / RIG_HEIGHT
+    out["f_view_placement_ptp_new_rule_pct_rig_height"] = 0.0
+    out["f_vertical_seat_ptp_pct_rig_height"] = vertical
+    yaw = []
+    for k in range(len(up)):
+        Rz = ch._skin_matrices(up[k], valid[k])[3]
+        if Rz is not None:
+            yaw.append(np.degrees(np.arctan2(Rz[1, 0], Rz[0, 0])))
+    out["g_per_frame_yaw_ptp_deg"] = float(np.ptp(yaw)) if yaw else 0.0
+    print(f"(f) the 3D view's own placement moved {old:.4f} rig units = "
+          f"{100 * old / RIG_HEIGHT:.2f} % of rig height across the take under "
+          f"the per-frame rule")
+    print(f"    of which vertical (the ankle re-seat): {vertical:.2f} %")
+    print("    under the take-wide rule it is 0 by construction, and the "
+          "export applies the same one")
+    print(f"(g) the retarget's per-frame yaw alignment spans "
+          f"{out['g_per_frame_yaw_ptp_deg']:.2f} deg over the take — the "
+          f"exported character does not turn with the subject (see a2)")
+
+
+def report_fallback(poses, out_dir, blender, timeout, out) -> None:
     """(e) what ships when character_blend() points at nothing."""
     missing = out_dir / "no_such_character.blend"
     res = export_animation(poses, out_dir, name="fallback", fps=30,
                            render_video=False, blender=blender,
                            timeout=timeout, character=str(missing))
+    out["e_missing_asset_ok"] = bool(res.ok)
+    out["e_missing_asset_reason"] = res.reason
+    out["e_missing_asset_wrote_bvh"] = bool(res.bvh)
     print(f"(e) missing character asset -> ExportResult.ok = {res.ok}, "
-          f"returncode {res.returncode}")
+          f"reason {res.reason!r}, returncode {res.returncode}")
     if not res.bvh:
         print("    no BVH written")
         return
@@ -190,8 +293,9 @@ def report_fallback(poses, out_dir, blender, timeout) -> None:
           f"{rot} rotation channels, {pos} position channels")
     print(f"    root '{bvh.joints[0].name}' children: "
           f"{[bvh.joints[c].name for c in bvh.joints[0].children]}")
-    print("    -> the client receives this instead of the character, and the "
-          "host reports a successful export" if res.ok else "")
+    if res.ok:
+        print("    -> the client receives this instead of the character, and "
+              "the host reports a successful export")
 
 
 def main(argv=None) -> int:
@@ -201,6 +305,16 @@ def main(argv=None) -> int:
     ap.add_argument("--out", default=None,
                     help="where to export (default: a temp dir)")
     ap.add_argument("--timeout", type=int, default=1200)
+    ap.add_argument("--metrics", default=None,
+                    help="write the five numbers to this JSON file")
+    ap.add_argument("--label", default="after",
+                    help="key the metrics are stored under")
+    ap.add_argument("--no-root-motion", dest="root_motion",
+                    action="store_false",
+                    help="reproduce the pre-Phase-3 placement")
+    ap.add_argument("--stepped", action="store_true",
+                    help="the stop-motion hold schedule instead of one frame "
+                         "per pose")
     args = ap.parse_args(argv)
 
     project = load_project(Path(args.project))
@@ -221,19 +335,24 @@ def main(argv=None) -> int:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"project {args.project}: {n_poses} poses")
-    print(f"blender {blender}\ncharacter {character}\nout {out_dir}\n")
+    print(f"blender {blender}\ncharacter {character}\nout {out_dir}")
+    print(f"root motion {args.root_motion}, schedule "
+          f"{'stepped' if args.stepped else 'one_per_pose'}\n")
 
-    res = export_animation(poses, out_dir, name="fidelity", fps=30,
-                           render_video=False, blender=blender,
-                           timeout=args.timeout, character=character)
+    res = export_animation(
+        poses, out_dir, name="fidelity", fps=30, render_video=False,
+        blender=blender, timeout=args.timeout, character=character,
+        keep_root_motion=args.root_motion,
+        schedule="stepped" if args.stepped else "one_per_pose")
     if not res.ok or not res.bvh:
         print(res.stdout[-3000:])
         raise SystemExit(f"export failed (rc={res.returncode}):\n"
                          f"{res.stderr[-3000:]}")
     bvh = bvh_util.parse(res.bvh)
+    holds = bvh_util.keyframe_rows(bvh, n_poses)
     print(f"exported {res.bvh.name}: {bvh.n_frames} frames at "
-          f"{bvh.fps:.1f} fps, {len(bvh.joints)} joints, expected "
-          f"{bvh_util.expected_frames(n_poses)} frames\n")
+          f"{bvh.fps:.1f} fps, {len(bvh.joints)} joints; captured pose k is "
+          f"motion row {holds[0][0]} + k*{(holds[1][0] - holds[0][0]) if len(holds) > 1 else 1}\n")
 
     R = de_tilt_rotation(poses)
     up = poses @ R.T
@@ -243,13 +362,50 @@ def main(argv=None) -> int:
     print(f"subject height {subject_height(poses):.4f} m, "
           f"character scale {ch._scale:.4f}\n")
 
-    report_keyframe_fidelity(bvh, ch, up, valid, n_poses)
+    # What root motion SHOULD put in the hips: the take's pelvis travel mapped
+    # into rig space by the SAME `Rz @ (pelvis - pelvis_ref) * scale` the
+    # exporter applies, so this is the number the file has to reproduce and not
+    # a rotation-dependent approximation of it.
+    ref = take_pelvis_ref(up)
+    offs = []
+    for k in range(n_poses):
+        _skin, pelvis, scale, Rz = ch._skin_matrices(up[k], valid[k])
+        if scale is not None:
+            offs.append((Rz @ (pelvis - ref)) * scale)
+    offs = np.asarray(offs, float)
+    travel = float(np.max(offs.max(0) - offs.min(0))) if len(offs) else None
+    if not args.root_motion:
+        travel = 0.0
+
+    out = {"label": args.label, "n_poses": n_poses,
+           "keep_root_motion": bool(args.root_motion),
+           "schedule": "stepped" if args.stepped else "one_per_pose",
+           "bvh_frames": int(bvh.n_frames),
+           "rig_height": RIG_HEIGHT,
+           "character_scale": float(ch._scale),
+           "pelvis_ref": [float(v) for v in ref] if ref is not None else None}
+
+    report_keyframe_fidelity(bvh, ch, up, valid, holds, out,
+                             pelvis_ref=ref if args.root_motion else None)
     print()
-    report_interpolation(bvh, n_poses)
+    report_interpolation(bvh, holds, out)
     print()
-    report_translation(bvh)
+    report_translation(bvh, out, expected_travel=travel)
     print()
-    report_fallback(poses, out_dir, blender, args.timeout)
+    report_placement(ch, up, valid, out)
+    print()
+    report_fallback(poses, out_dir, blender, args.timeout, out)
+
+    if args.metrics:
+        import json
+        path = Path(args.metrics)
+        doc = {}
+        if path.exists():
+            doc = json.loads(path.read_text())
+        doc[args.label] = out
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(doc, indent=2, sort_keys=True) + "\n")
+        print(f"\nwrote {path}")
     if tmp is not None:
         tmp.cleanup()
     return 0

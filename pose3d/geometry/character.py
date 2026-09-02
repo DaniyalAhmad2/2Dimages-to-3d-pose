@@ -323,6 +323,35 @@ def _bend_weight(bend_deg):
         / (_ROLL_BEND_FULL_DEG - _ROLL_BEND_MIN_DEG), 0.0, 1.0))
 
 
+def take_pelvis_ref(poses):
+    """The take's pelvis: one reference point for placing the whole sequence.
+
+    Resolved per frame exactly as `Character._skin_matrices` does — the PELVIS
+    joint when it is there, the hip midpoint when it is not — and then averaged
+    over the frames that have one. Returns None if no frame does.
+
+    The MEAN, not the first frame: the first frame can be the one whose pelvis
+    dropped out, and averaging leaves the subject's travel spread either side
+    of the origin, so the 3D view's grid and camera (sized from the same pelvis
+    box) frame the whole take rather than its opening pose. It is a property of
+    the take, computed once, which is what makes it usable as the SHARED
+    placement rule: the view subtracts it, the export offsets the hips by the
+    travel away from it, and the two agree frame for frame.
+    """
+    poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
+    out = []
+    for pose in poses:
+        p = pose[int(Joint.PELVIS)]
+        if not np.isfinite(p).all():
+            hips = [pose[int(j)] for j in (Joint.LEFT_HIP, Joint.RIGHT_HIP)
+                    if np.isfinite(pose[int(j)]).all()]
+            if not hips:
+                continue
+            p = np.mean(hips, axis=0)
+        out.append(p)
+    return np.mean(out, axis=0) if out else None
+
+
 class Character:
     """The bundled rig, posed to mimic a reconstructed skeleton.
 
@@ -883,16 +912,34 @@ class Character:
         our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
         return self.rig_h / our_h
 
-    def _skin_matrices(self, up_pose, valid, head_pts=None):
+    def _skin_matrices(self, up_pose, valid, head_pts=None, *,
+                       pelvis_ref=None):
         """Per-bone skin (deform) matrices in RIG space + the alignment used.
 
-        Returns (skin (B,4,4), pelvis (3,), scale, Rz (3,3)) or (None,)*4 if the
+        Returns (skin (B,4,4), origin (3,), scale, Rz (3,3)) or (None,)*4 if the
         pose has no usable pelvis. Every skin matrix is a pure rotation plus a
         translation — no bone is ever scaled.
 
         `head_pts` is the optional (NUM_HEAD_KP, 3) face keypoints in the same
         space as `up_pose`; given them the head bone gets a real orientation
         instead of riding the neck.
+
+        ROOT MOTION. `to_rig` maps the capture into rig space around an
+        `origin` that is this frame's own pelvis by default — which is exactly
+        why the exported file used to have a hips translation range of
+        [0, 0, 0] while the subject's pelvis travelled 116 % of its own body
+        height (F13). Pass `pelvis_ref` — the take's pelvis, once, from
+        `take_pelvis_ref` — and the origin becomes that instead, so the whole
+        rig is translated by
+
+            root_offset = Rz @ (pelvis - pelvis_ref) * scale
+
+        every frame. It is a RIGID translation of the result: bone directions
+        are differences of `to_rig` points, so not one rotation changes, and
+        `_from_rig` given the same origin maps the joints straight back to the
+        capture's own space. That is what lets the 3D view and the export share
+        one placement rule (`pose_bone_matrices(keep_root_motion=True)`) while
+        `posed_joints` and the character/capture overlay stay put.
         """
         up_pose = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)
         j = Joint
@@ -906,6 +953,11 @@ class Character:
             if not hips:
                 return None, None, None, None
             pelvis = np.mean(hips, axis=0)
+
+        # the take's pelvis when root motion is on, else this frame's own —
+        # the ONE line that decides whether the figure travels or animates in
+        # place, in the view and in the exported file alike
+        origin = pelvis if pelvis_ref is None else np.asarray(pelvis_ref, float)
 
         scale = self._frame_scale(up_pose, valid)
 
@@ -924,7 +976,7 @@ class Character:
         roll = self._roll_targets(up_pose, valid, Rz)
 
         def to_rig(p):
-            return self.hips_world + (Rz @ (p - pelvis)) * scale
+            return self.hips_world + (Rz @ (p - origin)) * scale
 
         # Face keypoints, once: the ear midpoint aims the neck (it is on the
         # skull axis, so no anatomical offset is needed) and the full basis
@@ -1027,13 +1079,19 @@ class Character:
             else:
                 tgt, w = roll.get(b, (None, 0.0))
                 skin[b] = self._bone_fk(b, base, end, ref_target=tgt, weight=w)
-        return skin, pelvis, scale, Rz
+        return skin, origin, scale, Rz
 
     # --- outputs -----------------------------------------------------------
-    def _from_rig(self, pts, pelvis, scale, Rz):
-        """Rig space -> the pose space the caller supplied."""
+    def _from_rig(self, pts, origin, scale, Rz):
+        """Rig space -> the pose space the caller supplied.
+
+        `origin` is whatever `_skin_matrices` centred `to_rig` on — this
+        frame's pelvis normally, the take's `pelvis_ref` when root motion is
+        on. Feeding back the same origin is what makes the round trip exact
+        either way, so turning root motion on cannot move `posed_joints`.
+        """
         pts = np.atleast_2d(np.asarray(pts, float))
-        return pelvis + (Rz.T @ (pts - self.hips_world).T).T / scale
+        return origin + (Rz.T @ (pts - self.hips_world).T).T / scale
 
     def ground_drop(self, up_pose, valid) -> float:
         """The rig's rest ankle-to-sole height in the CALLER's pose units.
@@ -1052,8 +1110,12 @@ class Character:
         rig cannot supply are NaN.
 
         Raises `PoseUnavailable` when the frame has no usable pelvis.
+
+        No `pelvis_ref` here on purpose: the output is already in the capture's
+        space, where the subject's travel is simply present, so there is
+        nothing for a root offset to add.
         """
-        skin, pelvis, scale, Rz = self._skin_matrices(up_pose, valid, head_pts)
+        skin, origin, scale, Rz = self._skin_matrices(up_pose, valid, head_pts)
         if skin is None:
             raise PoseUnavailable(
                 "no usable pelvis in this frame: neither PELVIS nor either "
@@ -1065,8 +1127,8 @@ class Character:
             v = np.einsum("vij,vj->vi", skin[bi], self.vh)[:, :3]
             out += wv[:, None] * v
 
-        verts = self._from_rig(out, pelvis, scale, Rz).astype(np.float32)
-        joints = self._from_rig(self._joints_from_skin(skin), pelvis, scale, Rz)
+        verts = self._from_rig(out, origin, scale, Rz).astype(np.float32)
+        joints = self._from_rig(self._joints_from_skin(skin), origin, scale, Rz)
         return verts, self.faces, joints
 
     def pose(self, up_pose, valid, head_pts=None):
@@ -1078,15 +1140,25 @@ class Character:
         """Canonical joints of the posed rig, in the same space as up_pose."""
         return self.pose_and_joints(up_pose, valid, head_pts)[2]
 
-    def pose_bone_matrices(self, up_pose, valid, head_pts=None):
+    def pose_bone_matrices(self, up_pose, valid, head_pts=None, *,
+                           keep_root_motion: bool = False, pelvis_ref=None):
         """Posed bone world matrices in RIG space: {bone_name: (4,4) list}.
 
         M_posed[b] = skin[b] @ rest[b]. Blender's deform is
         pose_bone.matrix @ rest[b]^-1, so setting pose_bone.matrix = M_posed[b]
         reproduces this class's skinning exactly — that is what keeps the
         export identical to the 3D view. Returns None for an unusable pose.
+
+        `keep_root_motion` with a take-wide `pelvis_ref` (see `_skin_matrices`)
+        translates the whole rig by the subject's travel since that reference,
+        so the exported hips carry the motion instead of the file animating in
+        place. It is off here and switched on by the caller, so the rollback is
+        one argument: off plus the stepped schedule reproduces the file the
+        client already has.
         """
-        skin, *_ = self._skin_matrices(up_pose, valid, head_pts)
+        ref = pelvis_ref if keep_root_motion else None
+        skin, *_ = self._skin_matrices(up_pose, valid, head_pts,
+                                       pelvis_ref=ref)
         if skin is None:
             return None
         return {name: (skin[b] @ self.rest[b]).tolist()

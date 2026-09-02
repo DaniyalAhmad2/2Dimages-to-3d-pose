@@ -19,6 +19,42 @@ from pose3d.core.skeleton import BONES, JOINT_NAMES, MIXAMO_BONE, NUM_JOINTS
 _JOB = Path(__file__).with_name("blender_job.py")
 
 
+# Why an export produced nothing, as a value rather than a swallowed exception.
+# `_character_bone_frames` used to answer every failure with `return None, None`,
+# and the Blender job then quietly wrote a DIFFERENT animation (an aim-only
+# Damped-Track retarget, or a null-rooted stick figure) that the host reported as
+# a successful export. Each reason below is a thing the user can act on.
+FAILURE_MESSAGES = {
+    "character_asset_missing":
+        "The character model this export needs was not found ({detail}).\n\n"
+        "Nothing was written: the app will not quietly export a different "
+        "figure in its place. Reinstall the app, or re-run the export with "
+        "the fallback explicitly allowed.",
+    "character_import_failed":
+        "The character posing code could not be loaded ({detail}).\n\n"
+        "Nothing was written rather than exporting a different figure.",
+    "character_load_failed":
+        "The character model could not be opened ({detail}).\n\n"
+        "Nothing was written rather than exporting a different figure.",
+    "no_posable_frame":
+        "No frame of this take could be posed onto the character ({detail}).\n\n"
+        "This normally means the 3D reconstruction is empty; the 3D preview "
+        "will be empty too.",
+    "blender_timeout": "{detail}",
+    "blender_missing": "{detail}",
+    "blender_not_runnable": "{detail}",
+    "blender_failed": "{detail}",
+}
+
+
+def _failure(reason: str, detail: str, returncode: int,
+             note: str = "") -> "ExportResult":
+    msg = FAILURE_MESSAGES.get(reason, "{detail}").format(detail=detail)
+    return ExportResult(bvh=None, fbx=None, mp4=None, returncode=returncode,
+                        stdout="", stderr=msg, reason=reason, message=msg,
+                        fallback_note=note)
+
+
 @dataclass
 class ExportResult:
     bvh: Path | None
@@ -27,16 +63,103 @@ class ExportResult:
     returncode: int
     stdout: str
     stderr: str
+    # Why it failed, as one of FAILURE_MESSAGES' keys, and the sentence to show.
+    # None on success.
+    reason: str | None = None
+    message: str = ""
+    # The fixed-camera render (the left camera's own pose), when one was asked
+    # for. `mp4` stays the turntable, so the existing contract is unchanged.
+    mp4_camera: Path | None = None
+    # A substitution the HOST decided on (a missing asset with allow_fallback),
+    # which never reaches Blender's stdout and so cannot be read back from it.
+    fallback_note: str = ""
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0 and "POSE3D_EXPORT_OK" in self.stdout
+        return (self.returncode == 0 and "POSE3D_EXPORT_OK" in self.stdout
+                and "POSE3D_EXPORT_FAILED" not in self.stdout)
+
+    @property
+    def substituted(self) -> bool:
+        """True when Blender wrote something OTHER than the posed character.
+
+        Only reachable with `allow_fallback=True`: it is what the opt-in buys,
+        and the caller is expected to say so rather than present the file as
+        the character export.
+        """
+        return bool(self.fallback_note) or (
+            "POSE3D_EXPORT_FALLBACK" in self.stdout)
 
 
-def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
-                           head3d: np.ndarray | None = None, *,
-                           filled: np.ndarray | None = None,
-                           recorded_up=None):
+def _rig_camera(camera, M_view, Rz, scale, pelvis_ref, hips_world):
+    """The capture camera, expressed in the posed rig's space.
+
+    `camera` is {"K", "R", "t", "image_size"} in the ArUco world frame, i.e.
+    X_cam = R @ X_world + t (`calib.extrinsics.Extrinsics`). The character is
+    placed by the same similarity every joint goes through — de-tilt, yaw
+    align, uniform scale, offset onto the take's pelvis — so the camera goes
+    through it too and ends up looking at the figure from exactly where the
+    photograph was taken. That is what makes the fixed-camera mp4 comparable
+    to the client's own photos frame for frame, which a turntable spin over
+    the whole clip cannot be.
+    """
+    K = np.asarray(camera["K"], float).reshape(3, 3)
+    Rc = np.asarray(camera["R"], float).reshape(3, 3)
+    tc = np.asarray(camera["t"], float).reshape(3)
+    w, h = (int(v) for v in camera["image_size"])
+
+    U = Rz @ M_view                       # world rotation -> rig rotation
+    centre_world = -Rc.T @ tc
+    centre = hips_world + (Rz @ (M_view @ centre_world - pelvis_ref)) * scale
+    # OpenCV camera axes in world: +X right, +Y down, +Z forward. Blender's are
+    # +X right, +Y up, -Z forward.
+    axes = U @ Rc.T
+    basis = np.column_stack([axes[:, 0], -axes[:, 1], -axes[:, 2]])
+    M = np.eye(4)
+    M[:3, :3] = basis
+    M[:3, 3] = centre
+    return {
+        "matrix": M.tolist(),
+        # 36 mm is Blender's default sensor width; the lens that reproduces
+        # this K on it is f_px / width * sensor.
+        "lens_mm": float(36.0 * K[0, 0] / w),
+        "sensor_mm": 36.0,
+        # Blender's shift is in units of the SENSOR WIDTH for both axes under
+        # sensor_fit HORIZONTAL, and a positive shift moves the frame so the
+        # optical axis lands earlier: checked against
+        # bpy_extras.object_utils.world_to_camera_view, which puts an on-axis
+        # point at (0.5 - shift_x) of the width and (0.5*h + shift_y*w) pixels
+        # down. Both are 0 for the assumed pinhole the app usually has.
+        "shift_x": float(0.5 - K[0, 2] / w),
+        "shift_y": float((K[1, 2] / h - 0.5) * h / w),
+        "image_size": [w, h],
+    }
+
+
+def _character_bone_frames(poses3d, display_frame, head3d=None, *,
+                           filled=None, recorded_up=None):
+    """Just the posed bone matrices and their names, or (None, None).
+
+    The narrow view of `_character_document` below, kept because it is what
+    "does the export pose the character exactly as the 3D view does?" reads —
+    and it must stay answerable without the placement, the root offsets or the
+    camera getting in the way. Root motion is OFF here for the same reason: it
+    is placement, not pose. The export itself takes `_character_document`,
+    which says WHY it failed instead of answering None twice.
+    """
+    frag, _reason = _character_document(
+        poses3d, display_frame, head3d, filled=filled,
+        recorded_up=recorded_up, keep_root_motion=False)
+    if frag is None:
+        return None, None
+    return frag["bone_frames"], frag["bone_names"]
+
+
+def _character_document(poses3d: np.ndarray, display_frame: int,
+                        head3d: np.ndarray | None = None, *,
+                        filled: np.ndarray | None = None,
+                        recorded_up=None, keep_root_motion: bool = True,
+                        camera=None):
     """Per-frame posed bone matrices, computed with the SAME skinning the live
     3D view uses, so the exported character matches the preview pose-for-pose.
 
@@ -54,19 +177,26 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
     omitting the keyframes holds the previous pose too — so this is stated
     rather than fixed.
 
-    Returns (bone_frames, bone_names) or (None, None) if the character asset is
-    unavailable — the Blender job then falls back to its aim-only retarget.
+    `keep_root_motion` places every frame against the TAKE's pelvis instead of
+    its own, so the subject's travel reaches the file; `root_offsets` carries
+    the same translation out separately, so the turntable render can pin the
+    figure back in place without a second posing pass changing anything else.
+
+    Returns (fragment, reason): the JSON fragment to merge into the export
+    document, or None and a `FAILURE_MESSAGES` key saying why. A reason is
+    never silently swallowed — that is what used to let a different retarget
+    ship in the character's place (F31).
     """
     try:
-        from pose3d.geometry.character import Character
+        from pose3d.geometry.character import Character, take_pelvis_ref
         from pose3d.geometry.orient import (take_up, de_tilt_matrix,
                                             detect_vertical, upright_matrix)
-    except Exception:
-        return None, None
+    except Exception as e:
+        return None, ("character_import_failed", f"{type(e).__name__}: {e}")
     try:
         ch = Character()
-    except Exception:
-        return None, None
+    except Exception as e:
+        return None, ("character_load_failed", f"{type(e).__name__}: {e}")
 
     poses3d = np.asarray(poses3d, float).reshape(-1, NUM_JOINTS, 3)
     # orient exactly as the 3D view does, so the export matches the preview
@@ -87,12 +217,20 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
                     break
         R = upright_matrix(axis, sign).T
 
+    upright = poses3d @ R
     # size the character to this subject once, from the whole take — the same
     # fit the 3D view applies, so the export stays identical to the preview
-    ch.fit_to_subject(poses3d @ R)
+    ch.fit_to_subject(upright)
+    # ...and place it by the same take-wide rule the view uses (view3d
+    # `_take_placement`), which is what root motion IS: one reference pelvis
+    # for the sequence instead of re-centring on each frame's own.
+    pelvis_ref = take_pelvis_ref(upright) if keep_root_motion else None
+    if keep_root_motion and pelvis_ref is None:
+        keep_root_motion = False
 
-    bone_frames = []
-    for i, pose in enumerate(poses3d):
+    bone_frames, root_offsets = [], []
+    align = None                # (scale, Rz) of the first posable frame
+    for i, pose in enumerate(upright):
         valid = ~np.isnan(pose).any(1)
         if filled is not None:
             # A joint fill_gaps flagged has a value, so this changes nothing
@@ -101,15 +239,38 @@ def _character_bone_frames(poses3d: np.ndarray, display_frame: int,
             # pose does not have, whatever a caller passes in.
             valid |= np.asarray(filled[i], bool) & valid
         if not valid.any():
-            bone_frames.append(None); continue
-        up = pose @ R                       # upright; centring is irrelevant here
+            bone_frames.append(None); root_offsets.append(None); continue
         # the face keypoints take the same rotation, so the exported head is
         # oriented exactly as the preview shows it
         hp = None if head3d is None else np.asarray(head3d[i], float) @ R
-        bone_frames.append(ch.pose_bone_matrices(up, valid, hp))
+        bone_frames.append(ch.pose_bone_matrices(
+            pose, valid, hp, keep_root_motion=keep_root_motion,
+            pelvis_ref=pelvis_ref))
+        # the placement this frame's pelvis is at, read off the SAME solve the
+        # matrices came from: `root_offset = Rz @ (pelvis - pelvis_ref) * scale`
+        _skin, pelvis, scale, Rz = ch._skin_matrices(pose, valid)
+        if scale is None:
+            root_offsets.append(None); continue
+        if align is None:
+            align = (scale, Rz)
+        root_offsets.append(
+            [0.0, 0.0, 0.0] if pelvis_ref is None else
+            [float(v) for v in (Rz @ (pelvis - pelvis_ref)) * scale])
     if all(b is None for b in bone_frames):
-        return None, None
-    return bone_frames, ch.bone_names
+        return None, ("no_posable_frame", f"{len(bone_frames)} frames")
+
+    frag = {"bone_frames": bone_frames, "bone_names": ch.bone_names,
+            "root_offsets": root_offsets,
+            "keep_root_motion": bool(keep_root_motion)}
+    if camera is not None and pelvis_ref is not None and align is not None:
+        try:
+            frag["camera"] = _rig_camera(camera, R.T, align[1], align[0],
+                                         pelvis_ref, ch.hips_world)
+        except Exception as e:
+            # a missing or malformed camera must cost the take its extra
+            # render, never the export itself
+            print(f"fixed-camera render skipped: {type(e).__name__}: {e}")
+    return frag, None
 
 
 def _poses_to_json(poses3d: np.ndarray, fps: int) -> dict:
@@ -143,22 +304,64 @@ def export_animation(
     filled: np.ndarray | None = None,
     recorded_up=None,
     on_line=None,
+    keep_root_motion: bool = True,
+    schedule: str = "one_per_pose",
+    camera=None,
+    allow_fallback: bool = False,
 ) -> ExportResult:
-    if character == "__bundled__":
+    """Write BVH + FBX (+ mp4) for a take, by posing the bundled character.
+
+    `keep_root_motion` (default ON for the files) places every frame against
+    the take's pelvis, so the subject's travel is in the exported hips instead
+    of being pinned away; the turntable mp4 is rendered with it pinned back so
+    the figure does not spin its way out of frame.
+
+    `schedule` is `"one_per_pose"` (default: export frame k+1 IS photograph k)
+    or `"stepped"`, the 0.7 s hold / 0.3 s ease stop-motion the mp4 still uses
+    and which, together with `keep_root_motion=False`, reproduces the file the
+    client already has.
+
+    `camera` is an optional {"K", "R", "t", "image_size"} for the LEFT camera
+    in the capture's world frame; given one, a second mp4 is rendered from that
+    exact viewpoint, which is the comparison the client actually makes.
+
+    `allow_fallback` is the ONLY way to receive a file that is not the posed
+    character. Without it a missing asset or a failed retarget returns
+    `ok is False` with a `reason`, instead of silently shipping a different
+    animation under the same name (F31).
+    """
+    requested_bundled = character == "__bundled__"
+    if requested_bundled:
         from pose3d.config import character_blend
         character = character_blend()          # always the bundled model
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     doc = _poses_to_json(poses3d, fps)
     doc["display_frame"] = int(display_frame)   # which pose the turntable spins
-    if character and Path(character).exists():
+    doc["schedule"] = "stepped" if schedule == "stepped" else "one_per_pose"
+
+    want_character = requested_bundled or bool(character)
+    have_character = bool(character) and Path(character).exists()
+    fallback_note = ""
+    if want_character and not have_character:
+        detail = f"looked for {character}" if character else "no path configured"
+        if not allow_fallback:
+            return _failure("character_asset_missing", detail, 2)
+        fallback_note = f"the character asset is missing ({detail})"
+        print(f"POSE3D_EXPORT_FALLBACK: {fallback_note}")
+    if have_character:
         # drive the rig with the exact skinning the live view uses
-        bone_frames, bone_names = _character_bone_frames(
+        frag, reason = _character_document(
             poses3d, display_frame, head3d, filled=filled,
-            recorded_up=recorded_up)
-        if bone_frames is not None:
-            doc["bone_frames"] = bone_frames
-            doc["bone_names"] = bone_names
+            recorded_up=recorded_up, keep_root_motion=keep_root_motion,
+            camera=camera)
+        if frag is not None:
+            doc.update(frag)
+        elif not allow_fallback:
+            return _failure(reason[0], reason[1], 3)
+        else:
+            fallback_note = f"{reason[0]}: {reason[1]}"
+            print(f"POSE3D_EXPORT_FALLBACK: {fallback_note}")
     json_path = out_dir / f"{name}_poses.json"
     json_path.write_text(json.dumps(doc))
 
@@ -174,6 +377,8 @@ def export_animation(
         cmd += ["--character", str(character)]
     if not render_video:
         cmd.append("--no-video")
+    if allow_fallback:
+        cmd.append("--allow-fallback")
 
     # A frozen GUI has no usable stdin for the child to inherit, its output is
     # UTF-8 whatever the machine's code page says, and on Windows a console
@@ -197,32 +402,38 @@ def export_animation(
             p.wait(timeout=timeout)
             stdout, stderr, rc = "".join(chunks), "", p.returncode
     except subprocess.TimeoutExpired:
-        return ExportResult(
-            bvh=None, fbx=None, mp4=None, returncode=124, stdout="",
-            stderr=(f"Blender did not finish within {timeout} s and was stopped.\n\n"
-                    "A long take can legitimately take a while to render; try "
-                    "exporting without the video, or a shorter selection."))
+        return _failure("blender_timeout",
+                        f"Blender did not finish within {timeout} s and was "
+                        "stopped.\n\nA long take can legitimately take a while "
+                        "to render; try exporting without the video, or a "
+                        "shorter selection.", 124, note=fallback_note)
     except FileNotFoundError:
         # must precede OSError, of which it is a subclass: say which binary is
         # missing and how to point at one, instead of a bare OSError
-        return ExportResult(
-            bvh=None, fbx=None, mp4=None, returncode=127, stdout="",
-            stderr=(f"Blender was not found (tried: {blender}).\n\n"
-                    "Export needs Blender 5.x. Install it and either put it on "
-                    "PATH or set the POSE3D_BLENDER environment variable to the "
-                    "blender executable."))
+        return _failure("blender_missing",
+                        f"Blender was not found (tried: {blender}).\n\nExport "
+                        "needs Blender 5.x. Install it and either put it on "
+                        "PATH or set the POSE3D_BLENDER environment variable to "
+                        "the blender executable.", 127, note=fallback_note)
     except OSError as e:
         # e.g. POSE3D_BLENDER pointing at a folder, or a non-executable file
-        return ExportResult(
-            bvh=None, fbx=None, mp4=None, returncode=126, stdout="",
-            stderr=(f"Could not run Blender at '{blender}'.\n\n{type(e).__name__}: {e}\n\n"
-                    "Set POSE3D_BLENDER to the blender executable itself."))
+        return _failure("blender_not_runnable",
+                        f"Could not run Blender at '{blender}'.\n\n"
+                        f"{type(e).__name__}: {e}\n\nSet POSE3D_BLENDER to the "
+                        "blender executable itself.", 126,
+                        note=fallback_note)
 
-    def _exists(ext):
-        p = out_dir / f"{name}.{ext}"
+    def _exists(stem, ext):
+        p = out_dir / f"{stem}.{ext}"
         return p if p.exists() else None
 
-    return ExportResult(
-        bvh=_exists("bvh"), fbx=_exists("fbx"),
-        mp4=_exists("mp4") if render_video else None,
+    res = ExportResult(
+        bvh=_exists(name, "bvh"), fbx=_exists(name, "fbx"),
+        mp4=_exists(name, "mp4") if render_video else None,
+        mp4_camera=_exists(f"{name}_camera", "mp4") if render_video else None,
+        fallback_note=fallback_note,
         returncode=rc, stdout=stdout, stderr=stderr)
+    if not res.ok:
+        res.reason = "blender_failed"
+        res.message = (stderr or stdout or "")[-1500:]
+    return res
