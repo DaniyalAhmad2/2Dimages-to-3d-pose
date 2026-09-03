@@ -36,7 +36,7 @@
       "key": "head_retarget_with_face_pct",
       "rule": "<= 3.0 % of body height",
       "baseline": 9.027670299476386,
-      "measured": 1.6735168549603388,
+      "measured": 1.5533957010191217,
       "pass": true,
       "unit": "%",
       "source": "tests/fixtures/client_take (re-measured)"
@@ -121,7 +121,7 @@
       "RIGHT_ANKLE": 0.905464253277598
     },
     "retarget_with_face_pct": {
-      "HEAD": 1.6735168549603388,
+      "HEAD": 1.5533957010191217,
       "NECK": 4.263654895140397,
       "LEFT_SHOULDER": 0.3790317978124096,
       "RIGHT_SHOULDER": 0.39429319044899486,
@@ -139,7 +139,7 @@
     },
     "retarget_median_pct": {
       "no_face": 1.5017183740642355,
-      "with_face": 1.4773315880604652
+      "with_face": 1.5017183740642355
     },
     "head_aim_no_face": {
       "n": 26,
@@ -148,8 +148,8 @@
     },
     "head_aim_with_face": {
       "n": 26,
-      "median_deg": 3.781344447421397,
-      "max_deg": 22.95163550589598
+      "median_deg": 1.2754837687193339,
+      "max_deg": 3.820428030068549
     },
     "bone_cv_pct": {
       "spine (pelvis-neck)": 4.693364438855113,
@@ -184,206 +184,423 @@
       ],
       "n_missing": 2,
       "missing_pct": 0.5128205128205128,
-      "rejected": 0,
-      "filled": 2
-    }
-  },
-  "re_measured": {
-    "when": "2026-09-03, Phase 5b round 3, after Phases 6.1-6.5 merged into the same tree",
-    "why": "Phase 6.2's data-driven cross-view gate (clip(6 x median Sampson, 25 px, 1.4 % of the smaller diagonal)) reaches this fixture too, and on it it refuses two of the take's 390 pairs \u2014 0013 LEFT_ELBOW and 0021 LEFT_ANKLE, both detection errors (see tests/test_cross_view.py::test_the_client_take_is_gated_on_its_own_distribution). Those two joint-frames are gap-filled for the bone fit instead of measured, which moves the retarget numbers the head gates are scored on by up to 0.9 % relative. Every gate still passes and no bar moved; only the measurement did.",
-    "table_before": [
-      {
-        "gate": "HEAD retarget, no face points",
-        "key": "head_retarget_no_face_pct",
-        "rule": "<= 4.0 % of body height",
-        "baseline": 12.733440611004376,
-        "measured": 1.539167712174258,
-        "pass": true,
-        "unit": "%",
-        "source": "tests/fixtures/client_take (re-measured)"
-      },
-      {
-        "gate": "HEAD retarget, with face points",
-        "key": "head_retarget_with_face_pct",
-        "rule": "<= 3.0 % of body height",
-        "baseline": 9.027670299476386,
-        "measured": 1.668198562479525,
-        "pass": true,
-        "unit": "%",
-        "source": "tests/fixtures/client_take (re-measured)"
-      },
-      {
-        "gate": "neck-head bone CV",
-        "key": "neck_head_bone_cv_pct",
-        "rule": "<= 4.0 %",
-        "baseline": 9.525882972703029,
-        "measured": 3.125237262141566,
-        "pass": true,
-        "unit": "%",
-        "source": "tests/fixtures/client_take (re-measured)"
-      },
-      {
-        "gate": "neck-Lshoulder bone CV",
-        "key": "neck_lshoulder_bone_cv_pct",
-        "rule": "<= 6.5 %",
-        "baseline": 5.1466792932557555,
-        "measured": 5.98202343512588,
-        "pass": true,
-        "unit": "%",
-        "restated": true,
-        "source": "tests/fixtures/client_take (re-measured)"
-      },
-      {
-        "gate": "worst body-joint regression (LEFT_WRIST)",
-        "key": "worst_body_joint_regression_pct",
-        "rule": "<= 0.5 % of body height",
-        "baseline": 0.0,
-        "measured": 0.22739728613774157,
-        "pass": true,
-        "unit": "% of height",
-        "source": "tests/fixtures/client_take vs the COCO-17 column of phase5_metrics.json"
-      },
-      {
-        "gate": "head aim error, nose path off",
-        "key": "head_aim_error_deg",
-        "rule": "< 5 deg with the nose path disabled",
-        "baseline": 38.56650581013973,
-        "measured": 1.192801246687554,
-        "pass": true,
-        "unit": "deg",
-        "source": "tests/fixtures/client_take (re-measured)"
-      },
-      {
-        "gate": "body epipolar median",
-        "key": "epipolar_median_px",
-        "rule": "no regression on the COCO-17 baseline",
-        "baseline": 4.899798209156523,
-        "measured": 4.674843034187729,
-        "pass": true,
-        "unit": "px",
-        "source": "tests/fixtures/client_take (re-measured)"
-      }
-    ],
-    "fixture_run_before": {
-      "label": "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)",
-      "head_source": "skull",
-      "n_frames": 26,
-      "height_m": 0.1301881226497098,
-      "scale": 111.41704894412584,
-      "retarget_median_pct": {
-        "no_face": 1.4900200400656474,
-        "with_face": 1.4700458150849294
-      },
-      "head_aim_no_face": {
-        "n": 26,
-        "median_deg": 1.192801246687554,
-        "max_deg": 3.825722589710069
-      },
-      "head_aim_with_face": {
-        "n": 26,
-        "median_deg": 3.7830029883458853,
-        "max_deg": 22.947506505381615
-      },
-      "bone_cv_median_pct": 5.295913281051814,
-      "bone_cv_max_pct": 7.86503605240381,
-      "epipolar_median_px": 4.674843034187729,
-      "bone_cv_pct": {
-        "spine (pelvis-neck)": 4.693364438855113,
-        "neck-head": 3.125237262141566,
-        "neck-Lshoulder": 5.98202343512588,
-        "neck-Rshoulder": 5.878094918339925,
-        "L upper arm": 5.126575520950959,
-        "R upper arm": 5.608925782203686,
-        "L forearm": 4.7265678923939545,
-        "R forearm": 5.46525104115267,
-        "pelvis-Lhip": 6.289173218632489,
-        "pelvis-Rhip": 6.258856167740718,
-        "L thigh": 4.809193725183839,
-        "R thigh": 5.002811247250891,
-        "L shin": 4.579126096771872,
-        "R shin": 7.86503605240381
-      },
-      "retarget_no_face_pct": {
-        "HEAD": 1.539167712174258,
-        "NECK": 4.252912178713489,
-        "LEFT_SHOULDER": 0.38299889347829846,
-        "RIGHT_SHOULDER": 0.3980375577247108,
-        "LEFT_ELBOW": 1.9054978005491485,
-        "RIGHT_ELBOW": 1.9102571964660129,
-        "LEFT_WRIST": 1.3568607067426002,
-        "RIGHT_WRIST": 0.5086710516863345,
-        "PELVIS": 0.0,
-        "LEFT_HIP": 1.7089381094632046,
-        "RIGHT_HIP": 2.7942761680192842,
-        "LEFT_KNEE": 1.1385880343709744,
-        "RIGHT_KNEE": 3.2528241693413595,
-        "LEFT_ANKLE": 1.3560126282910017,
-        "RIGHT_ANKLE": 0.9197792013040282
-      },
-      "retarget_with_face_pct": {
-        "HEAD": 1.668198562479525,
-        "NECK": 4.252912178713489,
-        "LEFT_SHOULDER": 0.38299889347829846,
-        "RIGHT_SHOULDER": 0.3980375577247108,
-        "LEFT_ELBOW": 1.9054978005491485,
-        "RIGHT_ELBOW": 1.9102571964660129,
-        "LEFT_WRIST": 1.3568607067426002,
-        "RIGHT_WRIST": 0.5086710516863345,
-        "PELVIS": 0.0,
-        "LEFT_HIP": 1.7089381094632046,
-        "RIGHT_HIP": 2.7942761680192842,
-        "LEFT_KNEE": 1.1385880343709744,
-        "RIGHT_KNEE": 3.2528241693413595,
-        "LEFT_ANKLE": 1.3560126282910017,
-        "RIGHT_ANKLE": 0.9197792013040282
-      }
+      "rejected": 2,
+      "filled": 2,
+      "undetected": 0
     },
-    "changed": [
-      {
-        "key": "head_retarget_no_face_pct",
-        "gate_before": "HEAD retarget, no face points",
-        "gate_after": "HEAD retarget, no face points",
-        "measured_before": 1.539167712174258,
-        "measured_after": 1.5533957010191073,
-        "baseline": 12.733440611004376,
-        "moved_pct": 0.9243949656889954,
-        "passes_after": true
+    "head_mode": "nose"
+  },
+  "re_measured": [
+    {
+      "when": "2026-09-03, Phase 5b round 3, after Phases 6.1-6.5 merged into the same tree",
+      "why": "Phase 6.2's data-driven cross-view gate (clip(6 x median Sampson, 25 px, 1.4 % of the smaller diagonal)) reaches this fixture too, and on it it refuses two of the take's 390 pairs \u2014 0013 LEFT_ELBOW and 0021 LEFT_ANKLE, both detection errors (see tests/test_cross_view.py::test_the_client_take_is_gated_on_its_own_distribution). Those two joint-frames are gap-filled for the bone fit instead of measured, which moves the retarget numbers the head gates are scored on by up to 0.9 % relative. Every gate still passes and no bar moved; only the measurement did.",
+      "table_before": [
+        {
+          "gate": "HEAD retarget, no face points",
+          "key": "head_retarget_no_face_pct",
+          "rule": "<= 4.0 % of body height",
+          "baseline": 12.733440611004376,
+          "measured": 1.539167712174258,
+          "pass": true,
+          "unit": "%",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "HEAD retarget, with face points",
+          "key": "head_retarget_with_face_pct",
+          "rule": "<= 3.0 % of body height",
+          "baseline": 9.027670299476386,
+          "measured": 1.668198562479525,
+          "pass": true,
+          "unit": "%",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "neck-head bone CV",
+          "key": "neck_head_bone_cv_pct",
+          "rule": "<= 4.0 %",
+          "baseline": 9.525882972703029,
+          "measured": 3.125237262141566,
+          "pass": true,
+          "unit": "%",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "neck-Lshoulder bone CV",
+          "key": "neck_lshoulder_bone_cv_pct",
+          "rule": "<= 6.5 %",
+          "baseline": 5.1466792932557555,
+          "measured": 5.98202343512588,
+          "pass": true,
+          "unit": "%",
+          "restated": true,
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "worst body-joint regression (LEFT_WRIST)",
+          "key": "worst_body_joint_regression_pct",
+          "rule": "<= 0.5 % of body height",
+          "baseline": 0.0,
+          "measured": 0.22739728613774157,
+          "pass": true,
+          "unit": "% of height",
+          "source": "tests/fixtures/client_take vs the COCO-17 column of phase5_metrics.json"
+        },
+        {
+          "gate": "head aim error, nose path off",
+          "key": "head_aim_error_deg",
+          "rule": "< 5 deg with the nose path disabled",
+          "baseline": 38.56650581013973,
+          "measured": 1.192801246687554,
+          "pass": true,
+          "unit": "deg",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "body epipolar median",
+          "key": "epipolar_median_px",
+          "rule": "no regression on the COCO-17 baseline",
+          "baseline": 4.899798209156523,
+          "measured": 4.674843034187729,
+          "pass": true,
+          "unit": "px",
+          "source": "tests/fixtures/client_take (re-measured)"
+        }
+      ],
+      "fixture_run_before": {
+        "label": "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)",
+        "head_source": "skull",
+        "n_frames": 26,
+        "height_m": 0.1301881226497098,
+        "scale": 111.41704894412584,
+        "retarget_median_pct": {
+          "no_face": 1.4900200400656474,
+          "with_face": 1.4700458150849294
+        },
+        "head_aim_no_face": {
+          "n": 26,
+          "median_deg": 1.192801246687554,
+          "max_deg": 3.825722589710069
+        },
+        "head_aim_with_face": {
+          "n": 26,
+          "median_deg": 3.7830029883458853,
+          "max_deg": 22.947506505381615
+        },
+        "bone_cv_median_pct": 5.295913281051814,
+        "bone_cv_max_pct": 7.86503605240381,
+        "epipolar_median_px": 4.674843034187729,
+        "bone_cv_pct": {
+          "spine (pelvis-neck)": 4.693364438855113,
+          "neck-head": 3.125237262141566,
+          "neck-Lshoulder": 5.98202343512588,
+          "neck-Rshoulder": 5.878094918339925,
+          "L upper arm": 5.126575520950959,
+          "R upper arm": 5.608925782203686,
+          "L forearm": 4.7265678923939545,
+          "R forearm": 5.46525104115267,
+          "pelvis-Lhip": 6.289173218632489,
+          "pelvis-Rhip": 6.258856167740718,
+          "L thigh": 4.809193725183839,
+          "R thigh": 5.002811247250891,
+          "L shin": 4.579126096771872,
+          "R shin": 7.86503605240381
+        },
+        "retarget_no_face_pct": {
+          "HEAD": 1.539167712174258,
+          "NECK": 4.252912178713489,
+          "LEFT_SHOULDER": 0.38299889347829846,
+          "RIGHT_SHOULDER": 0.3980375577247108,
+          "LEFT_ELBOW": 1.9054978005491485,
+          "RIGHT_ELBOW": 1.9102571964660129,
+          "LEFT_WRIST": 1.3568607067426002,
+          "RIGHT_WRIST": 0.5086710516863345,
+          "PELVIS": 0.0,
+          "LEFT_HIP": 1.7089381094632046,
+          "RIGHT_HIP": 2.7942761680192842,
+          "LEFT_KNEE": 1.1385880343709744,
+          "RIGHT_KNEE": 3.2528241693413595,
+          "LEFT_ANKLE": 1.3560126282910017,
+          "RIGHT_ANKLE": 0.9197792013040282
+        },
+        "retarget_with_face_pct": {
+          "HEAD": 1.668198562479525,
+          "NECK": 4.252912178713489,
+          "LEFT_SHOULDER": 0.38299889347829846,
+          "RIGHT_SHOULDER": 0.3980375577247108,
+          "LEFT_ELBOW": 1.9054978005491485,
+          "RIGHT_ELBOW": 1.9102571964660129,
+          "LEFT_WRIST": 1.3568607067426002,
+          "RIGHT_WRIST": 0.5086710516863345,
+          "PELVIS": 0.0,
+          "LEFT_HIP": 1.7089381094632046,
+          "RIGHT_HIP": 2.7942761680192842,
+          "LEFT_KNEE": 1.1385880343709744,
+          "RIGHT_KNEE": 3.2528241693413595,
+          "LEFT_ANKLE": 1.3560126282910017,
+          "RIGHT_ANKLE": 0.9197792013040282
+        }
       },
-      {
-        "key": "head_retarget_with_face_pct",
-        "gate_before": "HEAD retarget, with face points",
-        "gate_after": "HEAD retarget, with face points",
-        "measured_before": 1.668198562479525,
-        "measured_after": 1.6735168549603388,
-        "baseline": 9.027670299476386,
-        "moved_pct": 0.31880452365987455,
-        "passes_after": true
+      "changed": [
+        {
+          "key": "head_retarget_no_face_pct",
+          "gate_before": "HEAD retarget, no face points",
+          "gate_after": "HEAD retarget, no face points",
+          "measured_before": 1.539167712174258,
+          "measured_after": 1.5533957010191073,
+          "baseline": 12.733440611004376,
+          "moved_pct": 0.9243949656889954,
+          "passes_after": true
+        },
+        {
+          "key": "head_retarget_with_face_pct",
+          "gate_before": "HEAD retarget, with face points",
+          "gate_after": "HEAD retarget, with face points",
+          "measured_before": 1.668198562479525,
+          "measured_after": 1.6735168549603388,
+          "baseline": 9.027670299476386,
+          "moved_pct": 0.31880452365987455,
+          "passes_after": true
+        },
+        {
+          "key": "worst_body_joint_regression_pct",
+          "gate_before": "worst body-joint regression (LEFT_WRIST)",
+          "gate_after": "worst body-joint regression (LEFT_KNEE)",
+          "measured_before": 0.22739728613774157,
+          "measured_after": 0.3005051822311733,
+          "baseline": 0.0,
+          "moved_pct": 32.149854263936994,
+          "passes_after": true
+        },
+        {
+          "key": "head_aim_error_deg",
+          "gate_before": "head aim error, nose path off",
+          "gate_after": "head aim error, nose path off",
+          "measured_before": 1.192801246687554,
+          "measured_after": 1.194296093823679,
+          "baseline": 38.56650581013973,
+          "moved_pct": 0.12532239887209787,
+          "passes_after": true
+        }
+      ],
+      "unchanged": [
+        "neck_head_bone_cv_pct",
+        "neck_lshoulder_bone_cv_pct",
+        "epipolar_median_px"
+      ]
+    },
+    {
+      "when": "2026-09-03, Phase 7, after the neck and head became one rigid chain",
+      "why": "The head bone no longer takes a face basis of its own: it rides the neck, and in the shipped Nose mode the nose only ROLLS that chain about the aim it already had (docs/audit-2026-09/phase7_head_chain.json). The aim is therefore the same with the face points as without them, so `head_retarget_with_face_pct` \u2014 the one gate row that reads the face path \u2014 falls to the no-face row's own value, and the head aim with the face points in play falls with it (3.78 -> 1.28 deg median, 22.95 -> 3.82 max). No bar moved and no gate changed side; the retarget rows, the bone CVs and the epipolar median are untouched because nothing outside the head chain was.",
+      "measured_in_mode": "Nose \u2014 the shipped default, declared explicitly by the tools (`Character(head_source=..., head_mode='nose')`) rather than taken from whatever default the process holds.",
+      "table_before": [
+        {
+          "gate": "HEAD retarget, no face points",
+          "key": "head_retarget_no_face_pct",
+          "rule": "<= 4.0 % of body height",
+          "baseline": 12.733440611004376,
+          "measured": 1.5533957010191073,
+          "pass": true,
+          "unit": "%",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "HEAD retarget, with face points",
+          "key": "head_retarget_with_face_pct",
+          "rule": "<= 3.0 % of body height",
+          "baseline": 9.027670299476386,
+          "measured": 1.6735168549603388,
+          "pass": true,
+          "unit": "%",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "neck-head bone CV",
+          "key": "neck_head_bone_cv_pct",
+          "rule": "<= 4.0 %",
+          "baseline": 9.525882972703029,
+          "measured": 3.125237262141566,
+          "pass": true,
+          "unit": "%",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "neck-Lshoulder bone CV",
+          "key": "neck_lshoulder_bone_cv_pct",
+          "rule": "<= 6.5 %",
+          "baseline": 5.1466792932557555,
+          "measured": 5.98202343512588,
+          "pass": true,
+          "unit": "%",
+          "restated": true,
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "worst body-joint regression (LEFT_KNEE)",
+          "key": "worst_body_joint_regression_pct",
+          "rule": "<= 0.5 % of body height",
+          "baseline": 0.0,
+          "measured": 0.3005051822311733,
+          "pass": true,
+          "unit": "% of height",
+          "source": "tests/fixtures/client_take vs the COCO-17 column of phase5_metrics.json"
+        },
+        {
+          "gate": "head aim error, nose path off",
+          "key": "head_aim_error_deg",
+          "rule": "< 5 deg with the nose path disabled",
+          "baseline": 38.56650581013973,
+          "measured": 1.194296093823679,
+          "pass": true,
+          "unit": "deg",
+          "source": "tests/fixtures/client_take (re-measured)"
+        },
+        {
+          "gate": "body epipolar median",
+          "key": "epipolar_median_px",
+          "rule": "no regression on the COCO-17 baseline",
+          "baseline": 4.899798209156523,
+          "measured": 4.674843034187729,
+          "pass": true,
+          "unit": "px",
+          "source": "tests/fixtures/client_take (re-measured)"
+        }
+      ],
+      "fixture_run_before": {
+        "label": "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)",
+        "head_source": "skull",
+        "n_frames": 26,
+        "height_m": 0.1302290963914518,
+        "scale": 111.37927439916115,
+        "retarget_median_pct": {
+          "no_face": 1.5017183740642355,
+          "with_face": 1.4773315880604652
+        },
+        "head_aim_no_face": {
+          "n": 26,
+          "median_deg": 1.194296093823679,
+          "max_deg": 3.8293465957473454
+        },
+        "head_aim_with_face": {
+          "n": 26,
+          "median_deg": 3.781344447421397,
+          "max_deg": 22.95163550589598
+        },
+        "bone_cv_median_pct": 5.234031144201781,
+        "bone_cv_max_pct": 7.86503605240381,
+        "epipolar_median_px": 4.674843034187729,
+        "bone_cv_pct": {
+          "spine (pelvis-neck)": 4.693364438855113,
+          "neck-head": 3.125237262141566,
+          "neck-Lshoulder": 5.98202343512588,
+          "neck-Rshoulder": 5.878094918339925,
+          "L upper arm": 2.8583897238913227,
+          "R upper arm": 5.608925782203686,
+          "L forearm": 3.7844517644749915,
+          "R forearm": 5.46525104115267,
+          "pelvis-Lhip": 6.289173218632489,
+          "pelvis-Rhip": 6.258856167740718,
+          "L thigh": 4.809193725183839,
+          "R thigh": 5.002811247250891,
+          "L shin": 3.625210653236064,
+          "R shin": 7.86503605240381
+        },
+        "retarget_no_face_pct": {
+          "HEAD": 1.5533957010191073,
+          "NECK": 4.263654895140397,
+          "LEFT_SHOULDER": 0.3790317978124096,
+          "RIGHT_SHOULDER": 0.39429319044899486,
+          "LEFT_ELBOW": 1.9080206659055678,
+          "RIGHT_ELBOW": 1.9035787257823578,
+          "LEFT_WRIST": 1.3337358541855993,
+          "RIGHT_WRIST": 0.49395618296235105,
+          "PELVIS": 0.0,
+          "LEFT_HIP": 1.7139658484435187,
+          "RIGHT_HIP": 2.7952679856307974,
+          "LEFT_KNEE": 1.2347783234075884,
+          "RIGHT_KNEE": 3.264314187344227,
+          "LEFT_ANKLE": 1.3788231879288493,
+          "RIGHT_ANKLE": 0.905464253277598
+        },
+        "retarget_with_face_pct": {
+          "HEAD": 1.6735168549603388,
+          "NECK": 4.263654895140397,
+          "LEFT_SHOULDER": 0.3790317978124096,
+          "RIGHT_SHOULDER": 0.39429319044899486,
+          "LEFT_ELBOW": 1.9080206659055678,
+          "RIGHT_ELBOW": 1.9035787257823578,
+          "LEFT_WRIST": 1.3337358541855993,
+          "RIGHT_WRIST": 0.49395618296235105,
+          "PELVIS": 0.0,
+          "LEFT_HIP": 1.7139658484435187,
+          "RIGHT_HIP": 2.7952679856307974,
+          "LEFT_KNEE": 1.2347783234075884,
+          "RIGHT_KNEE": 3.264314187344227,
+          "LEFT_ANKLE": 1.3788231879288493,
+          "RIGHT_ANKLE": 0.905464253277598
+        }
       },
-      {
-        "key": "worst_body_joint_regression_pct",
-        "gate_before": "worst body-joint regression (LEFT_WRIST)",
-        "gate_after": "worst body-joint regression (LEFT_KNEE)",
-        "measured_before": 0.22739728613774157,
-        "measured_after": 0.3005051822311733,
-        "baseline": 0.0,
-        "moved_pct": 32.149854263936994,
-        "passes_after": true
-      },
-      {
-        "key": "head_aim_error_deg",
-        "gate_before": "head aim error, nose path off",
-        "gate_after": "head aim error, nose path off",
-        "measured_before": 1.192801246687554,
-        "measured_after": 1.194296093823679,
-        "baseline": 38.56650581013973,
-        "moved_pct": 0.12532239887209787,
-        "passes_after": true
-      }
-    ],
-    "unchanged": [
-      "neck_head_bone_cv_pct",
-      "neck_lshoulder_bone_cv_pct",
-      "epipolar_median_px"
-    ]
-  }
+      "changed": [
+        {
+          "key": "head_retarget_with_face_pct",
+          "gate_before": "HEAD retarget, with face points",
+          "gate_after": "HEAD retarget, with face points",
+          "measured_before": 1.6735168549603388,
+          "measured_after": 1.5533957010191217,
+          "baseline": 9.027670299476386,
+          "moved_pct": 7.1777677998984855,
+          "passes_after": true
+        }
+      ],
+      "unchanged": [
+        "head_retarget_no_face_pct",
+        "neck_head_bone_cv_pct",
+        "neck_lshoulder_bone_cv_pct",
+        "worst_body_joint_regression_pct",
+        "head_aim_error_deg",
+        "epipolar_median_px"
+      ],
+      "also_moved": [
+        {
+          "field": "fixture_run.head_aim_with_face",
+          "before": {
+            "n": 26,
+            "median_deg": 3.781344447421397,
+            "max_deg": 22.95163550589598
+          },
+          "after": {
+            "n": 26,
+            "median_deg": 1.2754837687193339,
+            "max_deg": 3.820428030068549
+          },
+          "why": "the chain is aimed by the capture in both modes now; the face points can turn it but no longer aim it"
+        },
+        {
+          "field": "fixture_run.retarget_median_pct.with_face",
+          "before": 1.4773315880604652,
+          "after": 1.5017183740642355,
+          "why": "the whole-body median follows HEAD, the only joint the face path can move"
+        },
+        {
+          "field": "fixture_run.head_mode",
+          "before": null,
+          "after": "nose",
+          "why": "new field: there are two head modes now, so the measurement records which one it was taken in instead of leaving it to the process default"
+        },
+        {
+          "field": "fixture_run.gaps",
+          "before": {
+            "rejected": 0,
+            "filled": 2
+          },
+          "after": {
+            "rejected": 2,
+            "undetected": 0,
+            "filled": 2
+          },
+          "why": "NOT the head chain: `quality.gap_stats` now separates the two joint-frames Phase 6.2's cross-view gate REJECTED from ones the detector never saw. The same two joint-frames as the previous re-measurement, counted in their own column."
+        }
+      ]
+    }
+  ]
 }
