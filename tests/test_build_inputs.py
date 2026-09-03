@@ -26,15 +26,6 @@ INPUTS = ROOT / "packaging" / "windows" / "inputs.json"
 PS1 = ROOT / "tools" / "make_windows_bundle.ps1"
 WORKFLOWS = sorted((ROOT / ".github" / "workflows").glob("*.yml"))
 
-# Task E owns .github/**, and lands after this task. Until it does, the two
-# assertions below describe a contract nothing satisfies yet — so they are
-# expected to fail, strictly: the moment E's change makes one pass, pytest
-# reports XPASS as a failure and the marker has to be deleted with it.
-NOT_YET_TASK_E = pytest.mark.xfail(
-    strict=True,
-    reason="Task E owns .github/**; when E lands this XPASSes — delete this "
-           "marker then")
-
 
 def _inputs():
     return json.loads(INPUTS.read_text(encoding="utf-8"))
@@ -64,7 +55,6 @@ def test_the_documented_dll_matches_the_pin():
         assert "python312.dll" in doc.read_text(encoding="utf-8"), doc
 
 
-@NOT_YET_TASK_E
 def test_both_workflows_take_their_interpreter_from_the_pin():
     for wf in WORKFLOWS:
         assert ".python-version" in wf.read_text(encoding="utf-8"), wf
@@ -144,7 +134,6 @@ def test_the_bundle_script_writes_no_blender_version_of_its_own():
     assert "5.1.1" not in text and "blender-5." not in text
 
 
-@NOT_YET_TASK_E
 def test_no_workflow_writes_a_blender_version_of_its_own():
     for wf in WORKFLOWS:
         text = wf.read_text(encoding="utf-8")

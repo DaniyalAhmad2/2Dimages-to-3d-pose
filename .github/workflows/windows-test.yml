@@ -16,21 +16,56 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Read the interpreter pin
+        id: pin
+        # `uv.lock` only says >=3.12, so without the pin this job tests on
+        # whatever interpreter the runner has newest — while the exe the bundle
+        # ships is frozen against .python-version. setup-uv takes a VERSION and
+        # has no python-version-file input, and an unknown input is silently
+        # ignored, so the file is read here and its absence is a failure.
+        run: |
+          if (-not (Test-Path .python-version)) {
+            throw ".python-version is missing: nothing pins the interpreter"
+          }
+          $pin = (Get-Content -Raw .python-version).Trim()
+          if (-not $pin) {
+            throw ".python-version is empty: nothing pins the interpreter"
+          }
+          Write-Host "testing on Python $pin (.python-version)"
+          "python-version=$pin" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+          python-version: ${{ steps.pin.outputs.python-version }}
 
       - name: Install dependencies from the lockfile
         # --frozen: install exactly what is committed. Resolving here instead
         # would mean CI tests versions the client never receives.
         run: uv sync --frozen --all-groups
 
+      - name: Read the pinned Blender
+        id: blender
+        # packaging/windows/inputs.json is the only place a Blender version,
+        # URL or checksum is written down, and tools/blender_input.py is the
+        # only door to it. This job used to restate all three, so bumping
+        # Blender meant editing three files correctly.
+        run: |
+          foreach ($field in @("zip-name", "url", "sha256", "cache-key")) {
+            $value = uv run python tools/blender_input.py "--$field"
+            if ($LASTEXITCODE -ne 0) { throw "blender_input.py --$field failed" }
+            "$field=$value" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          }
+
       - name: Cache Blender
         id: blender-cache
         uses: actions/cache@v4
         with:
-          path: .cache/blender-5.1.1-windows-x64.zip
-          key: blender-5.1.1-windows-x64
+          path: .cache/${{ steps.blender.outputs.zip-name }}
+          # the key carries the checksum: keyed on the version alone, a
+          # corrected hash would keep restoring the old archive from the cache
+          # and every run would fail on a file nobody can see
+          key: ${{ steps.blender.outputs.cache-key }}
 
       - name: Download Blender
         if: steps.blender-cache.outputs.cache-hit != 'true'
@@ -38,12 +73,32 @@ jobs:
           New-Item -ItemType Directory -Force -Path .cache | Out-Null
           $ProgressPreference = 'SilentlyContinue'
           Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://download.blender.org/release/Blender5.1/blender-5.1.1-windows-x64.zip" `
-            -OutFile ".cache/blender-5.1.1-windows-x64.zip"
+            -Uri "${{ steps.blender.outputs.url }}" `
+            -OutFile ".cache/${{ steps.blender.outputs.zip-name }}"
+
+      - name: Verify Blender
+        # ~414 MB over HTTP. Both paths, not just the download: a cached
+        # archive is a file some earlier run left behind, and one interrupted
+        # mid-download unzips into a blender\ folder missing whatever came
+        # after the cut. Deleted on mismatch so the next run cannot restore
+        # the same bad bytes forever.
+        run: |
+          $archive = ".cache/${{ steps.blender.outputs.zip-name }}"
+          # -ine, not -ne: inputs.json holds lowercase hex and Get-FileHash
+          # returns uppercase, so this comparison must be case-insensitive
+          $got = (Get-FileHash -Algorithm SHA256 -Path $archive).Hash
+          if ($got -ine "${{ steps.blender.outputs.sha256 }}") {
+            Remove-Item -Force $archive
+            throw ("checksum mismatch for ${archive}: got $got, expected " +
+                   "${{ steps.blender.outputs.sha256 }} " +
+                   "(packaging/windows/inputs.json). The archive has been " +
+                   "deleted; re-run to fetch it again.")
+          }
 
       - name: Install Blender
         run: |
-          Expand-Archive .cache/blender-5.1.1-windows-x64.zip -DestinationPath .cache/blender -Force
+          Expand-Archive ".cache/${{ steps.blender.outputs.zip-name }}" `
+            -DestinationPath .cache/blender -Force
           $dir = (Get-ChildItem .cache/blender -Directory | Select-Object -First 1).FullName
           # config.py finds this via POSE3D_BLENDER; the bundle instead ships it
           # in a blender\ folder beside the exe, which is covered by its own test

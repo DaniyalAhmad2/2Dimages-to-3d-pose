@@ -1,0 +1,228 @@
+name: Build and gate the Windows bundle
+description: >
+  Build Pose3D.exe, assemble the client bundle around it, zip it, EXTRACT the
+  zip the way the client does, and prove the extracted copy runs. Used verbatim
+  by windows-bundle.yml (the gate) and windows-release.yml (the release), so
+  the zip that ships is the zip that was gated.
+
+inputs:
+  python-version-file:
+    description: >
+      The file holding the interpreter pin. `uv.lock` only says >=3.12, so
+      without one the exe is frozen against whatever interpreter the runner has
+      newest — while every doc, README string and test in this repo names
+      python312.dll.
+    required: false
+    default: .python-version
+
+outputs:
+  zip:
+    description: The archive the client downloads, relative to the workspace.
+    value: ${{ steps.zip.outputs.path }}
+
+runs:
+  using: composite
+  steps:
+    - name: Read the interpreter pin
+      id: pin
+      # setup-uv takes a VERSION, not a version file (there is no
+      # python-version-file input, on v5 or on main — an unknown input is
+      # silently ignored, so passing one would pin nothing). Read the file
+      # here, and fail loudly if it has gone: `uv` would otherwise fall back
+      # to the runner's newest interpreter without saying so.
+      shell: pwsh
+      run: |
+        $file = '${{ inputs.python-version-file }}'
+        if (-not (Test-Path $file)) { throw "$file is missing: nothing pins the interpreter" }
+        $pin = (Get-Content -Raw $file).Trim()
+        if (-not $pin) { throw "$file is empty: nothing pins the interpreter" }
+        Write-Host "building against Python $pin ($file)"
+        "python-version=$pin" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+    - name: Install the pinned interpreter
+      uses: astral-sh/setup-uv@v5
+      with:
+        enable-cache: true
+        python-version: ${{ steps.pin.outputs.python-version }}
+
+    - name: Install dependencies from the lockfile
+      # --frozen: install exactly what is committed. Resolving here instead
+      # would ship the client versions nothing was tested against.
+      shell: pwsh
+      run: uv sync --frozen --all-groups
+
+    - name: Cache the pinned downloads
+      # Blender (~414 MB) and the three ONNX checkpoints (~210 MB), which
+      # make_windows_bundle.ps1 stages into .cache and verifies against
+      # packaging/windows/inputs.json. Keyed on that file: it is the only
+      # place a version, URL or checksum is written, so a bump there is the
+      # one event that must not restore the old bytes from the cache.
+      uses: actions/cache@v4
+      with:
+        path: .cache
+        key: windows-bundle-inputs-${{ hashFiles('packaging/windows/inputs.json') }}
+
+    - name: Build the executable
+      shell: pwsh
+      run: uv run pyinstaller pose3d.spec --noconfirm --clean
+
+    - name: Assemble the bundle
+      # The script also runs the DLL import audit, while $Out holds only the
+      # app — the one check for a dependency missing from _internal\, which
+      # this runner cannot notice any other way because it has the Visual C++
+      # runtime and most of Qt's dependencies installed system-wide.
+      shell: pwsh
+      run: |
+        # -Python, because `python` off PATH on a Windows runner is often the
+        # Microsoft Store stub rather than the environment the lockfile
+        # installed, and the script runs every repo tool through it.
+        $python = uv run python -c "import sys; print(sys.executable)"
+        pwsh tools/make_windows_bundle.ps1 `
+          -Dist dist/Pose3D -Out build/Pose3D-Windows -Python $python
+        if ($LASTEXITCODE -ne 0) {
+          throw "make_windows_bundle.ps1 failed ($LASTEXITCODE)"
+        }
+
+    - name: Check the assembled bundle against the manifest
+      # Before zipping, so a file the bundle script failed to copy is named
+      # now rather than after five minutes of compression.
+      shell: pwsh
+      run: uv run python tools/check_bundle_layout.py build/Pose3D-Windows
+
+    - name: Zip
+      id: zip
+      # tools/bundle_zip.py, not a block of PowerShell: the MAX_PATH gate that
+      # keeps the client's "path too long" from coming back is a rule about
+      # entry names, it is tested on Linux, and it has to be the same rule
+      # here as in make_windows_bundle.ps1 -Zip.
+      shell: pwsh
+      run: |
+        uv run python tools/bundle_zip.py build/Pose3D-Windows `
+          --out Pose3D-Windows.zip --limit 180
+        "path=Pose3D-Windows.zip" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+    - name: Extract the zip the way the client does
+      id: extract
+      # Everything above tested a folder PyInstaller and a copy script had
+      # just written. The client runs an EXTRACTED COPY of the archive, and
+      # both faults they hit — a file missing from _internal\, and "path too
+      # long" — lived in that gap.
+      #
+      # 7z x, never Expand-Archive: the archive was written with 7-Zip, .NET's
+      # ZipArchive takes minutes on 1.6 GB, and its long-path behaviour is not
+      # the behaviour of the tool on the client's machine.
+      shell: pwsh
+      run: |
+        # A space and a nesting level, because the client's own root has both:
+        # a space is where an unquoted path in a script splits in two, and
+        # every character of the root comes off a 260-character budget the
+        # bundle has already spent ~148 of.
+        $root = Join-Path '${{ runner.temp }}' 'Client Test\Downloads'
+        if (Test-Path $root) { Remove-Item -Recurse -Force $root }
+        New-Item -ItemType Directory -Force -Path $root | Out-Null
+        # "-o$root" as ONE quoted token: 7z reads -o<path> without a separator,
+        # so the space has to stay inside a single argument.
+        7z x Pose3D-Windows.zip "-o$root" -y -bso0 -bsp0
+        if ($LASTEXITCODE -ne 0) { throw "7z x failed ($LASTEXITCODE)" }
+        $bundle = Join-Path $root 'Pose3D-Windows'
+        if (-not (Test-Path (Join-Path $bundle 'Pose3D.exe'))) {
+          throw "the archive did not extract to $bundle"
+        }
+        Write-Host "extracted to $bundle"
+        "CLIENT_BUNDLE=$bundle" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+
+    - name: Check the extracted copy against the manifest
+      # The same inventory, on the copy that actually broke last time. This is
+      # also where the bundled software-GL and Qt platform plugins are proved
+      # present — see the self-test step's POSE3D_NO_GL comment.
+      shell: pwsh
+      run: uv run python tools/check_bundle_layout.py "$env:CLIENT_BUNDLE"
+
+    - name: Self-test the extracted copy
+      # The whole point of the gate. Runs the exe the client will run, from
+      # where the client will run it, with PATH-visible Blender and the rtmlib
+      # cache deliberately NOT available — so it can only pass by finding what
+      # the bundle itself ships.
+      shell: pwsh
+      env:
+        POSE3D_BLENDER: ""
+        POSE3D_MODELS: ""
+        XDG_CACHE_HOME: ${{ runner.temp }}\empty-cache
+        # This runner has no GPU. Qt cannot create a hardware context, and the
+        # software renderer the bundle ships (opengl32sw.dll) drives Qt but not
+        # pyqtgraph, which draws through PyOpenGL and loads the machine's own
+        # opengl32.dll. That is a property of the machine, not of the build, so
+        # the GL check is reported as degraded HERE only; on the client's
+        # machine `Pose3D.exe --selftest` stays strict.
+        #
+        # The gate's GL evidence is structural instead, and does not depend on
+        # this variable: the manifest requires opengl32sw.dll and qwindows.dll
+        # in the EXTRACTED copy (step above), and check_qt_opengl's ImportError
+        # path — the 3D view missing from the build at all — is still fatal.
+        POSE3D_NO_GL: "1"
+      run: |
+        New-Item -ItemType Directory -Force -Path "$env:XDG_CACHE_HOME" | Out-Null
+        # Absolute: Start-Process resolves a relative redirect against the .NET
+        # process directory, which is not always PowerShell's $PWD, and a
+        # transcript written somewhere nobody looks is worse than none.
+        $out = Join-Path $PWD 'selftest-out.txt'
+        $err = Join-Path $PWD 'selftest-err.txt'
+        # --no-video: EEVEE needs WGL extensions this runner has no driver for,
+        # and check_video reports Degraded rather than failing anyway.
+        #
+        # Start-Process -Wait, not `&`: Pose3D.exe is built for the GUI
+        # subsystem (console=False), and PowerShell does not wait for those —
+        # `&` returns immediately and $LASTEXITCODE would describe the launch,
+        # not the self-test, so this gate would pass without proving anything.
+        $p = Start-Process -FilePath (Join-Path $env:CLIENT_BUNDLE 'Pose3D.exe') `
+               -ArgumentList '--selftest', '--no-video' `
+               -Wait -PassThru -NoNewWindow `
+               -RedirectStandardOutput $out -RedirectStandardError $err
+        # Where the output lands depends on whether a console got attached:
+        # with none, ensure_std_streams() sends it to pose3d-log.txt beside the
+        # exe. Print whichever exist, so a PASSING run still shows which
+        # Blender and which weights the bundle actually found.
+        foreach ($f in @($out, $err,
+                         (Join-Path $env:CLIENT_BUNDLE 'pose3d-log.txt'))) {
+          if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
+            Write-Host "--- $f ---"
+            Get-Content $f
+          }
+        }
+        if ($p.ExitCode -ne 0) {
+          throw "the extracted bundle's self-test failed ($($p.ExitCode))"
+        }
+
+    - name: Diagnose the extracted copy
+      # Pose3D-diagnose.exe is the console build (console=True) of the same
+      # checks, and it is what the client is told to run and send back. Run it
+      # here, from the same extracted copy, so the report they would produce is
+      # something this gate has already seen — pass or fail.
+      if: always() && steps.extract.outcome == 'success'
+      shell: pwsh
+      env:
+        # the same starved environment as the step above, so this is the same
+        # question asked through the other exe, not an easier one
+        POSE3D_BLENDER: ""
+        POSE3D_MODELS: ""
+        XDG_CACHE_HOME: ${{ runner.temp }}\empty-cache
+        POSE3D_NO_GL: "1"      # see the self-test step
+      run: |
+        # No 2>&1: merging a native command's stderr into the success stream
+        # raises NativeCommandError under the $ErrorActionPreference='Stop'
+        # this runner sets, and both streams reach the log anyway.
+        & (Join-Path $env:CLIENT_BUNDLE 'Pose3D-diagnose.exe') --selftest
+        Write-Host "Pose3D-diagnose.exe exited $LASTEXITCODE"
+        # Evidence, not a second gate: the step above already failed the job on
+        # this exit code, and this step runs after a failure on purpose.
+        exit 0
+
+    - name: Keep the build's own diagnostics on a failure
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: windows-bundle-logs
+        path: |
+          build/*.toc
+          build/*/warn*.txt
+        if-no-files-found: ignore

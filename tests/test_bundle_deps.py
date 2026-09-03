@@ -138,9 +138,19 @@ def test_the_bundle_script_runs_the_audit():
     assert "tools/check_bundle_deps.py" in text
 
 
-def test_the_release_workflow_runs_the_audit_before_the_self_test():
-    text = (ROOT / ".github" / "workflows" / "windows-release.yml").read_text()
-    assert text.index("tools/check_bundle_deps.py") < text.index("--selftest")
+def test_the_release_gate_runs_the_audit_before_the_self_test():
+    """Both workflows build through one composite action now, and the audit
+    inside it is the ps1's (test above), run while the bundle holds only the
+    app. It has to be over before anything is self-tested — an unresolvable
+    import is a launch failure on a clean machine, which is the fault a
+    self-test on THIS machine cannot see.
+
+    And exactly once: the release workflow used to run the audit a second
+    time, on the same folder, for the same answer."""
+    text = (ROOT / ".github" / "actions" / "windows-bundle"
+            / "action.yml").read_text(encoding="utf-8")
+    assert text.index("make_windows_bundle.ps1") < text.index("--selftest")
+    assert "check_bundle_deps.py" not in text, "the bundle script already runs it"
 
 
 # --- the spec's Windows-only additions, evaluated ---------------------------

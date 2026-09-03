@@ -155,16 +155,27 @@ driven by your capture, automatically scaled to the subject's proportions.
 
 ### Windows `.exe`
 
+**Start here: double-click `Pose3D-diagnose.exe`.** It is the console build of
+the same checks the release gate verifies every bundle with — the libraries,
+Blender, the character rig, the pose models, OpenGL — and it prints which one
+is wrong instead of hiding the answer in a windowed process with no console.
+It also writes `pose3d-diagnostics.txt` beside itself; **send that file**. It
+names which files the bundle found, where it looked, and what the machine
+reported, which usually answers the question in one round trip. If the app has
+run at all, `pose3d-log.txt` (next to `Pose3D.exe`) is worth sending with it.
+
 **"Windows protected your PC".** SmartScreen, shown for any unsigned
 application. **More info** → **Run anyway**. Once only.
 
-**It closes immediately, or nothing happens.** Read `pose3d-log.txt` next to
-`Pose3D.exe`. A windowed application has no console, so that file is where
-crashes and library errors go.
+**It closes immediately, or nothing happens.** `Pose3D-diagnose.exe` above —
+it is a console application, so it can report a failure that kills the windowed
+one before it opens a window. `pose3d-log.txt` next to `Pose3D.exe` is the
+other half: a windowed application has no console, so crashes and library
+errors go there.
 
 **It worked, then stopped launching.** Anti-virus software sometimes
 quarantines a file out of `_internal\` because the build is unsigned. Check the
-quarantine list.
+quarantine list; `Pose3D-diagnose.exe` names the missing file.
 
 **"Failed to load Python DLL ... `_internal\python312.dll`. LoadLibrary: The
 specified module could not be found."** A file is missing from `_internal\`.
@@ -178,9 +189,10 @@ for anything from `_internal\`. Only if it still fails, install the
 own — `workspace\` inside the extracted folder is the default and always works.
 Program Files and most network drives do not.
 
-**`Pose3D.exe --selftest`** runs the same checks the release build is verified
-with — Blender, the rig, the pose models, OpenGL, and a real export — and
-prints which one is wrong. Worth running before reporting a problem.
+**What CI already proved about the bundle you have** is in
+[`docs/windows-release-gate.md`](docs/windows-release-gate.md): the zip is
+extracted with 7-Zip into a nested path with a space in it and self-tested from
+there, with the bundled Blender and weights as the only ones available.
 
 ### Docker
 
