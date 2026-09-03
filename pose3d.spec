@@ -2,7 +2,8 @@
 #
 #   pyinstaller pose3d.spec --noconfirm --clean
 #
-# Produces a onedir build: Pose3D(.exe) plus an _internal/ folder. Onedir, not
+# Produces a onedir build: Pose3D(.exe), the console-mode Pose3D-diagnose(.exe)
+# beside it, and one shared _internal/ folder. Onedir, not
 # onefile, on purpose — onefile unpacks ~500 MB to a temp directory on every
 # launch, and the app already ships next to Blender and the ONNX weights, so
 # there is no single-file illusion to preserve anyway.
@@ -191,8 +192,35 @@ exe = EXE(
     # that crashes on launch.
     upx=False,
 )
+# The same application again, with a console.
+#
+# Pose3D.exe is windowed, which is right for a desktop app and wrong for the
+# one moment the client needs to read something: `Pose3D.exe --selftest` has
+# no stdout to print to, so its report goes into pose3d-log.txt and the person
+# who was asked to run it — because something is already wrong — watches
+# nothing happen. This build is byte-identical in behaviour and prints where
+# they can see it:
+#
+#     Pose3D-diagnose.exe --selftest      the checks, in a console
+#     Pose3D-diagnose.exe --diagnose      the full report, saved and shown
+#
+# It is also what pose3d.selftest spawns for the software-OpenGL retry, and
+# what packaging/windows/manifest.json requires by name. Same Analysis, same
+# PYZ, one COLLECT: the second executable is the bootloader plus the embedded
+# pure-Python archive, measured at 12 MB against a 516 MB dist, rather than a
+# second copy of Qt, onnxruntime and the character rig. Diagnose.cmd is the
+# fallback if it ever fails to build or to run.
+diagnose = EXE(
+    pyz, a.scripts, [],
+    exclude_binaries=True,
+    name="Pose3D-diagnose" if IS_WINDOWS else "pose3d-diagnose",
+    console=True,
+    icon="packaging/windows/pose3d.ico" if IS_WINDOWS else None,
+    version="packaging/windows/version_info.txt" if IS_WINDOWS else None,
+    upx=False,
+)
 coll = COLLECT(
-    exe, a.binaries, a.datas,
+    exe, diagnose, a.binaries, a.datas,
     upx=False,
     name="Pose3D" if IS_WINDOWS else "pose3d",
 )

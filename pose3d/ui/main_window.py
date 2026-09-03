@@ -174,8 +174,8 @@ class MainWindow(QMainWindow):
         return bar
 
     def _build_menus(self):
-        """The one menu action the dashboard needs: the migration path for a
-        project made before face keypoints existed."""
+        """Two menu actions: the migration path for a project made before face
+        keypoints existed, and the report we ask the client to send us."""
         tools = self.menuBar().addMenu("&Tools")
         act = tools.addAction("Re-detect face points only")
         act.setToolTip("Detect the nose and face points again so the "
@@ -183,6 +183,13 @@ class MainWindow(QMainWindow):
                        "(or the face, in Face mode), leaving the body pose and "
                        "every hand correction exactly as they are")
         act.triggered.connect(self._on_redetect_head)
+
+        help_menu = self.menuBar().addMenu("&Help")
+        act = help_menu.addAction("Diagnostics")
+        act.setToolTip("Write a report about this machine and this install — "
+                       "Windows, graphics, Blender, the models, the self-test "
+                       "— that you can copy or attach to an email")
+        act.triggered.connect(self._on_diagnostics)
 
     def _build_action_row(self):
         row = QWidget(); row.setObjectName("actionRow")
@@ -473,6 +480,36 @@ class MainWindow(QMainWindow):
             self.view3d._character = cached
             return
         self._refresh_after_job()
+
+    @guarded
+    def _on_diagnostics(self):
+        """Help > Diagnostics. The same report `--diagnose` writes.
+
+        It runs on the GUI thread and takes a few seconds — it starts Blender
+        and one detection — so it wears the wait cursor rather than a progress
+        dialog: half of what it reports is Qt's own state, and none of it can
+        be gathered from a worker thread that may not create widgets.
+        """
+        from PySide6.QtCore import Qt
+        from PySide6.QtWidgets import QApplication
+
+        from pose3d import diagnostics
+        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
+        try:
+            text = diagnostics.report()
+        finally:
+            QApplication.restoreOverrideCursor()
+        path = None
+        try:
+            path = diagnostics.write_report(text=text)
+        except OSError as e:
+            # Not fatal, and worth saying: it is usually the install being
+            # read-only, which is itself half the diagnosis.
+            guard.report_error(
+                self, "The diagnostics report could not be saved",
+                f"{type(e).__name__}: {e}\n\nThe report itself is below — "
+                "use Copy and paste it into an email.")
+        diagnostics.show_report(self, text, path)
 
     @guarded
     def _on_redetect_head(self):
