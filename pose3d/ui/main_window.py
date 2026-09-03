@@ -404,8 +404,8 @@ class MainWindow(QMainWindow):
         """
         if not isinstance(res, Exception):
             return False
-        how = "cancelled" if isinstance(res, Cancelled) else "failed"
-        self._on_status(f"{what} was {how} — nothing was changed")
+        how = "was cancelled" if isinstance(res, Cancelled) else "failed"
+        self._on_status(f"{what} {how} — nothing was changed")
         return True
 
     def _on_run_detection(self):
@@ -429,6 +429,11 @@ class MainWindow(QMainWindow):
                                                   on_progress=report,
                                                   cancelled=cancelled))
         if self._job_stopped(res, "Detection"):
+            # Every way this run can stop before `detect_project` commits — the
+            # cancel, an unreadable image, a detector that throws — leaves the
+            # stored 2D under the old convention, so the convention goes back
+            # with it. (The one case it cannot see is a fault in the recompute
+            # AFTER the detection committed; that is a bug, not a path.)
             self.model.project.head_source, published, cached = was
             set_default_head_source(published)
             self.view3d._character = cached

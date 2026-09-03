@@ -279,9 +279,12 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
     monkeypatch.setattr(W.QMessageBox, "warning",
                         lambda *a, **k: warned.setdefault("msg", a[2]))
     started = {"n": 0}
-    monkeypatch.setattr(MainWindow, "_start_export_worker",
-                        lambda *a, **k: started.__setitem__("n", 1),
-                        raising=False)
+    # the real guard: nothing may reach the worker mechanism at all. (It used
+    # to patch a `_start_export_worker` that has never existed, so the
+    # assertion below could not have caught an export that did run.)
+    import pose3d.ui.main_window as main_window
+    monkeypatch.setattr(main_window, "run_job",
+                        lambda *a, **k: started.__setitem__("n", 1))
 
     win._on_export()
     assert "read-only" in warned.get("msg", "").lower(), warned
