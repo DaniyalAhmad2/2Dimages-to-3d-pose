@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from pose3d.config import blender_binary, character_blend
-from pose3d.core.skeleton import Joint
+from pose3d.core.skeleton import HALPE26_HEAD_SOURCE, Joint, NUM_HEAD_KP
 from pose3d.export.blender_export import export_animation
 from tests import bvh_util
 from tests.gates import needs_blender, needs_character, needs_video_render
@@ -290,14 +290,23 @@ def _travelling_motion(n=6, step=0.06, turn_deg=8.0):
     return np.stack(seq)
 
 
+def _de_tilt(seq):
+    """The rotation `_character_document` de-tilts a take with.
+
+    Named because the FACE keypoints take it too (`head3d[i] @ R` there), so a
+    test that feeds the app the same face the export got has to apply the same
+    rotation — reading it off `_placement`'s locals is not an option.
+    """
+    from pose3d.geometry.orient import de_tilt_matrix, take_up
+    up, _source, _spread = take_up(np.asarray(seq, float), None)
+    return de_tilt_matrix(up).T if up is not None else np.eye(3)
+
+
 def _placement(seq):
     """(character fitted to the take, upright poses, pelvis_ref) as the export
     computes them — the reference the file has to reproduce."""
     from pose3d.geometry.character import Character, take_pelvis_ref
-    from pose3d.geometry.orient import de_tilt_matrix, take_up
-    up, _source, _spread = take_up(seq, None)
-    R = de_tilt_matrix(up).T if up is not None else np.eye(3)
-    upright = np.asarray(seq, float) @ R
+    upright = np.asarray(seq, float) @ _de_tilt(seq)
     ch = Character()
     ch.fit_to_subject(upright)
     return ch, upright, take_pelvis_ref(upright)
@@ -542,6 +551,209 @@ def test_the_stepped_schedule_writes_a_frame_map(tmp_path):
                              character=_CHARACTER)
     assert plain.ok, plain.stderr[-2000:]
     assert not (tmp_path / "pl_frames.json").exists()
+
+
+# --- the HEAD, in the exported file ----------------------------------------
+# `_character_document` hands `head3d` straight to `pose_bone_matrices`, so
+# the file follows the view's head "by construction". That is the same claim
+# the export made about the subject's yaw for a whole round, and it was false,
+# so it is measured here rather than argued.
+
+# (b): how far the file's idea of a bone's orientation may drift from the
+# app's over the take. The CONSTANT part of that difference is a rig
+# convention (Blender's own axis conversion on export) and is removed; what is
+# left is the file failing to follow. Measured 0.04 deg on both bones; an
+# export handed no face at all — the pre-fix behaviour — reads 40.14.
+MAX_HEAD_ORIENTATION_DRIFT_DEG = 1.0
+
+# (c), on the app: the fixture's nose has to turn the head ON the torso, or
+# every angle above is measured on a head that nobody moved. Measured 40.1 deg
+# — one 8 deg pose-to-pose yaw for each of the five gaps in the take.
+MIN_APP_HEAD_TURN_DEG = 30.0
+
+# (c), on the file: the neck and the head are ONE RIGID CHAIN — the head bone
+# has no target of its own and rides the neck's matrix — so their relative
+# orientation is the rest one on every frame. Rotations are the readout
+# because a leaf bone's tip is written as an End Site, which the parser does
+# not return as a joint: the head's tip has no position in the file to check.
+# Measured 0.00001 deg.
+MAX_RIGID_CHAIN_DRIFT_DEG = 0.1
+
+
+def _halpe_default():
+    """`head_source_default(HALPE26_HEAD_SOURCE)`: the shipped detector's head
+    convention, and the only one a face fixture can mean anything under.
+
+    Under the NOSE convention the canonical HEAD *is* the nose, so a nose that
+    is a point of its own does not exist; and on this synthetic skeleton, whose
+    HEAD sits exactly on the torso line, `_head_aim_target` would take its
+    exactly-collinear branch, which `_nose_roll_target` counts as lever 0. The
+    export would then take the no-face path and every assertion below would be
+    about a head the face never touched.
+    """
+    from pose3d.geometry.character import head_source_default
+    return head_source_default(HALPE26_HEAD_SOURCE)
+
+
+def _rotation_angle_deg(A, B):
+    """The angle of the rotation taking orientation A to orientation B."""
+    c = (float(np.trace(np.asarray(A).T @ np.asarray(B))) - 1.0) / 2.0
+    return float(np.degrees(np.arccos(np.clip(c, -1.0, 1.0))))
+
+
+def _travelling_face(seq, yaw_per_pose=8.0, forward=0.06):
+    """(T, NUM_HEAD_KP, 3) face keypoints for `seq`, whose head TURNS.
+
+    Eyes and ears are NaN throughout — a Nose-mode take, and what Task 2's
+    cross-view gate leaves behind when it rejects them — so the nose ALONE has
+    to orient the neck+head chain.
+
+    The nose cannot be built by yawing `pose[HEAD]` about the vertical through
+    the NECK: `sample_skeleton_3d` puts HEAD directly above NECK, so that
+    rotation moves the point nowhere at all (lever 0.0) and the fixture would
+    quietly measure a head nobody turned. It is a real forward OFFSET off the
+    HEAD instead, and the offset is what gets yawed. 0.06 m against the 0.20 m
+    neck-to-head puts the nose's lever about the neck's aim at 0.30 — the
+    client take's own range, minimum 0.32 and median 0.40 — where 0.04 m would
+    sit on 0.20, knife-edge against the assertion below.
+
+    `facing` is the subject's own: horizontal and perpendicular to their
+    shoulder line, which on this fixture points at the cameras. It is read off
+    each pose, so `yaw_per_pose` is the head turning ON the torso and not with
+    it — `_travelling_motion` already turns the whole figure.
+    """
+    seq = np.asarray(seq, float)
+    ls, rs = int(Joint.LEFT_SHOULDER), int(Joint.RIGHT_SHOULDER)
+    head = np.full((len(seq), NUM_HEAD_KP, 3), np.nan)
+    for k, pose in enumerate(seq):
+        facing = np.cross(pose[rs] - pose[ls], (0.0, 0.0, 1.0))
+        head[k, 0] = pose[int(Joint.HEAD)] + forward * (
+            rot_about((0, 0, 1), yaw_per_pose * k)
+            @ (facing / np.linalg.norm(facing)))
+
+    # ...and say the lever out loud, on the de-tilted poses the export solves
+    # and exactly as `_nose_roll_target` computes it. Below
+    # `_NOSE_ROLL_MIN_LEVER` the nose is read as noise and the frame takes the
+    # no-face path, so a fixture that does not check this can measure a zero
+    # and call it a pass.
+    R = _de_tilt(seq)
+    with _halpe_default():
+        ch, upright, _ref = _placement(seq)
+    for k, pose in enumerate(upright):
+        valid = ~np.isnan(pose).any(1)
+
+        def J(i, pose=pose, valid=valid):
+            return pose[int(i)] if valid[int(i)] else None
+
+        neck = J(Joint.NECK)
+        aim = ch._head_aim_target(J, J(Joint.PELVIS)) - neck
+        length = float(np.linalg.norm(aim))
+        aim = aim / length
+        d = (head[k] @ R)[0] - neck
+        lever = float(np.linalg.norm(d - float(np.dot(d, aim)) * aim)) / length
+        assert lever >= 0.2, \
+            f"pose {k}: the nose's lever is {lever:.3f}, too near the " \
+            "_NOSE_ROLL_MIN_LEVER gate for this fixture to mean anything"
+    return head
+
+
+@pytest.fixture(scope="module")
+def fresh_face(tmp_path_factory):
+    """One fresh export of a take whose head turns: (seq, head3d, Bvh).
+
+    Module-scoped for the same reason `fresh` is: it costs a Blender run and
+    every assertion below is about the same file.
+    """
+    out = tmp_path_factory.mktemp("fresh_face")
+    seq = _travelling_motion()
+    head = _travelling_face(seq)
+    with _halpe_default():
+        res = export_animation(seq, out, name="face", fps=30,
+                               render_video=False, timeout=500,
+                               character=_CHARACTER, head3d=head)
+    assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
+    return seq, head, bvh_util.parse(res.bvh)
+
+
+@needs_blender()
+@needs_character()
+def test_the_exported_head_turns_with_the_nose(fresh_face):
+    """The head the client imports is the head the 3D view drew.
+
+    Three readings of one claim, because the head is the one bone the
+    positional gates above cannot see all of:
+
+    (a) `test_bvh_keyframes_match_the_view`'s gate, re-run with the face fed
+        to BOTH sides — the export got `head3d`, so the app must be posed with
+        it too or the comparison is against a different pose;
+    (b) the file's world orientation of the neck and of the head against the
+        app's, through the take's ONE similarity fit. The constant part is a
+        rig convention; the DRIFT is the file not following;
+    (c) the fixture turns the head on the torso at all, and the file keeps the
+        neck+head chain rigid while it does.
+    """
+    seq, head, bvh = fresh_face
+    R = _de_tilt(seq)
+    with _halpe_default():
+        ch, upright, ref = _placement(seq)
+    rows = bvh_util.keyframe_rows(bvh, len(seq))
+    names = [b.name for b in bvh.joints]
+
+    # (a) the view gate, with the face on both sides
+    mapping = {j: bvh.index(ch.bone_names[b])
+               for j, (b, which) in ch._joint_src.items()
+               if which == "head" and ch.bone_names[b] in names}
+    assert len(mapping) >= 10
+    src, dst = [], []
+    for k, (row, _last) in enumerate(rows):
+        valid = ~np.isnan(upright[k]).any(1)
+        app = ch.posed_joints(upright[k], valid, head[k] @ R)
+        fk = bvh.forward_kinematics(row)
+        for j, bi in mapping.items():
+            if valid[j] and np.isfinite(app[j]).all():
+                src.append(fk[bi]); dst.append(app[j])
+    src, dst = np.asarray(src), np.asarray(dst)
+    height = float(np.median([np.ptp(p[~np.isnan(p).any(1), 2]) for p in upright]))
+    pct = 100.0 * float(bvh_util.similarity_error(src, dst).max()) / height
+    assert pct <= MAX_VIEW_DEVIATION_PCT, \
+        f"{pct:.4f} % of body height (gate {MAX_VIEW_DEVIATION_PCT} %)"
+
+    # the app's own matrices and the file's, bone by bone, keyframe by keyframe
+    _scale, R_sim, _t = bvh_util.similarity(src, dst)
+    roles = ("chest", "neck", "head")
+    app_R = {role: [] for role in roles}
+    file_R = {role: [] for role in roles}
+    for k, (row, _last) in enumerate(rows):
+        valid = ~np.isnan(upright[k]).any(1)
+        mats = ch.pose_bone_matrices(upright[k], valid, head[k] @ R,
+                                     keep_root_motion=True, pelvis_ref=ref)
+        world = bvh.world_rotations(row)
+        for role in roles:
+            name = ch.bone_names[ch.role[role]]
+            app_R[role].append(np.asarray(mats[name], float)[:3, :3])
+            file_R[role].append(world[bvh.index(name)])
+
+    # (b) the file's orientation of the head chain tracks the app's
+    for role in ("neck", "head"):
+        C = [f.T @ R_sim.T @ a for f, a in zip(file_R[role], app_R[role])]
+        drift = max(_rotation_angle_deg(C[0], c) for c in C)
+        assert drift <= MAX_HEAD_ORIENTATION_DRIFT_DEG, \
+            (f"the exported {role} drifts {drift:.3f} deg from the app's over "
+             f"the take (gate {MAX_HEAD_ORIENTATION_DRIFT_DEG} deg)")
+
+    # (c) ...and there was a turn to track, carried rigidly
+    turn = [_rotation_angle_deg(app_R["chest"][0].T @ app_R["neck"][0],
+                                c.T @ n)
+            for c, n in zip(app_R["chest"], app_R["neck"])]
+    assert max(turn) >= MIN_APP_HEAD_TURN_DEG, \
+        (f"the app turns the head only {max(turn):.2f} deg on the chest, so "
+         "this test is not measuring a head that moves")
+    rigid = [_rotation_angle_deg(file_R["neck"][0].T @ file_R["head"][0],
+                                 n.T @ h)
+             for n, h in zip(file_R["neck"], file_R["head"])]
+    assert max(rigid) <= MAX_RIGID_CHAIN_DRIFT_DEG, \
+        (f"the exported head moves {max(rigid):.3f} deg against its own neck: "
+         "the chain is not rigid in the file")
 
 
 def test_missing_character_asset_reports(tmp_path):
