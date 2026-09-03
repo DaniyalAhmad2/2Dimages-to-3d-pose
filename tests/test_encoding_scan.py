@@ -81,18 +81,8 @@ def offenders(path: Path) -> list[str]:
     return out
 
 
-#: Files whose call sites belong to another workstream and are fixed on its
-#: branch (main_window.py:504,682 and model.py:344,348,363). Both read JSON we
-#: wrote ourselves, which `json.dumps` keeps ASCII, so the exposure is small —
-#: but the exemption is here to be deleted, not kept: remove a name from this
-#: set as soon as that file's reads say `encoding="utf-8"`.
-ELSEWHERE = {"ui/main_window.py", "ui/model.py"}
-
-
 def test_every_text_read_and_write_in_the_package_names_its_encoding():
-    skip = {str(PACKAGE / rel) for rel in ELSEWHERE}
-    found = [p for f in sorted(PACKAGE.rglob("*.py"))
-             if str(f) not in skip for p in offenders(f)]
+    found = [p for f in sorted(PACKAGE.rglob("*.py")) for p in offenders(f)]
     assert found == [], "\n".join(found)
 
 

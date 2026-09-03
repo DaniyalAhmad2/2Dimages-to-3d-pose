@@ -251,7 +251,8 @@ def test_is_writable_holds_on_every_platform(tmp_path):
     assert list(tmp_path.iterdir()) == [], "the write probe left a file behind"
 
 
-def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatch):
+def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatch,
+                                                      recorded_errors):
     """Picking an unwritable folder must be refused up front.
 
     /host is shared read-only so source images can be browsed, and choosing it
@@ -274,10 +275,6 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
     data, rig, gt = _project_with_rig()
     win = MainWindow(ProjectModel(data, rig))
     monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(dest))
-    warned = {}
-    import PySide6.QtWidgets as W
-    monkeypatch.setattr(W.QMessageBox, "warning",
-                        lambda *a, **k: warned.setdefault("msg", a[2]))
     started = {"n": 0}
     # the real guard: nothing may reach the worker mechanism at all. (It used
     # to patch a `_start_export_worker` that has never existed, so the
@@ -287,7 +284,8 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
                         lambda *a, **k: started.__setitem__("n", 1))
 
     win._on_export()
-    assert "read-only" in warned.get("msg", "").lower(), warned
+    assert len(recorded_errors) == 1, recorded_errors
+    assert "read-only" in recorded_errors[0][1].lower(), recorded_errors
     assert started["n"] == 0, "export ran despite an unwritable destination"
 
 
@@ -830,11 +828,65 @@ def test_the_import_copy_loop_reports_every_pair(tmp_path):
         lp = src / f"left_{i}.jpg"; lp.write_bytes(b"x"); left.append(lp)
         rp = src / f"right_{i}.jpg"; rp.write_bytes(b"x"); right.append(rp)
 
+    images = tmp_path / "proj" / "images"
     seen = []
+
+    def report(done, total, label):
+        # how many pairs are already on disk when this pair is announced: the
+        # report has to come BEFORE the copy it names, or the label says
+        # "pair 2" while the copy that is stuck is pair 3's
+        copied = len(list(images.iterdir())) // 2 if images.is_dir() else 0
+        seen.append((done, total, label, copied))
+
     project = build_project(left, right, name="p", copy_into=tmp_path / "proj",
-                            on_progress=lambda d, t, label: seen.append((d, t)))
+                            on_progress=report)
     assert len(project.frames) == 3
-    assert seen == [(1, 3), (2, 3), (3, 3)]
+    assert [(d, t, c) for d, t, _, c in seen] == [(0, 3, 0), (1, 3, 1),
+                                                  (2, 3, 2)]
+    assert [label for *_, label, _ in seen] == [
+        f"Copying image pair {i} of 3" for i in (1, 2, 3)]
+
+
+def test_a_job_on_a_project_with_no_frames_still_refreshes_the_window(qapp):
+    """`frame()` would raise on a take with no frames, so the frame replay is
+    guarded — but everything else the tail refreshes has to run anyway, or a
+    recompute on an empty project leaves the sidebar and the timeline showing
+    what they showed before it."""
+    from pose3d.core.project import ProjectData
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    win = MainWindow(ProjectModel(ProjectData(name="Empty"), None))
+    seen = []
+    win._refresh_timeline_status = lambda: seen.append("timeline")
+    win._refresh_quality = lambda: seen.append("quality")
+    win._refresh_history = lambda: seen.append("history")
+
+    win._refresh_after_job()
+
+    assert seen == ["timeline", "quality", "history"]
+
+
+def test_a_recompute_with_no_cancel_button_does_not_claim_one(qapp):
+    """`cancellable=False` means the dialog has no Cancel, so the flag handed
+    to the job can never become True. Passing it anyway tells `recompute_all`
+    to poll a promise nothing can keep."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+    seen = {}
+
+    def recompute_all(on_progress=None, cancelled=None):
+        seen["on_progress"] = on_progress is not None
+        seen["cancelled"] = cancelled
+
+    model.recompute_all = recompute_all
+    win._on_recalibrate()
+
+    assert seen == {"on_progress": True, "cancelled": None}
 
 
 def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
@@ -847,6 +899,154 @@ def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
     src = inspect.getsource(import_dialog)
     assert "processEvents" not in src
     assert "run_job(" in src
+
+
+# --- the window uses the helpers written for Windows ------------------------
+#
+# `pose3d.imageio.read_image`, `pose3d.core.names.safe_name` and
+# `pose3d.ui.guard` were written on one branch and the call sites that need
+# them live on another. These are the seams where they meet.
+
+
+def test_the_window_reads_images_through_a_path_windows_can_encode(
+        qapp, tmp_path):
+    """`cv2.imread` hands the path to OpenCV's C++ file layer, which encodes it
+    in the machine's code page; a name that does not survive that comes back as
+    a silent None. The window's default reader must be the one that does not."""
+    import cv2
+
+    from pose3d.imageio import read_image
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    # the client's own C:\Users\Müller, as a real JPEG
+    folder = tmp_path / "Müller"
+    folder.mkdir()
+    path = folder / "left_0001.jpg"
+    ok, buf = cv2.imencode(".jpg", np.full((4, 6, 3), 127, np.uint8))
+    assert ok
+    path.write_bytes(buf.tobytes())
+    data, rig, gt = _project_with_rig()
+    for f in data.frames:
+        f.images = {CAM_LEFT: str(path), CAM_RIGHT: str(path)}
+    win = MainWindow(ProjectModel(data, rig))
+
+    assert win.load_image is read_image
+    img = win.load_image(str(path))
+    assert img is not None and img.shape[:2] == (4, 6)
+
+
+def test_an_unreadable_image_reaches_the_user_by_name(qapp, tmp_path,
+                                                      recorded_errors):
+    """The 0-byte OneDrive placeholder. It used to arrive in the detector as
+    `'NoneType' object has no attribute 'shape'`, naming nothing."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    empty = tmp_path / "left_0001.jpg"
+    empty.write_bytes(b"")
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+    win.detector = _NoseDetector()
+
+    def redetect_all(det, load_image, on_progress=None, cancelled=None):
+        load_image(str(empty))
+
+    model.redetect_all = redetect_all
+    win._on_run_detection()
+
+    assert recorded_errors, "an unreadable image was swallowed"
+    assert str(empty) in recorded_errors[-1][1]
+
+
+def test_a_project_name_windows_would_refuse_still_makes_a_folder(
+        qapp, tmp_path, monkeypatch):
+    """`a:b?` is a perfectly ordinary folder name here and an impossible one on
+    the client's machine, where the import died on `mkdir` after the user had
+    filled the whole dialog in."""
+    from pose3d.ui import import_dialog
+    from pose3d.ui.worker import Cancelled
+
+    dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
+    dlg.name.setText("a:b?")
+    dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
+    dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
+    # stop at the first phase: the folder is made before it, and that is the
+    # step under test
+    monkeypatch.setattr(import_dialog, "run_job",
+                        lambda *a, **k: Cancelled())
+
+    dlg._process()
+
+    assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == ["ab"]
+
+
+def test_the_export_names_the_file_after_a_stem_windows_accepts(
+        qapp, tmp_path, monkeypatch):
+    """The project name reaches Blender as a file stem, so a take called
+    `Take 1: "final"?` produced paths no Windows API can create."""
+    from pose3d.core.names import safe_name
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+    names = []
+
+    def fake_export(poses, out_dir, name="pose3d", **kw):
+        names.append(name)
+        return blender_export._failure("blender_cancelled", "Cancelled.", 125)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+    data, rig, gt = _project_with_rig()
+    data.name = 'Take 1: "final"?'
+    win = MainWindow(ProjectModel(data, rig))
+    win._on_export()
+
+    assert names == [safe_name(data.name)] == ["Take_1_final"]
+
+
+def test_no_failure_dialog_bypasses_the_one_sink():
+    """`QMessageBox.critical` called by hand is a second way for a failure to
+    reach the user — with its own wording, and invisible to the autouse
+    fixture that keeps a modal from parking in front of CI."""
+    import inspect
+
+    from pose3d.ui import import_dialog, main_window
+
+    for module in (main_window, import_dialog):
+        assert "QMessageBox.critical(" not in inspect.getsource(module), \
+            module.__name__
+
+
+def test_a_slot_that_raises_says_so_instead_of_appearing_to_do_nothing(
+        qapp, recorded_errors):
+    """Qt swallows an exception raised inside a slot: the button does nothing,
+    and the traceback reaches only a log nobody has been told about."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+
+    def boom():
+        raise RuntimeError("the project folder went away")
+
+    model.save = boom
+    win.btn_save.click()
+
+    assert len(recorded_errors) == 1
+    text = recorded_errors[0][1]
+    assert "_on_save" in text
+    assert "the project folder went away" in text
+
 
 # --- a machine with no usable OpenGL ---------------------------------------
 #
@@ -943,6 +1143,26 @@ def test_the_restart_control_writes_the_marker_and_relaunches(
 
     assert (tmp_path / SOFTWARE_GL_MARKER).exists()
     assert "--software-gl" in started["args"]
+
+
+def test_a_restart_that_never_starts_says_so(qapp, monkeypatch, tmp_path,
+                                             recorded_errors):
+    """The one control on that placeholder whose whole purpose is to offer a
+    way out. `startDetached` answering False left it doing nothing at all."""
+    from PySide6.QtCore import QProcess
+
+    from pose3d.ui.view3d import restart_with_software_gl
+
+    monkeypatch.setattr("pose3d.runtime.app_dir", lambda: tmp_path)
+    monkeypatch.setattr(QProcess, "startDetached",
+                        staticmethod(lambda prog, args: False))
+
+    assert restart_with_software_gl() is False
+    assert len(recorded_errors) == 1
+    title, text = recorded_errors[0]
+    assert title == "Could not restart Pose3D"
+    assert "software" in text.lower()
+    assert "--software-gl" in text, "no way to do it by hand either"
 
 
 def test_a_healthy_gl_view_shows_no_placeholder(qapp, monkeypatch):

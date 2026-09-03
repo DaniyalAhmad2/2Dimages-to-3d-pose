@@ -42,15 +42,44 @@ INPUTS = (Path(__file__).resolve().parent.parent
           / "packaging" / "windows" / "inputs.json")
 
 
+#: What every weights entry has to say. A file with no `sha256` is a file
+#: nothing verifies, which is the state this script exists to make impossible.
+ENTRY_KEYS = ("name", "sha256", "size")
+
+
 def expected(mode: str, inputs: Path = INPUTS) -> dict[str, dict]:
-    """{filename: entry} for one mode, from the single source of truth."""
-    weights = json.loads(inputs.read_text(encoding="utf-8"))["weights"]
+    """{filename: entry} for one mode, from the single source of truth.
+
+    Every way this file can be unusable is a `SystemExit` naming it. It used
+    to be an unhandled `FileNotFoundError`, `JSONDecodeError` or `KeyError` —
+    a traceback out of a build script, on the one file whose whole job is to
+    be the place someone corrects.
+    """
+    try:
+        data = json.loads(inputs.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        raise SystemExit(
+            f"{inputs} is missing. It is the only place a checkpoint's "
+            "checksum is written, so nothing staged could be verified.") from None
+    except (OSError, ValueError) as e:
+        raise SystemExit(
+            f"{inputs} could not be read ({type(e).__name__}: {e}).") from None
+
+    weights = data.get("weights") if isinstance(data, dict) else None
+    if not isinstance(weights, dict) or not weights:
+        raise SystemExit(f"{inputs} has no 'weights' section.")
     if mode not in weights:
         raise SystemExit(
             f"{inputs} has no weights entry for --mode {mode} "
             f"(it lists {', '.join(sorted(weights))}).\n"
             "Add one — with the real checksums — or the bundle would ship "
             "files nothing has ever verified.")
+    for entry in weights[mode]:
+        missing = [k for k in ENTRY_KEYS if k not in entry]
+        if missing:
+            raise SystemExit(
+                f"{inputs}: a weights entry for --mode {mode} is missing "
+                f"{', '.join(missing)} ({entry}).")
     return {w["name"]: w for w in weights[mode]}
 
 
@@ -120,8 +149,11 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--out", required=True, type=Path,
                     help="folder to stage the .onnx files into")
+    # Only the modes inputs.json describes. A third choice, "performance", was
+    # offered here with no entry behind it, so the one thing it could do was
+    # stage 150 MB that nothing would ever verify.
     ap.add_argument("--mode", default=DEFAULT_MODE,
-                    choices=("lightweight", "balanced", "performance"))
+                    choices=("lightweight", "balanced"))
     ap.add_argument("--no-download", action="store_true",
                     help="fail rather than reach the network")
     ap.add_argument("--verify-only", action="store_true",

@@ -268,3 +268,24 @@ def test_the_fixed_parts_still_fit_a_1366x768_screen_at_150_percent(qapp):
     used = TOPBAR_H + VIEW3D_MIN_H + Timeline().minimumHeight()
     assert used <= SMALL_SCREEN[1], f"{used}px of fixed chrome on a 512px screen"
     assert Sidebar().minimumWidth() * 2 < SMALL_SCREEN[0]
+
+
+def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
+    """`resize(1540, 920)` is bigger than the client's 1366x768 laptop, so the
+    window opened with its timeline and its right column off the bottom and
+    right of the desktop — and Windows will not let a title bar be dragged
+    above the top of the screen to get them back.
+    """
+    from PySide6.QtCore import QRect
+    from PySide6.QtGui import QScreen
+
+    from pose3d.core.project import ProjectData
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    monkeypatch.setattr(QScreen, "availableGeometry",
+                        lambda self: QRect(0, 0, 1366, 768))
+    win = MainWindow(ProjectModel(ProjectData(name="Small_Screen"), None))
+
+    assert win.size().width() == 1366 - 40
+    assert win.size().height() == 768 - 80

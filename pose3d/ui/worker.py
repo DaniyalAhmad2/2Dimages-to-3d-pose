@@ -119,6 +119,12 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     loop.exec()
     job.wait()
     dialog.close()
+    # This runs once per detection, re-detect, recompute, export and import
+    # phase. Both objects are parented to the window, so without this the
+    # session accumulates a dead QProgressDialog and a finished QThread per
+    # job for as long as the window is open.
+    dialog.deleteLater()
+    job.deleteLater()
 
     res = sink.result
     if isinstance(res, Exception) and not isinstance(res, Cancelled):

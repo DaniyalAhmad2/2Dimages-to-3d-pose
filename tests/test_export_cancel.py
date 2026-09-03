@@ -83,6 +83,26 @@ def test_an_export_that_goes_quiet_is_timed_out_and_the_child_killed(
     assert "Blender 5.1.1 starting" in res.stdout
 
 
+@pytest.mark.parametrize("deadlines,phrase", [
+    ({"idle_timeout": 2, "timeout": None}, "produced nothing for 2 s"),
+    ({"idle_timeout": None, "timeout": 2}, "ran past 2 s"),
+])
+def test_a_deadline_that_is_not_set_is_not_named(tmp_path, monkeypatch,
+                                                 deadlines, phrase):
+    """Either deadline may be None, meaning there is none. The message named
+    both regardless — and `f"{None:g}"` raises TypeError, so the export would
+    have died *reporting* the timeout instead of returning it."""
+    _spy(monkeypatch, _script(tmp_path, HANGS))
+
+    res = blender_export.export_animation(
+        _poses(), tmp_path / "out", name="t", render_video=False,
+        character=None, blender="blender", **deadlines)
+
+    assert res.reason == "blender_timeout", res.reason
+    assert phrase in res.message, res.message
+    assert "None" not in res.message, res.message
+
+
 def test_cancelling_an_export_stops_it(tmp_path, monkeypatch):
     procs = _spy(monkeypatch, _script(tmp_path, HANGS))
 

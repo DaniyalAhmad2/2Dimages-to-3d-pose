@@ -78,6 +78,19 @@ def test_inputs_json_parses_and_has_both_sections():
     assert set(data["blender"]) == {"version", "url", "sha256", "size"}
 
 
+@pytest.mark.parametrize("mode", ["balanced", "lightweight"])
+def test_every_weights_entry_says_exactly_what_fetch_weights_reads(mode):
+    """`name`, `sha256`, `size` and nothing else, three per mode: the two pose
+    checkpoints (COCO-17 and Halpe-26) plus the YOLOX detector they share. An
+    entry that quietly lost a key would be staged and never verified."""
+    import tools.fetch_weights as fw
+
+    entries = _inputs()["weights"][mode]
+    assert len(entries) == 3, [e.get("name") for e in entries]
+    for entry in entries:
+        assert set(entry) == set(fw.ENTRY_KEYS) == {"name", "sha256", "size"}
+
+
 def test_every_hash_is_64_hex_and_every_size_is_a_positive_int():
     data = _inputs()
     entries = [data["blender"], *(w for m in data["weights"].values() for w in m)]
@@ -260,15 +273,52 @@ def test_a_file_that_was_already_present_is_verified_too(monkeypatch, tmp_path):
     assert any(name in str(exc.value) for name in names)
 
 
-def test_a_mode_with_no_entry_is_a_named_failure(monkeypatch, tmp_path):
-    fw = _weights_stub(monkeypatch, tmp_path, [])
+def test_a_mode_with_no_entry_is_a_named_failure():
+    import tools.fetch_weights as fw
+
+    with pytest.raises(SystemExit) as exc:
+        fw.expected("performance")
+    assert "performance" in str(exc.value)
+    assert "inputs.json" in str(exc.value)
+
+
+def test_only_the_modes_inputs_json_describes_can_be_asked_for(monkeypatch,
+                                                               tmp_path):
+    """`--mode performance` was an offered choice with no entry behind it, so
+    the one thing it could do was stage 150 MB and refuse to verify it."""
+    import tools.fetch_weights as fw
+
     monkeypatch.setattr(sys, "argv",
                         ["fetch_weights.py", "--out", str(tmp_path),
                          "--mode", "performance", "--no-download"])
+    monkeypatch.setattr(fw, "stage", lambda *a, **kw: pytest.fail(
+        "a mode with no entry must not reach the staging"))
     with pytest.raises(SystemExit) as exc:
         fw.main()
-    assert "performance" in str(exc.value)
+    assert exc.value.code == 2          # argparse's own usage error
+
+
+@pytest.mark.parametrize("content,phrase", [
+    (None, "is missing"),
+    ("{ not json", "could not be read"),
+    ('{"blender": {}}', "no 'weights' section"),
+    ('{"weights": {"balanced": [{"name": "a.onnx", "size": 1}]}}',
+     "missing sha256"),
+])
+def test_expected_names_the_file_and_the_problem(tmp_path, content, phrase):
+    """`inputs.json` is the file someone is sent to correct, so every way it
+    can be unusable has to say which file and what is wrong with it — not a
+    FileNotFoundError, a JSONDecodeError or a KeyError out of a build."""
+    import tools.fetch_weights as fw
+
+    path = tmp_path / "inputs.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+
+    with pytest.raises(SystemExit) as exc:
+        fw.expected("balanced", inputs=path)
     assert "inputs.json" in str(exc.value)
+    assert phrase in str(exc.value)
 
 
 def test_verify_only_checks_what_is_there_and_stages_nothing(
@@ -311,7 +361,10 @@ def test_the_locale_purge_fails_instead_of_silently_doing_nothing():
     """-ErrorAction SilentlyContinue on a path that has moved deletes nothing
     and says nothing: the bundle just quietly grows 100 MB."""
     text = PS1.read_text(encoding="utf-8")
-    purge = text.split("locale", 1)[1].split("--- pose weights", 1)[0]
+    # anchored on the VARIABLE, not on the word: the prose above it mentions
+    # the purge too, and a comment gaining the word "locale" would have moved
+    # this window over a block that says nothing about deleting anything.
+    purge = text.split("$locale", 1)[1].split("--- pose weights", 1)[0]
     assert "SilentlyContinue" not in purge
     assert "throw" in purge
 

@@ -173,35 +173,48 @@ def test_the_handler_labels_the_severity(capsys):
 # a marker file next to the exe — never from anything the app learns later.
 
 
-def _clean_gl_env(monkeypatch, tmp_path):
+@pytest.fixture
+def clean_gl_env(monkeypatch, tmp_path):
+    """The three inputs `_configure_gl` reads, all neutral — and the process
+    attribute it sets put back afterwards.
+
+    `AA_UseSoftwareOpenGL` belongs to the process, not to the test: Qt keeps it
+    for the rest of the run, so without this every GL-dependent test that
+    happens to sort after this file would inherit a decision it never made.
+    The assertion on the way in is what makes the restoration on the way out
+    testable — remove the teardown and the second test in this section fails.
+    """
+    from PySide6.QtCore import QCoreApplication, Qt
+
     monkeypatch.delenv("POSE3D_GL", raising=False)
     monkeypatch.delenv("QT_OPENGL", raising=False)
     monkeypatch.setattr("pose3d.runtime.app_dir", lambda: tmp_path)
+    attr = Qt.ApplicationAttribute.AA_UseSoftwareOpenGL
+    assert not QCoreApplication.testAttribute(attr), \
+        "software OpenGL was left on by an earlier test"
+    yield tmp_path
+    QCoreApplication.setAttribute(attr, False)   # False is the process default
 
 
-def test_hardware_gl_is_the_default(monkeypatch, tmp_path):
-    _clean_gl_env(monkeypatch, tmp_path)
+def test_hardware_gl_is_the_default(monkeypatch, clean_gl_env):
     assert app._configure_gl([]) == "hardware"
     assert "QT_OPENGL" not in os.environ
 
 
-def test_the_flag_selects_software_gl(monkeypatch, tmp_path):
-    _clean_gl_env(monkeypatch, tmp_path)
+def test_the_flag_selects_software_gl(monkeypatch, clean_gl_env):
     assert app._configure_gl(["--software-gl", "/tmp/proj"]) == "software"
     assert os.environ["QT_OPENGL"] == "software"
 
 
-def test_the_environment_variable_selects_software_gl(monkeypatch, tmp_path):
-    _clean_gl_env(monkeypatch, tmp_path)
+def test_the_environment_variable_selects_software_gl(monkeypatch, clean_gl_env):
     monkeypatch.setenv("POSE3D_GL", "software")
     assert app._configure_gl([]) == "software"
 
 
-def test_the_marker_file_selects_software_gl(monkeypatch, tmp_path):
+def test_the_marker_file_selects_software_gl(monkeypatch, clean_gl_env):
     """What the "Restart with software 3D" button leaves behind, so the choice
     survives the restart it triggers."""
-    _clean_gl_env(monkeypatch, tmp_path)
-    (tmp_path / "use-software-gl").write_text("", encoding="utf-8")
+    (clean_gl_env / "use-software-gl").write_text("", encoding="utf-8")
     assert app._configure_gl([]) == "software"
 
 
@@ -236,20 +249,18 @@ def _record_main_order(monkeypatch, name):
     return order
 
 
-def test_the_gl_decision_is_taken_before_any_qapplication(monkeypatch, tmp_path):
+def test_the_gl_decision_is_taken_before_any_qapplication(monkeypatch, clean_gl_env):
     """Qt ignores AA_UseSoftwareOpenGL once a QApplication exists, so this
     ordering IS the feature."""
-    _clean_gl_env(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "argv", ["pose3d", "--software-gl"])
 
     assert _record_main_order(monkeypatch, "_configure_gl") == [
         "_configure_gl", "QApplication"]
 
 
-def test_the_selftest_inherits_the_gl_decision(monkeypatch, tmp_path):
+def test_the_selftest_inherits_the_gl_decision(monkeypatch, clean_gl_env):
     """`Pose3D.exe --selftest --software-gl` is how the client's 3D fault gets
     diagnosed, so the self-test has to run under the same GL as the app."""
-    _clean_gl_env(monkeypatch, tmp_path)
     seen = {}
     monkeypatch.setattr("pose3d.selftest.main",
                         lambda argv: seen.setdefault("gl",
@@ -263,10 +274,9 @@ def test_the_selftest_inherits_the_gl_decision(monkeypatch, tmp_path):
 # --- the seam Task C fills --------------------------------------------------
 
 
-def test_pre_qt_checks_runs_before_the_qapplication(monkeypatch, tmp_path):
+def test_pre_qt_checks_runs_before_the_qapplication(monkeypatch, clean_gl_env):
     """The bundle-integrity check has to be able to say "files are missing"
     and exit before Qt is asked to load a plugin that is not there."""
-    _clean_gl_env(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "argv", ["pose3d"])
 
     assert _record_main_order(monkeypatch, "_pre_qt_checks") == [

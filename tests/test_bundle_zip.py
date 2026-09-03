@@ -11,6 +11,7 @@ That gate existed only as PowerShell pasted into the release workflow, which is
 Windows-only and therefore never ran here. This is the same rule as a pure
 function, tested on synthetic names on any platform.
 """
+import os
 import subprocess
 import sys
 import zipfile
@@ -54,6 +55,21 @@ def test_the_limit_is_the_limit_not_one_past_it():
 
 def test_a_tighter_limit_can_be_asked_for():
     assert bundle_zip.check_depth(["a" * 20], limit=10) != []
+
+
+def test_an_empty_directory_that_is_too_deep_is_still_too_deep(tmp_path):
+    """A zip stores an entry per directory, and an empty one is the only entry
+    that can be too long with no file under it to notice — so a check that
+    looked at files alone passed a bundle the client still could not
+    extract."""
+    folder = tmp_path / "build" / "Pose3D-Windows"
+    deep = folder / "/".join(["dir" * 8] * 8)
+    deep.mkdir(parents=True)
+    (folder / "Pose3D.exe").write_bytes(b"x")
+
+    with pytest.raises(SystemExit) as exc:
+        bundle_zip.zip_bundle(folder, tmp_path / "out.zip")
+    assert "dirdirdir" in str(exc.value)
 
 
 def _bundle(tmp_path, *relative):
@@ -122,6 +138,30 @@ def test_the_cli_zips_beside_the_folder_by_default(tmp_path):
                          cwd=ROOT, capture_output=True, text=True)
     assert got.returncode == 0, got.stderr
     assert (folder.parent / "Pose3D-Windows.zip").is_file()
+
+
+@pytest.mark.skipif(sys.platform.startswith("win"),
+                    reason="the stand-in 7z is a #!/bin/sh script, and a "
+                           "Windows PATH lookup would not run it")
+def test_a_7z_that_fails_is_one_line_and_not_a_traceback(tmp_path, monkeypatch,
+                                                         capsys):
+    """A full disk or a locked output file is an ordinary way for the release
+    step to end. It used to end in a CalledProcessError traceback out of a
+    build script, which says nothing the person reading the log can act on."""
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    fake = bin_dir / "7z"
+    fake.write_text("#!/bin/sh\necho 'ERROR: Can not open output file' >&2\n"
+                    "exit 2\n", encoding="utf-8")
+    fake.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
+
+    folder = _bundle(tmp_path, "Pose3D.exe")
+    assert bundle_zip.main([str(folder), "--out", str(tmp_path / "out.zip")]) == 1
+
+    err = capsys.readouterr().err
+    assert "ERROR: Can not open output file" in err
+    assert "Traceback" not in err
 
 
 def test_the_cli_reports_the_deep_path_and_exits_nonzero(tmp_path):

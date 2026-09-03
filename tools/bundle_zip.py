@@ -46,10 +46,15 @@ def check_depth(names, limit: int = DEFAULT_LIMIT) -> list[str]:
 
 
 def _entry_names(folder: Path) -> list[str]:
-    """What the archive will call each file, entries rooted at the leaf."""
+    """What the archive will call each entry, rooted at the leaf.
+
+    Directories included: a zip stores an entry for each one, and an EMPTY
+    directory is the only entry that can be too deep to extract without any
+    file under it being too deep — so checking files alone would pass a bundle
+    that still fails on the client.
+    """
     root = folder.parent
-    return sorted(p.relative_to(root).as_posix()
-                  for p in folder.rglob("*") if p.is_file())
+    return sorted(p.relative_to(root).as_posix() for p in folder.rglob("*"))
 
 
 def zip_bundle(folder: Path, out: Path,
@@ -77,9 +82,12 @@ def zip_bundle(folder: Path, out: Path,
     # tree. Both are run from the bundle's parent, which is what keeps the
     # entries rooted at the leaf.
     if shutil.which("7z"):
+        # captured so that a failure carries 7z's own words into the
+        # CalledProcessError; -bso0/-bsp0 mean there is nothing else to see.
         subprocess.run(["7z", "a", "-tzip", "-mx=5", "-bso0", "-bsp0",
                         str(out.resolve()), folder.name],
-                       cwd=folder.parent, check=True)
+                       cwd=folder.parent, check=True,
+                       capture_output=True, text=True)
     else:
         # make_archive names the file itself, appending .zip to the base it is
         # given; move it if that is not what was asked for, so the path this
@@ -106,6 +114,14 @@ def main(argv: list[str] | None = None) -> int:
         written = zip_bundle(a.folder, out, a.limit)
     except SystemExit as exc:
         print(exc, file=sys.stderr)
+        return 1
+    except subprocess.CalledProcessError as exc:
+        # A full disk or a locked output file is a normal way for the release
+        # step to end, and a traceback out of a build script says nothing the
+        # person reading the log can act on. 7z's own last line does.
+        said = (exc.stderr or exc.stdout or "").strip().splitlines()
+        print(f"bundle_zip: 7z failed (exit {exc.returncode})"
+              + (f": {said[-1]}" if said else ""), file=sys.stderr)
         return 1
     print(f"{written}, {written.stat().st_size / 1e6:.0f} MB")
     return 0

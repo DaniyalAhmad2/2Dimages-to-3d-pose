@@ -148,7 +148,11 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
                         np.where(keep, frame.scores[cam], det.scores))
             head = None
             if det.head_xy is not None:
-                head = (det.head_xy, det.head_scores)
+                # copied like the body arrays above: a detector that reuses an
+                # output buffer would otherwise have every frame's face points
+                # pointing at the same array — its own.
+                head = (np.asarray(det.head_xy, float).copy(),
+                        np.asarray(det.head_scores, float).copy())
                 heads += 1
             staged.append((frame, cam, body, head))
         if on_frame is not None:
