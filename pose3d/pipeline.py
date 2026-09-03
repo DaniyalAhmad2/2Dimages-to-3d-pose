@@ -11,6 +11,7 @@ disagree by construction.
 """
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -18,7 +19,7 @@ import numpy as np
 from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
-from pose3d.core.skeleton import JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS
+from pose3d.core.skeleton import JOINT_NAMES, Joint, NUM_HEAD_KP, NUM_JOINTS
 from pose3d.detect.base import KeypointDetector
 from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
@@ -420,8 +421,44 @@ def gated_kp2d(frame) -> dict[str, np.ndarray]:
     return out
 
 
+def face_protect(frame, head_source: str) -> tuple[int, ...]:
+    """Which face points this frame's hand corrections put beyond the gate.
+
+    Under the COCO-17 convention the canonical HEAD **is** face point 0 — one
+    physical detection judged by two gates, and they must not disagree about
+    it. `cross_view_rejection`'s last clause keeps a body pair whose BOTH views
+    were hand-placed: the user has overruled the gate and the joint goes on to
+    be triangulated, fitted and exported. The face gate had no such clause, so
+    a HEAD corrected in both views kept `pose3d[HEAD]` (the neck went on aiming
+    at the user's point) while `head3d[0]` was NaN'd and the nose roll switched
+    off for that frame — on exactly the frame the user worked hardest on, with
+    no nose dot drawn under this convention to explain it.
+
+    BOTH views, never either: that is the joint gate's rule, and it is what
+    keeps the two answers equal. With one view corrected the joint gate drops
+    the OTHER view and `pose3d[HEAD]` goes NaN too, so protecting the nose
+    there would re-create the same disagreement pointing the other way.
+
+    Under the skull convention the HEAD joint and the nose are different
+    detections (~86 px apart on frame 0 of the client take) and `corrected`
+    says nothing about the nose, so nothing is protected. Face points have no
+    `corrected` flag of their own, which is why this reads the joint's.
+
+    A separate, pure function because all four callers of `triangulate_face`
+    must reach the same `head3d` from the same 2D, and this is the only thing
+    they would otherwise each have to re-derive.
+    """
+    if head_source != "nose":
+        return ()
+    j = int(Joint.HEAD)
+    if frame.corrected[CAM_LEFT][j] and frame.corrected[CAM_RIGHT][j]:
+        return (0,)
+    return ()
+
+
 def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
-                     F=None, allow: dict[str, float] | None = None) -> None:
+                     F=None, allow: dict[str, float] | None = None,
+                     protect: Iterable[int] = ()) -> None:
     """Fill this frame's `head3d`, NaN where the two views disagree.
 
     The face points reach the character exactly as the canonical joints reach
@@ -433,8 +470,10 @@ def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
 
     What it does NOT do is write a mask. `Frame.rejected` is a per-JOINT array
     the bone fit and the camera views read; the face points have no entry in
-    it, no `corrected` flag to overrule it with and no dot colour to explain
-    it. The verdict lives only in the 3D: a refused pair is NaN, and the
+    it, no `corrected` flag of their own and no dot colour to explain it —
+    their one override is `protect`, which the nose borrows from the HEAD
+    joint it IS under the COCO-17 convention (see `face_protect`). The
+    verdict lives only in the 3D: a refused pair is NaN, and the
     character falls back to the neck's own aim for that frame. `head2d` is
     left exactly as the detector and the user wrote it, so the next
     calibration — or a drag that reconciles the pair — reinstates the point
@@ -445,6 +484,12 @@ def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
     the drag path had its own arithmetic, dragging a face point revived a
     3D the next recompute deleted.
 
+    `protect` names face indices left UNGATED — the user's override, since the
+    gate cannot see one. Ask `face_protect` for it rather than assembling it
+    per caller: the whole point is that every caller passes the same set for
+    the same frame. Empty by default, so a caller that does not know this
+    project's head convention cannot accidentally claim one.
+
     `F` and `allow` are derived from `rig` when omitted; pass them when
     looping over a take, where they are the same for every frame.
     """
@@ -453,11 +498,14 @@ def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
                                rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
     if allow is None:
         allow = per_image_allowances(rig)
+    kept = {int(k) for k in protect}
     head3d = triangulate_points(
         frame.head2d[CAM_LEFT], frame.head2d[CAM_RIGHT],
         rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
         rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
     for k in range(NUM_HEAD_KP):
+        if k in kept:
+            continue
         _, bad = cross_view_verdict(frame.head2d[CAM_LEFT][k],
                                     frame.head2d[CAM_RIGHT][k],
                                     rig, F, epi_thr, allow)
@@ -508,7 +556,10 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     The FACE points are gated on every call whichever way `validate` goes:
     their verdict is not a mask (see `triangulate_face`), so there is nothing
     of a previous rig's to preserve or destroy — it is re-derived from this
-    rig here, as it is on the drag path and the face re-detect.
+    rig here, as it is on the drag path and the face re-detect. The one thing
+    that does carry over is the user's own override, read off `corrected` by
+    `face_protect`, so a recompute cannot delete a nose a drag was right to
+    keep.
     """
     dropped = 0
     for frame in project.frames:
@@ -533,8 +584,11 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
             rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
             rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
         # the face points ride the same geometry and the same cross-view gate;
-        # they are not bone-fitted, they only orient the head
-        triangulate_face(frame, rig, epi_thr, F, allow)
+        # they are not bone-fitted, they only orient the head. The project is
+        # what knows whether the nose and the HEAD joint are one detection, so
+        # the override the joint gate honours is passed in from here.
+        triangulate_face(frame, rig, epi_thr, F, allow,
+                         face_protect(frame, project.head_source))
     return dropped
 
 
