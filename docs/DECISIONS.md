@@ -58,7 +58,10 @@ never sees a tag (F42).
   about that aim (the nose is the one face point rigid enough to trust on a mannequin — nose-to-HEAD
   varies 5.2 % over the client take against ear-to-ear's 14.4 %); **Face** takes the whole nose+ears
   basis for humans, whose ears are real features. Measured on the client take: skull shear 1.428x → 1.000x
-  on the edges the chain owns, head-vs-neck relative rotation 14.6–88.2° → the rest offset exactly, head
+  on the edges the chain owns outright — the shear gate's scope was restated to those edges after the
+  measurement, because over ALL head-weighted edges the take reads 1.05x (Nose) / 1.16x (Face), all of it
+  on the throat seam that Decision 4 puts out of scope and that the deferred re-weight above would
+  remove — head-vs-neck relative rotation 14.6–88.2° → the rest offset exactly, head
   aim with the face points in play 3.78° → 1.28° median (22.95° → 3.82° max). Cost: the head cannot nod
   independently of the neck, and on a mannequin whose ears are wrong Face mode still follows them —
   which is why Nose is the default. Evidence and gates: `docs/audit-2026-09/phase7_head_chain.json`.
