@@ -18,7 +18,7 @@ import numpy as np
 from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
-from pose3d.core.skeleton import JOINT_NAMES, NUM_JOINTS
+from pose3d.core.skeleton import JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS
 from pose3d.detect.base import KeypointDetector
 from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
@@ -420,6 +420,52 @@ def gated_kp2d(frame) -> dict[str, np.ndarray]:
     return out
 
 
+def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
+                     F=None, allow: dict[str, float] | None = None) -> None:
+    """Fill this frame's `head3d`, NaN where the two views disagree.
+
+    The face points reach the character exactly as the canonical joints reach
+    the bone fit, so they are judged by the same rule: `cross_view_verdict`,
+    the same gate, the same per-image allowances. A nose the detector put on
+    the ear in one view triangulates to a point metres from the head, and the
+    head is then aimed at it — the failure the cross-view check has always
+    caught for a knee, on the one path that never asked.
+
+    What it does NOT do is write a mask. `Frame.rejected` is a per-JOINT array
+    the bone fit and the camera views read; the face points have no entry in
+    it, no `corrected` flag to overrule it with and no dot colour to explain
+    it. The verdict lives only in the 3D: a refused pair is NaN, and the
+    character falls back to the neck's own aim for that frame. `head2d` is
+    left exactly as the detector and the user wrote it, so the next
+    calibration — or a drag that reconciles the pair — reinstates the point
+    with no state to undo.
+
+    ONE function because three callers must reach the same `head3d` from the
+    same 2D: the batch recompute, the face re-detect, and the drag path. When
+    the drag path had its own arithmetic, dragging a face point revived a
+    3D the next recompute deleted.
+
+    `F` and `allow` are derived from `rig` when omitted; pass them when
+    looping over a take, where they are the same for every frame.
+    """
+    if F is None:
+        F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                               rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    if allow is None:
+        allow = per_image_allowances(rig)
+    head3d = triangulate_points(
+        frame.head2d[CAM_LEFT], frame.head2d[CAM_RIGHT],
+        rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+        rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    for k in range(NUM_HEAD_KP):
+        _, bad = cross_view_verdict(frame.head2d[CAM_LEFT][k],
+                                    frame.head2d[CAM_RIGHT][k],
+                                    rig, F, epi_thr, allow)
+        if bad:
+            head3d[k] = np.nan
+    frame.head3d = head3d
+
+
 # Above this share of keypoints rejected, the cause is the calibration rather
 # than the detector, and the user has no way to tell those apart from the
 # symptoms (gaps in the 2D views, a sparse 3D pose).
@@ -458,6 +504,11 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
     session's rig, so pass False only when you know the mask is current or
     empty (the tests that use it triangulate freshly loaded fixtures, which
     carry none).
+
+    The FACE points are gated on every call whichever way `validate` goes:
+    their verdict is not a mask (see `triangulate_face`), so there is nothing
+    of a previous rig's to preserve or destroy — it is re-derived from this
+    rig here, as it is on the drag path and the face re-detect.
     """
     dropped = 0
     for frame in project.frames:
@@ -466,20 +517,24 @@ def triangulate_project(project: ProjectData, rig: CalibratedRig,
         # the fill that set it (a joint recovered by a re-detect or a hand
         # correction must come back as a measurement, not stay "interpolated").
         frame.filled[:] = False
+    # measured once for the take, not once per frame — and once for BOTH
+    # gates: the joints and the face points must be judged by the same number
+    # or a nose could be kept by a threshold no knee was ever measured against
+    epi_thr = epipolar_threshold(rig, project)
     if validate:
-        dropped = validate_cross_view(project, rig)
+        dropped = validate_cross_view(project, rig, epi_thr)
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    allow = per_image_allowances(rig)
     for frame in project.frames:
         kp = gated_kp2d(frame)
         frame.pose3d = triangulate_points(
             kp[CAM_LEFT], kp[CAM_RIGHT],
             rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
             rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
-        # the face points ride the same geometry; they are not cross-view
-        # validated or bone-fitted, they only orient the head
-        frame.head3d = triangulate_points(
-            frame.head2d[CAM_LEFT], frame.head2d[CAM_RIGHT],
-            rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
-            rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+        # the face points ride the same geometry and the same cross-view gate;
+        # they are not bone-fitted, they only orient the head
+        triangulate_face(frame, rig, epi_thr, F, allow)
     return dropped
 
 
