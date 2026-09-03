@@ -16,10 +16,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import cv2
-from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QCheckBox, QDialog, QDoubleSpinBox, QFileDialog, QFormLayout, QGroupBox,
-    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QProgressDialog, QPushButton,
+    QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QGroupBox,
+    QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
     QVBoxLayout, QWidget,
 )
 
@@ -30,10 +29,7 @@ from pose3d.calib.resolve import (
 from pose3d.core.importer import build_project, match_frames
 from pose3d.core.io_project import save_project
 from pose3d.ui import filedialog
-
-
-class _Cancelled(Exception):
-    """The user pressed Cancel in the progress dialog."""
+from pose3d.ui.worker import run_job
 
 
 class _FilePicker(QWidget):
@@ -151,6 +147,14 @@ class ImportDialog(QDialog):
 
     # --- processing ---
     def _process(self):
+        """Run the import, phase by phase, with the GUI thread left alone.
+
+        Every long phase here — copying the images, finding the markers,
+        detecting, reconstructing — goes through `worker.run_job`, so the
+        dialog stays alive and says where it is. It used to drive them all
+        inline and pump the event loop by hand, which re-enters every slot in
+        the app from the middle of this one.
+        """
         left, right = self.left_pick.paths, self.right_pick.paths
         if not left or not right:
             QMessageBox.warning(self, "Missing images",
@@ -163,15 +167,19 @@ class ImportDialog(QDialog):
         except OSError as e:
             QMessageBox.critical(self, "Cannot create folder", str(e)); return
 
-        prog = QProgressDialog("Importing images…", "Cancel", 0, 0, self)
-        prog.setWindowModality(Qt.WindowModality.WindowModal)
-        prog.setMinimumDuration(0); prog.show()
-
         try:
-            project = build_project(left, right, name=self.name.text(),
-                                    copy_into=folder)
+            # No Cancel on the phases that cannot honour one: a button that
+            # does nothing is the lie this phase exists to remove. What the
+            # copy needed was to say WHICH pair it is stuck on — that is where
+            # a virus scanner or a OneDrive placeholder holds it up.
+            project = run_job(
+                self, "Importing images", lambda report, cancelled:
+                build_project(left, right, name=self.name.text(),
+                              copy_into=folder, on_progress=report),
+                cancellable=False)
+            if isinstance(project, Exception):
+                return                    # cancelled, or already reported
             if not project.frames:
-                prog.close()
                 QMessageBox.warning(self, "No pairs", "No image pairs matched.")
                 return
 
@@ -182,19 +190,21 @@ class ImportDialog(QDialog):
             if self.extr.first():
                 el, er = load_extrinsics_json(self.extr.first())
 
-            prog.setLabelText("Resolving calibration…")
-            _pe()
-            cal = resolve_calibration(
-                project, lambda p: cv2.imread(str(p)),
-                marker_length=self.marker.value(),
-                intr_left=il, intr_right=ir, ext_left=el, ext_right=er)
+            cal = run_job(
+                self, "Resolving calibration", lambda report, cancelled:
+                resolve_calibration(
+                    project, lambda p: cv2.imread(str(p)),
+                    marker_length=self.marker.value(),
+                    intr_left=il, intr_right=ir, ext_left=el, ext_right=er),
+                cancellable=False)
+            if isinstance(cal, Exception):
+                return
 
             rig = cal.rig
             # what the numbers mean, kept with the project: the tag size the
             # extrinsics were scaled by is not recoverable from anything else
             project.marker_length = float(self.marker.value())
             if not cal.ok:
-                prog.close()
                 cont = QMessageBox.warning(
                     self, "Calibration not successful",
                     cal.message + "\n\nOpen the project for 2D review without "
@@ -202,67 +212,70 @@ class ImportDialog(QDialog):
                     QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
                 if cont != QMessageBox.StandardButton.Yes:
                     return
-                prog = QProgressDialog("Detecting…", "Cancel", 0, len(project.frames), self)
-                prog.setWindowModality(Qt.WindowModality.WindowModal); prog.show()
             elif cal.approximate:
                 QMessageBox.information(self, "Calibration", cal.message)
 
             # detection with progress — the pipeline's own loop, so the face
             # keypoints (and anything else it learns to write) are not dropped
-            # on the floor by a duplicate loop that only knew about kp2d
-            det = self._ensure_detector()
+            # on the floor by a duplicate loop that only knew about kp2d.
             # keypoint_model / head_source / detector are all written by
             # detect_project from the detector itself: they are facts about
             # the detection, and a caller that forgot head_source produced a
             # halpe26 project posed under the nose convention.
-            prog.setMaximum(len(project.frames))
-            prog.setLabelText("Detecting keypoints…")
             from pose3d.pipeline import detect_project
 
-            def on_frame(i, n):
-                if prog.wasCanceled():
-                    raise _Cancelled()
-                prog.setValue(i); _pe()
+            def detect(report, cancelled):
+                det = self._ensure_detector()      # loading the model is slow
+                return detect_project(project, det,
+                                      lambda p: cv2.imread(str(p)),
+                                      on_progress=report, cancelled=cancelled)
 
-            try:
-                detect_project(project, det, lambda p: cv2.imread(str(p)),
-                               on_frame=on_frame)
-            except _Cancelled:
-                prog.close()
-                return
+            # ... and this one IS cancellable: it is the long phase, and
+            # `detect_project` commits every frame or none of them.
+            detected = run_job(self, "Detecting keypoints", detect)
+            if isinstance(detected, Exception):
+                return                    # a cancel wrote nothing at all
 
             smooth = self.smooth_check.isChecked()
             project.smoothing = "ema0.6" if smooth else "none"
 
             # reconstruct if calibrated
-            dropped, report = 0, None
+            dropped, fit_report = 0, None
             if rig is not None:
-                prog.setLabelText("Reconstructing 3D…"); _pe()
-                from pose3d.pipeline import fit_project, triangulate_project
-                dropped = triangulate_project(project, rig)
-                report = fit_project(project, smooth=smooth)
-                save_rig(rig, folder / "calibration", cal.report)
-                # The calibration was resolved before any of the above, so its
-                # recorded vertical had no poses to take its SENSE from and
-                # fell back to "the phones were held upright". Now there are
-                # poses: settle it on the body and rewrite the two files.
-                finalize_world_up(project, folder / "calibration")
+                def reconstruct(report, cancelled):
+                    from pose3d.pipeline import fit_project, triangulate_project
+                    report(0, 0, "Triangulating every frame…")
+                    n = triangulate_project(project, rig)
+                    report(0, 0, "Fitting the skeleton to the take…")
+                    got = fit_project(project, smooth=smooth)
+                    save_rig(rig, folder / "calibration", cal.report)
+                    # The calibration was resolved before any of the above, so
+                    # its recorded vertical had no poses to take its SENSE
+                    # from and fell back to "the phones were held upright".
+                    # Now there are poses: settle it on the body and rewrite
+                    # the two files.
+                    finalize_world_up(project, folder / "calibration")
+                    return n, got
+
+                done = run_job(self, "Reconstructing 3D", reconstruct,
+                               cancellable=False)
+                if isinstance(done, Exception):
+                    return
+                dropped, fit_report = done
 
             save_project(project, folder)
-            prog.close()
             self.result_folder = str(folder)
             msg = f"Imported {len(project.frames)} frames.\n{cal.message}"
             from pose3d.pipeline import rejection_note
             notes = [rejection_note(dropped, len(project.frames))]
-            if report is not None:
-                notes.append(report.note())
+            if fit_report is not None:
+                notes.append(fit_report.note())
             for note in notes:
                 if note:
                     msg += "\n\n" + note
             QMessageBox.information(self, "Done", msg)
             self.accept()
         except Exception as e:                       # surface any failure cleanly
-            prog.close()
             QMessageBox.critical(self, "Import failed", str(e))
 
     def _ensure_detector(self):
@@ -272,8 +285,3 @@ class ImportDialog(QDialog):
             # RTMPoseDetector's own default: see detect.rtmpose.USE_HALPE26
             self._detector = RTMPoseDetector(mode="balanced", device="cpu")
         return self._detector
-
-
-def _pe():
-    from PySide6.QtWidgets import QApplication
-    QApplication.processEvents()

@@ -7,6 +7,8 @@ Panels never call each other directly.
 """
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
@@ -20,9 +22,9 @@ from pose3d.core.skeleton import (
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
-    CalibratedRig, bone_length_targets, cross_view_rejection, face_protect,
-    fill_frame_gaps, fit_frame, gated_kp2d, per_image_allowances,
-    revalidate_joint, triangulate_face,
+    CalibratedRig, Cancelled, bone_length_targets, cross_view_rejection,
+    face_protect, fill_frame_gaps, fit_frame, gated_kp2d,
+    per_image_allowances, revalidate_joint, triangulate_face,
 )
 
 HEAD_JOINT = int(Joint.HEAD)
@@ -111,6 +113,40 @@ class ProjectModel(QObject):
         self._figure_h_px = None
         self._quality = None
         self._epi_thr = None
+        # set by quiet() while a long job runs: see _emit
+        self._quiet = False
+
+    # --- redraw suppression for a long job ---
+    def _emit(self, signal, *args) -> None:
+        """Emit a REDRAW-driving signal, unless `quiet()` is holding it back."""
+        if not self._quiet:
+            signal.emit(*args)
+
+    @contextmanager
+    def quiet(self):
+        """Hold the redraw-driving signals back for the duration of a job.
+
+        Deliberately NOT `QSignalBlocker`: blocking DROPS every signal this
+        object has, `statusMessage` included, so the user would watch a
+        five-minute detection in silence. This gates only the six emitters
+        that make something redraw (`frameChanged`, `pose3dChanged`,
+        `accuracyChanged`, `joint2dChanged`, `historyChanged`,
+        `qualityChanged`) — a job re-poses every frame, and repainting the
+        window once per frame from a worker thread is both wasted and unsafe.
+
+        `statusMessage` is never suppressed, so the running commentary still
+        arrives; the window connects it to a method of its own, which is what
+        makes Qt queue it across the thread boundary.
+
+        The caller's tail is therefore deterministic: leave the context,
+        refresh ONCE, then report.
+        """
+        before = self._quiet
+        self._quiet = True
+        try:
+            yield self
+        finally:
+            self._quiet = before
 
     # --- pipeline version migration ---
     def upgrade_pipeline(self) -> str:
@@ -177,17 +213,28 @@ class ProjectModel(QObject):
         return True
 
     # --- whole-project recompute / detection / save ---
-    def recompute_all(self) -> None:
-        """Re-triangulate + re-fit every frame from the current 2D points."""
+    def recompute_all(self, on_progress=None, cancelled=None) -> None:
+        """Re-triangulate + re-fit every frame from the current 2D points.
+
+        `cancelled` is honoured only BEFORE the first frame is touched: the
+        triangulation and the bone fit are one answer about the whole take,
+        and stopping between them would leave a project whose 3D came half
+        from the old 2D and half from the new. It is seconds of work on the
+        client's take, so it runs to the end once it has started.
+        """
         if self.rig is None:
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
+        if cancelled is not None and cancelled():
+            raise Cancelled()
         from pose3d.pipeline import (
             fit_project, rejection_note, triangulate_project)
         self._bone_targets = None
         write_note = ""
+        _report(on_progress, "Re-triangulating every frame…")
         dropped = triangulate_project(self.project, self.rig)
         smoothing = self.project.smoothing
+        _report(on_progress, "Fitting the skeleton to the take…")
         report = fit_project(self.project, smooth=smoothing != "none",
                              alpha=_smoothing_alpha(smoothing))
         if self.project_dir:
@@ -217,7 +264,7 @@ class ProjectModel(QObject):
         self.set_frame(self.current)
         # pulled, not pushed: measuring the whole take is not free, and it is
         # wasted work when nothing is listening
-        self.qualityChanged.emit()
+        self._emit(self.qualityChanged)
         msg = f"Recalculated 3D for {len(self.project.frames)} frames"
         notes = [n for n in (rejection_note(dropped, len(self.project.frames)),
                              report.note(), write_note) if n]
@@ -341,11 +388,12 @@ class ProjectModel(QObject):
             save_rig(self.rig, calib_dir, report)
             if report is None and before:
                 # No report to carry the vertical, so put it back by hand.
-                doc = json.loads(ext_path.read_text())
+                doc = json.loads(ext_path.read_text(encoding="utf-8"))
                 restored = {k: before[k] for k in up_keys
                             if k in before and k not in doc}
                 if restored:
-                    ext_path.write_text(json.dumps(doc | restored, indent=2))
+                    ext_path.write_text(json.dumps(doc | restored, indent=2),
+                                        encoding="utf-8")
         except Exception as e:
             self.statusMessage.emit(
                 f"Could not save the rescaled calibration "
@@ -360,7 +408,7 @@ class ProjectModel(QObject):
         """
         import json
         try:
-            return json.loads(path.read_text())
+            return json.loads(path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return None                   # older project: nothing to keep
         except Exception as e:
@@ -368,20 +416,29 @@ class ProjectModel(QObject):
                 complaint.format(reason=f"{type(e).__name__}: {e}"))
             return None
 
-    def redetect_all(self, detector, load_image) -> None:
-        """Re-run the detector on every frame, then recompute 3D."""
+    def redetect_all(self, detector, load_image,
+                     on_progress=None, cancelled=None) -> None:
+        """Re-run the detector on every frame, then recompute 3D.
+
+        `cancelled` reaches the detection only. Once `detect_project` has
+        committed the new 2D, the recompute MUST run: a take whose 3D was
+        reconstructed from 2D that no longer exists is exactly the
+        inconsistency the all-or-nothing commit exists to prevent.
+        """
         if detector is None:
             self.statusMessage.emit("No detector available in this build")
             return
         from pose3d.pipeline import detect_project
         self.statusMessage.emit("Running detection…")
-        detect_project(self.project, detector, load_image)
-        self.recompute_all()          # invalidates the take-wide readouts
+        detect_project(self.project, detector, load_image,
+                       on_progress=on_progress, cancelled=cancelled)
+        self.recompute_all(on_progress=on_progress)   # take-wide readouts too
         self.statusMessage.emit(
             f"Detection complete ({len(self.project.frames)} frames); "
             f"hand-corrected points were kept")
 
-    def redetect_head(self, detector, load_image) -> None:
+    def redetect_head(self, detector, load_image,
+                      on_progress=None, cancelled=None) -> None:
         """Re-run the detector for the nose and the other face points only.
 
         The migration path for a project made before face keypoints existed:
@@ -398,7 +455,8 @@ class ProjectModel(QObject):
         from pose3d.pipeline import detect_project
         self.statusMessage.emit("Re-detecting the nose and face points…")
         wrote = detect_project(self.project, detector, load_image,
-                               fields="head")
+                               fields="head", on_progress=on_progress,
+                               cancelled=cancelled)
         if not wrote:
             # A build whose detector has no face points (the manual detector,
             # or an RTMPose bundle without the face model) writes nothing —
@@ -417,6 +475,7 @@ class ProjectModel(QObject):
             self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
             self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
         allow = per_image_allowances(self.rig)
+        _report(on_progress, "Reconstructing the face points…")
         for f in self.project.frames:
             triangulate_face(f, self.rig, epi_thr, F, allow,
                              face_protect(f, self.project.head_source))
@@ -441,10 +500,10 @@ class ProjectModel(QObject):
     def set_frame(self, idx: int) -> None:
         idx = max(0, min(idx, len(self.project.frames) - 1))
         self.current = idx
-        self.frameChanged.emit(idx)
+        self._emit(self.frameChanged, idx)
         f = self.frame()
-        self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
-        self.accuracyChanged.emit(self._accuracy(idx))
+        self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
+        self._emit(self.accuracyChanged, self._accuracy(idx))
 
     def frame(self):
         return self.project.frames[self.current]
@@ -463,24 +522,24 @@ class ProjectModel(QObject):
         # test_a_drag_does_not_split_the_gate_in_two is the guard.)
         self._quality = None
         self.stack.apply(f.frame_id, cam, joint, x, y)
-        self.joint2dChanged.emit(cam, joint)
+        self._emit(self.joint2dChanged, cam, joint)
         if self.auto_recalc:
             self._resolve_joint(joint, cam)
-        self.historyChanged.emit()
+        self._emit(self.historyChanged)
 
     def undo(self) -> None:
         e = self.stack.undo()
         if e is not None:
             self._resolve_joint(e.joint, e.cam)
-            self.joint2dChanged.emit(e.cam, e.joint)
-        self.historyChanged.emit()
+            self._emit(self.joint2dChanged, e.cam, e.joint)
+        self._emit(self.historyChanged)
 
     def redo(self) -> None:
         e = self.stack.redo()
         if e is not None:
             self._resolve_joint(e.joint, e.cam)
-            self.joint2dChanged.emit(e.cam, e.joint)
-        self.historyChanged.emit()
+            self._emit(self.joint2dChanged, e.cam, e.joint)
+        self._emit(self.historyChanged)
 
     # --- geometry ---
     def _resolve_joint(self, joint: int, cam: str) -> None:
@@ -509,8 +568,8 @@ class ProjectModel(QObject):
             # face points have no bones and never change the character's
             # dimensions: no re-fit, just re-orient the rigid neck+head chain
             # (the nose turns it in both modes, the ears only in Face mode)
-            self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
-            self.accuracyChanged.emit(self._accuracy(self.current))
+            self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
+            self._emit(self.accuracyChanged, self._accuracy(self.current))
             return
         if joint == HEAD_JOINT and self._head_is_the_nose():
             # Under the nose convention the canonical HEAD and the nose face
@@ -542,8 +601,8 @@ class ProjectModel(QObject):
         for j in touched:
             self._retriangulate(f, j)
         self._refit_frame(f)
-        self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
-        self.accuracyChanged.emit(self._accuracy(self.current))
+        self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
+        self._emit(self.accuracyChanged, self._accuracy(self.current))
 
     def _head_is_the_nose(self) -> bool:
         """Is this project's canonical HEAD the same point as the nose?
@@ -937,6 +996,16 @@ def _body_height(poses: np.ndarray) -> float:
              for p, v in ((q, ~np.isnan(q).any(1)) for q in upright)
              if v.sum() >= 2]
     return float(np.median(spans)) if spans else float("nan")
+
+
+def _report(on_progress, label: str) -> None:
+    """Name the phase a job is in, with no measurable progress to report.
+
+    A total of 0 is what a QProgressDialog draws as a busy bar, which is the
+    honest picture of a whole-take triangulation: it is one step, not n.
+    """
+    if on_progress is not None:
+        on_progress(0, 0, label)
 
 
 def _smoothing_alpha(smoothing: str, default: float = 0.6) -> float:

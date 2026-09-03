@@ -279,9 +279,12 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
     monkeypatch.setattr(W.QMessageBox, "warning",
                         lambda *a, **k: warned.setdefault("msg", a[2]))
     started = {"n": 0}
-    monkeypatch.setattr(MainWindow, "_start_export_worker",
-                        lambda *a, **k: started.__setitem__("n", 1),
-                        raising=False)
+    # the real guard: nothing may reach the worker mechanism at all. (It used
+    # to patch a `_start_export_worker` that has never existed, so the
+    # assertion below could not have caught an export that did run.)
+    import pose3d.ui.main_window as main_window
+    monkeypatch.setattr(main_window, "run_job",
+                        lambda *a, **k: started.__setitem__("n", 1))
 
     win._on_export()
     assert "read-only" in warned.get("msg", "").lower(), warned
@@ -766,6 +769,24 @@ def test_the_window_still_builds_when_the_3d_view_cannot(dead_gl, qapp):
     machine with no 3D, so nothing here may bring the window down with it."""
     from PySide6.QtWidgets import QApplication
 
+# --- Phase G: the long jobs leave the GUI thread ---------------------------
+#
+# Detection, the face re-detect and the recompute used to run in the slot that
+# started them, so Windows painted "Not Responding" over a five-minute job and
+# there was no way to stop it. They now go through `ui.worker.run_job` with
+# the model's redraw signals held back — which is only safe if the window
+# refreshes ONCE afterwards, and only bearable if the status line keeps
+# talking while it runs.
+
+class _NoseDetector:
+    head_source = "nose"
+
+
+class _SkullDetector:
+    head_source = "skull"
+
+
+def test_a_detection_refreshes_once_and_keeps_talking(qapp, tmp_path):
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel
 
@@ -815,3 +836,120 @@ def test_a_healthy_gl_view_shows_no_placeholder(qapp, monkeypatch):
     v.show()
     assert v.check_gl() is True
     assert v.placeholder() is None
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    win = MainWindow(model)
+    win.detector = _NoseDetector()
+
+    refreshes = []
+    win._refresh_views = lambda: refreshes.append(1)
+
+    def fake_redetect_all(det, load_image, on_progress=None, cancelled=None):
+        model.statusMessage.emit("Running detection…")
+        for i in range(3):
+            model.set_frame(i)          # would repaint the window, per frame
+            on_progress(i + 1, 3, f"frame {i + 1} of 3")
+
+    model.redetect_all = fake_redetect_all
+    win._on_run_detection()
+
+    assert refreshes == [1], "the window redrew once per frame, not once"
+    assert "Running detection" in win.statusBar().currentMessage()
+
+
+def test_a_cancelled_detection_puts_the_head_convention_back(
+        qapp, recorded_errors):
+    """The convention is adopted BEFORE the run, because the 2D is about to be
+    replaced. A run that does not finish replaces nothing, so the project, the
+    process-wide default and the view's cached character all go back."""
+    from pose3d.geometry import character as ch
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+    from pose3d.ui.worker import Cancelled
+
+    class _Cached:
+        head_source = "nose"
+
+    data, rig, gt = _project_with_rig()
+    data.head_source = "nose"
+    try:
+        model = ProjectModel(data, rig)
+        win = MainWindow(model)
+        win.detector = _SkullDetector()
+        cached = _Cached()
+        win.view3d._character = cached
+
+        def fake_redetect_all(det, load_image, on_progress=None, cancelled=None):
+            raise Cancelled()
+
+        model.redetect_all = fake_redetect_all
+        win._on_run_detection()
+
+        assert data.head_source == "nose"
+        assert ch.default_head_source() == "nose"
+        assert win.view3d._character is cached
+        assert "cancel" in win.statusBar().currentMessage().lower()
+        assert recorded_errors == [], "a cancel is not a failure to report"
+    finally:
+        ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
+
+
+def test_a_cancelled_export_says_so_and_removes_the_half_written_file(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+
+    def fake_export(poses, out_dir, name="pose3d", **kw):
+        # what the real export has already written by the time Blender is
+        # launched, and what a cancel therefore leaves behind
+        (Path(out_dir) / f"{name}_poses.json").write_text("{}")
+        return blender_export._failure(
+            "blender_cancelled", "Export cancelled.", 125)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    win._on_export()
+
+    assert not (out / f"{data.name}_poses.json").exists()
+    assert "Export cancelled" in win.statusBar().currentMessage()
+    assert recorded_errors == []
+
+
+def test_the_import_copy_loop_reports_every_pair(tmp_path):
+    """Where the import stalls is inside one `copy2` — a virus scanner or a
+    OneDrive placeholder — so the copy loop reports per pair."""
+    from pose3d.core.importer import build_project
+
+    src = tmp_path / "src"
+    src.mkdir()
+    left, right = [], []
+    for i in range(3):
+        lp = src / f"left_{i}.jpg"; lp.write_bytes(b"x"); left.append(lp)
+        rp = src / f"right_{i}.jpg"; rp.write_bytes(b"x"); right.append(rp)
+
+    seen = []
+    project = build_project(left, right, name="p", copy_into=tmp_path / "proj",
+                            on_progress=lambda d, t, label: seen.append((d, t)))
+    assert len(project.frames) == 3
+    assert seen == [(1, 3), (2, 3), (3, 3)]
+
+
+def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
+    """`processEvents` re-enters every slot in the app from the middle of the
+    import; the long phases run on a worker thread instead."""
+    import inspect
+
+    from pose3d.ui import import_dialog
+
+    src = inspect.getsource(import_dialog)
+    assert "processEvents" not in src
+    assert "run_job(" in src

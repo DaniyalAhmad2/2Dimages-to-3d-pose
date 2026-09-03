@@ -92,13 +92,15 @@ def test_subprocess_kwargs_are_applied(tmp_path, monkeypatch):
     from pose3d.export import blender_export
 
     seen = {}
-    real = subprocess.run
 
     def spy(cmd, **kw):
+        # ... and the ONE launch path is Popen: the export used to have a
+        # second, `subprocess.run` branch, which is what left the timeout
+        # inoperative on the path the GUI actually took.
         seen.update(kw)
         raise FileNotFoundError("stop here")
 
-    monkeypatch.setattr(blender_export.subprocess, "run", spy)
+    monkeypatch.setattr(blender_export.subprocess, "Popen", spy)
     poses = np.zeros((1, NUM_JOINTS, 3))
     blender_export.export_animation(poses, tmp_path, name="x",
                                     render_video=False, blender="blender")

@@ -9,7 +9,7 @@ hub.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
     QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter,
     QToolButton, QVBoxLayout, QWidget,
@@ -24,53 +24,6 @@ HEAD_MODE_ITEMS = (("nose", "Head: nose"),
                    ("face", "Head: face (nose + ears)"))
 
 
-class _ExportWorker(QThread):
-    """Runs the Blender export off the UI thread, streaming progress."""
-    status = Signal(str)
-    finished_res = Signal(object)          # ExportResult or Exception
-
-    def __init__(self, poses, out, name, fps, display_frame, head3d=None,
-                 filled=None, recorded_up=None, camera=None):
-        super().__init__()
-        self._a = (poses, out, name, fps, display_frame, head3d, filled,
-                   recorded_up, camera)
-
-    def _on_line(self, line: str):
-        if "Fra:" in line:
-            try:
-                fr = line.split("Fra:")[1].split()[0]
-                self.status.emit(f"Rendering the animation… (frame {fr})")
-            except Exception:
-                self.status.emit("Rendering the animation…")
-        elif "FBX export" in line:
-            self.status.emit("Exporting the FBX character…")
-        elif "BVH Exported" in line or "export_anim.bvh" in line:
-            self.status.emit("Exporting BVH…")
-        elif "bake" in line.lower():
-            self.status.emit("Baking the pose animation…")
-
-    def run(self):
-        from pose3d.export.blender_export import export_animation
-        poses, out, name, fps, df, head3d, filled, recorded_up, cam = self._a
-        self.status.emit("Posing the character in Blender…")
-        try:
-            # The delivered file's defaults: the subject's travel kept (the
-            # 3D view places the figure by the same take-wide rule), one
-            # keyframe per photographed pose, and no substitute animation if
-            # anything goes wrong. `camera` adds a preview rendered from the
-            # LEFT camera's own pose, which is the comparison the client makes.
-            res = export_animation(poses, out, name=name, fps=fps,
-                                   render_video=True, display_frame=df,
-                                   head3d=head3d, filled=filled,
-                                   recorded_up=recorded_up, camera=cam,
-                                   keep_root_motion=True,
-                                   schedule="one_per_pose",
-                                   allow_fallback=False,
-                                   on_line=self._on_line)
-        except Exception as e:      # surface any failure to the UI thread
-            res = e
-        self.finished_res.emit(res)
-
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
 from pose3d.ui.camera_view import CameraPanel
 from pose3d.ui.model import ProjectModel, frame_stat, worst_per_joint
@@ -79,6 +32,23 @@ from pose3d.ui.panels import (
 )
 from pose3d.ui.timeline import Timeline, TimelineHeader
 from pose3d.ui.view3d import View3D
+from pose3d.ui.worker import Cancelled, run_job
+
+
+def _export_status(line: str) -> str:
+    """What one line of Blender's output means, for the progress dialog."""
+    if "Fra:" in line:
+        try:
+            return f"Rendering the animation… (frame {line.split('Fra:')[1].split()[0]})"
+        except Exception:
+            return "Rendering the animation…"
+    if "FBX export" in line:
+        return "Exporting the FBX character…"
+    if "BVH Exported" in line or "export_anim.bvh" in line:
+        return "Exporting BVH…"
+    if "bake" in line.lower():
+        return "Baking the pose animation…"
+    return ""
 
 
 class MainWindow(QMainWindow):
@@ -271,8 +241,11 @@ class MainWindow(QMainWindow):
         # re-fits the view (doing so mid-drag re-enters itemChange -> recursion)
         self.model.joint2dChanged.connect(lambda *_: self._refresh_overlays())
         self.model.historyChanged.connect(self._refresh_history)
-        self.model.statusMessage.connect(
-            lambda m: self.statusBar().showMessage(m, 6000))
+        # a METHOD, not a lambda: a job emits this from the worker thread, and
+        # Qt queues a signal into the GUI thread only when the receiver is an
+        # object that lives there. A bare callable would show the message from
+        # the worker thread instead.
+        self.model.statusMessage.connect(self._on_status)
 
         self.btn_undo.clicked.connect(self.model.undo)
         self.btn_redo.clicked.connect(self.model.redo)
@@ -403,36 +376,82 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(f"Detector unavailable: {e}", 8000)
         return self.detector
 
+    def _on_status(self, message: str):
+        self.statusBar().showMessage(message, 6000)
+
+    def _refresh_after_job(self):
+        """The ONE refresh that follows a job run under `ProjectModel.quiet`.
+
+        Everything the suppressed signals would have driven, done once, on the
+        GUI thread, when the take has stopped moving: replaying `set_frame`
+        re-poses the 3D view and repaints the overlays and the accuracy
+        readouts through their normal connections, so there is no second
+        description of "what a frame change means" to keep in step.
+        """
+        self._apply_view_orientation()   # poses changed: re-fit the character
+        if self.model.project.frames:
+            self.model.set_frame(self.model.current)
+            self._refresh_timeline_status()
+        self._refresh_quality()
+        self._refresh_history()
+
+    def _job_stopped(self, res, what: str) -> bool:
+        """True when a job did not finish, having said so.
+
+        A real failure has already reached the user through
+        `guard.report_error`; a cancel is the user's own decision and needs
+        only the reassurance that it cost them nothing.
+        """
+        if not isinstance(res, Exception):
+            return False
+        how = "was cancelled" if isinstance(res, Cancelled) else "failed"
+        self._on_status(f"{what} {how} — nothing was changed")
+        return True
+
     def _on_run_detection(self):
-        from PySide6.QtWidgets import QApplication
+        from pose3d.geometry.character import (
+            default_head_source, set_default_head_source)
         det = self._ensure_detector()
         if det is None:
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            # BEFORE redetect_all, which re-poses and redraws as it goes: the
-            # 2D is about to be replaced, so what HEAD means is replaced with
-            # it, and nothing may be posed under the old convention.
-            self._adopt_head_source(det)
-            self.model.redetect_all(det, self.load_image)
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._apply_view_orientation()   # poses changed: re-fit the character
-        self._refresh_views(); self._refresh_timeline_status()
+        # What to put back if the run does not finish. `detect_project`
+        # commits all frames or none, so a cancelled run leaves 2D detected
+        # under the OLD convention — and the project must not be left claiming
+        # the new one.
+        was = (self.model.project.head_source, default_head_source(),
+               getattr(self.view3d, "_character", None))
+        # BEFORE the run, which replaces every 2D point: what HEAD means is
+        # replaced with them, and nothing may be posed under the old convention.
+        self._adopt_head_source(det)
+        with self.model.quiet():
+            res = run_job(self, "Detection", lambda report, cancelled:
+                          self.model.redetect_all(det, self.load_image,
+                                                  on_progress=report,
+                                                  cancelled=cancelled))
+        if self._job_stopped(res, "Detection"):
+            # Every way this run can stop before `detect_project` commits — the
+            # cancel, an unreadable image, a detector that throws — leaves the
+            # stored 2D under the old convention, so the convention goes back
+            # with it. (The one case it cannot see is a fault in the recompute
+            # AFTER the detection committed; that is a bug, not a path.)
+            self.model.project.head_source, published, cached = was
+            set_default_head_source(published)
+            self.view3d._character = cached
+            return
+        self._refresh_after_job()
 
     def _on_redetect_head(self):
-        from PySide6.QtWidgets import QApplication
         det = self._ensure_detector()
         if det is None:
             return
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        QApplication.processEvents()
-        try:
-            self.model.redetect_head(det, self.load_image)
-        finally:
-            QApplication.restoreOverrideCursor()
-        self._refresh_views()
+        with self.model.quiet():
+            res = run_job(self, "Face re-detect", lambda report, cancelled:
+                          self.model.redetect_head(det, self.load_image,
+                                                   on_progress=report,
+                                                   cancelled=cancelled))
+        if self._job_stopped(res, "The face re-detect"):
+            return
+        self._refresh_after_job()
 
     def _adopt_head_source(self, det):
         """Record the head convention a re-detection is about to write.
@@ -457,9 +476,17 @@ class MainWindow(QMainWindow):
             view._character = None
 
     def _on_recalibrate(self):
-        self.model.recompute_all()
-        self._apply_view_orientation()   # poses changed: re-fit the character
-        self._refresh_views(); self._refresh_timeline_status()
+        # No Cancel: the triangulation and the bone fit are ONE answer about
+        # the whole take, and a button that could only abort before the work
+        # started would be the same dead control the export used to have.
+        with self.model.quiet():
+            res = run_job(self, "Recompute 3D", lambda report, cancelled:
+                          self.model.recompute_all(on_progress=report,
+                                                   cancelled=cancelled),
+                          cancellable=False)
+        if self._job_stopped(res, "The recompute"):
+            return
+        self._refresh_after_job()
         self._refresh_calibration_status()
 
     def _recorded_vertical(self):
@@ -605,59 +632,74 @@ class MainWindow(QMainWindow):
                                 filedialog.not_writable_message(out))
             return
         poses = np.stack([f.fitted3d for f in frames])   # native units; camera auto-frames
-
-        # run the (slow) Blender export on a worker thread with a live progress
-        # dialog, so the UI stays responsive instead of looking frozen/crashed.
-        from PySide6.QtWidgets import QProgressDialog
-        prog = QProgressDialog("Preparing export…", None, 0, 0, self)
-        prog.setWindowTitle("Exporting results")
-        prog.setWindowModality(Qt.WindowModality.WindowModal)
-        prog.setMinimumWidth(420); prog.setMinimumDuration(0)
-        prog.setCancelButton(None)         # a Blender render can't be safely killed
-        prog.show()
-
         heads = np.stack([f.head3d for f in frames])
         # the same flags the 3D view draws amber, so the export agrees with
         # the preview about which joints were interpolated
         filled = np.stack([f.filled for f in frames])
-        worker = _ExportWorker(poses, out, self.model.project.name,
-                               self.model.project.fps, self.model.current,
-                               head3d=heads, filled=filled,
-                               recorded_up=self._recorded_vertical(),
-                               camera=self._left_camera())
-        self._export_worker = worker       # keep a reference
-        worker.status.connect(prog.setLabelText)
+        name = self.model.project.name
+        fps = self.model.project.fps
+        display_frame = self.model.current
+        recorded_up = self._recorded_vertical()
+        camera = self._left_camera()
 
-        def _finished(res):
-            prog.close()
-            self._export_worker = None
-            if isinstance(res, Exception):
-                QMessageBox.critical(self, "Export failed", str(res))
-            elif res.ok:
-                items = [
-                    ("Video — turntable", res.mp4),
-                    ("Video — from the left camera's own position",
-                     res.mp4_camera),
-                    ("Character — rigged armature, matches the 3D view", res.fbx),
-                    ("Motion capture", res.bvh)]
-                body = "\n\n".join(f"{lbl}:\n{p}" for lbl, p in items if p)
-                if res.preview_failed:
-                    # the files are correct and written; only the render is
-                    # missing, and saying so beats reporting a failed export
-                    body += ("\n\nThe preview video could not be rendered on "
-                             "this machine. The motion capture and character "
-                             "files above are complete.")
-                QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
-            else:
-                # Say WHY, from the reason the export carries, instead of the
-                # tail of Blender's log: nothing was written on purpose, and
-                # the user needs to know that rather than guess.
-                QMessageBox.critical(
-                    self, "Export failed",
-                    res.message or (res.stderr or res.stdout or "")[-1500:])
+        def job(report, cancelled):
+            from pose3d.export.blender_export import export_animation
+            report(0, 0, "Posing the character in Blender…")
 
-        worker.finished_res.connect(_finished)
-        worker.start()
+            def on_line(line):
+                label = _export_status(line)
+                if label:
+                    report(0, 0, label)
+
+            # The delivered file's defaults: the subject's travel kept (the
+            # 3D view places the figure by the same take-wide rule), one
+            # keyframe per photographed pose, and no substitute animation if
+            # anything goes wrong. `camera` adds a preview rendered from the
+            # LEFT camera's own pose, which is the comparison the client makes.
+            return export_animation(poses, out, name=name, fps=fps,
+                                    render_video=True,
+                                    display_frame=display_frame,
+                                    head3d=heads, filled=filled,
+                                    recorded_up=recorded_up, camera=camera,
+                                    keep_root_motion=True,
+                                    schedule="one_per_pose",
+                                    allow_fallback=False, on_line=on_line,
+                                    cancelled=cancelled)
+
+        # Cancel really does stop it now: the export polls `cancelled` and
+        # kills the Blender child, which is why the button is here at all.
+        res = run_job(self, "Export", job)
+        if isinstance(res, Exception):
+            return                       # already reported through guard
+        if res.reason == "blender_cancelled":
+            # the pose document was written before Blender was launched; a
+            # cancelled export leaves nothing of itself behind
+            from pathlib import Path
+            (Path(out) / f"{name}_poses.json").unlink(missing_ok=True)
+            self._on_status("Export cancelled")
+            return
+        if res.ok:
+            items = [
+                ("Video — turntable", res.mp4),
+                ("Video — from the left camera's own position",
+                 res.mp4_camera),
+                ("Character — rigged armature, matches the 3D view", res.fbx),
+                ("Motion capture", res.bvh)]
+            body = "\n\n".join(f"{lbl}:\n{p}" for lbl, p in items if p)
+            if res.preview_failed:
+                # the files are correct and written; only the render is
+                # missing, and saying so beats reporting a failed export
+                body += ("\n\nThe preview video could not be rendered on "
+                         "this machine. The motion capture and character "
+                         "files above are complete.")
+            QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
+        else:
+            # Say WHY, from the reason the export carries, instead of the
+            # tail of Blender's log: nothing was written on purpose, and
+            # the user needs to know that rather than guess.
+            QMessageBox.critical(
+                self, "Export failed",
+                res.message or (res.stderr or res.stdout or "")[-1500:])
 
     def _left_camera(self):
         """The LEFT camera's intrinsics + pose, or None.

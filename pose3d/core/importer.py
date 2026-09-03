@@ -52,11 +52,17 @@ def build_project(
     left: list[str | Path], right: list[str | Path],
     name: str = "Imported", fps: int = 30,
     copy_into: str | Path | None = None,
+    on_progress=None,
 ) -> ProjectData:
     """Create a ProjectData from matched image pairs.
 
     If ``copy_into`` is given, images are copied into ``<copy_into>/images``
     and referenced by that path (so the project folder is self-contained).
+
+    ``on_progress(done, total, label)`` is called per PAIR, because that is
+    the granularity at which this stalls: a virus scanner or a OneDrive
+    placeholder holds up one `copy2` at a time, and the import used to sit
+    behind a modal dialog that could say nothing about which one.
     """
     pairs = match_frames(left, right)
     project = ProjectData(name=name, fps=fps, calibration_ref="calibration")
@@ -79,4 +85,7 @@ def build_project(
         project.frames.append(Frame(
             frame_id=fid,
             images={CAM_LEFT: str(lpath), CAM_RIGHT: str(rpath)}))
+        if on_progress is not None:
+            on_progress(i + 1, len(pairs),
+                        f"Copying image pair {i + 1} of {len(pairs)}")
     return project

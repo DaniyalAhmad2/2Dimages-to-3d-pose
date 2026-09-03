@@ -186,8 +186,11 @@ def check_video() -> str:
     """
     res, sizes = _export(render_video=True, timeout=900)
     if not res.ok:
+        # The export has one launch path with stderr folded into stdout, so the
+        # reason a render failed usually arrives on stdout and stderr is empty.
+        detail = res.stderr or res.stdout or ""
         raise Degraded(f"no preview video: rc={res.returncode} "
-                       f"{(res.stderr or '').splitlines()[0] if res.stderr else ''}")
+                       f"{detail.splitlines()[0] if detail else ''}")
     if "mp4" not in sizes:
         raise Degraded("Blender rendered no mp4")
     return f"mp4 {sizes['mp4'] // 1024}KB"

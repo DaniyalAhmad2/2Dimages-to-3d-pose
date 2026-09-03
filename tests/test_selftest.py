@@ -195,3 +195,24 @@ def test_both_pose_models_must_be_in_the_build(monkeypatch):
         selftest.check_pose_weights_offline()
     assert "Halpe-26" in str(e.value)
     assert True in asked
+
+
+def test_a_failed_render_names_why_when_blender_merged_its_output(monkeypatch):
+    """The export runs Blender through one launch path with stderr folded into
+    stdout, so a failed render's diagnostic arrives on `stdout` and `stderr` is
+    empty. Reading only `stderr` degrades the report to a bare returncode —
+    "the client sees nothing", which is the failure class this check exists to
+    remove. `check_export` already falls back; so must this one."""
+    class Merged:
+        ok = False
+        returncode = 1
+        stdout = "Error: EEVEE requires an OpenGL 3.3 context\nAborting\n"
+        stderr = ""
+
+    monkeypatch.setattr(
+        "pose3d.export.blender_export.export_animation",
+        lambda *a, **k: Merged())
+
+    with pytest.raises(selftest.Degraded) as e:
+        selftest.check_video()
+    assert "EEVEE requires an OpenGL 3.3 context" in str(e.value)

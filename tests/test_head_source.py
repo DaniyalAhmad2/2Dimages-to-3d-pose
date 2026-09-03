@@ -497,7 +497,7 @@ def test_the_convention_moves_before_anything_is_re_posed(qapp, monkeypatch):
         win.detector = _Skull()                   # no model loading
         win.view3d._character = _FakeCharacter("nose")
 
-        def fake_redetect_all(det, load_image):
+        def fake_redetect_all(det, load_image, on_progress=None, cancelled=None):
             seen["published"] = ch.default_head_source()
             seen["project"] = win.model.project.head_source
             seen["cached"] = win.view3d._character
