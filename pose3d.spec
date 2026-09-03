@@ -26,6 +26,11 @@ datas = [
     # these are missing the app silently falls back to a stick figure
     ("pose3d/assets/character.blend", "pose3d/assets"),
     ("pose3d/assets/character.npz", "pose3d/assets"),
+    # the bundle's own inventory. pose3d/integrity.py reads it from
+    # _internal/ before QApplication exists and tells the client which file
+    # their extracted copy is missing; without it that check finds no manifest
+    # and silently checks nothing.
+    ("packaging/windows/manifest.json", "packaging/windows"),
 ]
 
 # The ONNX weights are NOT here. They ship beside the executable, in models\,

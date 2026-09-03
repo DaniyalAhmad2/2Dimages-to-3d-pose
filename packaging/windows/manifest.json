@@ -1,0 +1,199 @@
+{
+  "_comment": [
+    "What an extracted Pose3D-Windows folder must contain. Read by",
+    "tools/check_bundle_layout.py (the build and release gates, hashing the",
+    "checkpoints) and by pose3d/integrity.py (the client's machine, at",
+    "startup, name and size only). JSON has no comments, so every rule's",
+    "reason lives in its `why` — which is also the text a failing build and a",
+    "failing launch print.",
+    "",
+    "`stage` says who can act on the rule:",
+    "  bootloader  loaded by Windows before any Python runs, so no check",
+    "              written in Python can report it; the build and Diagnose.cmd",
+    "              are the only places it can be caught.",
+    "  pre-qt      would kill the app, or a feature of it, after Python starts",
+    "              — checked at startup, before QApplication exists.",
+    "  later       informational; a bundle missing it still runs."
+  ],
+  "rules": [
+    {
+      "pattern": "Pose3D.exe",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the application itself; if this is missing the extraction did not finish"
+    },
+    {
+      "pattern": "Pose3D-diagnose.exe",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "later",
+      "why": "the console build that prints the self-test where the client can read it; the windowed exe can only write to pose3d-log.txt"
+    },
+    {
+      "pattern": "_internal/python312.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the interpreter itself; the client's first delivery failed with exactly this file named in a Windows dialog, from their extracted copy rather than the build"
+    },
+    {
+      "pattern": "_internal/vcruntime140.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the Visual C++ runtime is not part of Windows; without it python312.dll, Qt, onnxruntime and OpenCV all fail to load with 'the specified module could not be found'"
+    },
+    {
+      "pattern": "_internal/vcruntime140_1.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the C++ exception-handling half of the Visual C++ runtime; missing it fails the same way, on a machine that has never installed a Visual C++ application"
+    },
+    {
+      "pattern": "_internal/msvcp140.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the C++ standard library half of the Visual C++ runtime; onnxruntime and OpenCV link against it directly"
+    },
+    {
+      "pattern": "_internal/PySide6/plugins/platforms/qwindows.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "Qt's Windows platform plugin; without it the QApplication constructor aborts with 'could not load the Qt platform plugin windows' before this application runs a line, so no Qt dialog could ever report it"
+    },
+    {
+      "pattern": "_internal/PySide6/plugins/imageformats/qjpeg.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the JPEG reader Qt loads by plugin; without it every imported photo shows as an empty grey frame and nothing says why"
+    },
+    {
+      "pattern": "_internal/PySide6/plugins/imageformats/qico.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the .ico reader; without it the window and taskbar fall back to Qt's default icon"
+    },
+    {
+      "pattern": "_internal/PySide6/plugins/styles/*",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "Qt's native style plugin; the app pins Fusion, but a plugins/styles folder that arrived empty means the Qt plugin tree was only partly copied and the platform plugin is next"
+    },
+    {
+      "pattern": "_internal/PySide6/opengl32sw.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "Qt's software OpenGL renderer; it is what --software-gl and the 'Restart with software 3D' button switch to on a machine whose driver cannot give Qt a context"
+    },
+    {
+      "pattern": "_internal/onnxruntime*/**/*.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the inference runtime; without it detection raises inside a worker thread on the first project the client imports, long after the app looked healthy"
+    },
+    {
+      "pattern": "_internal/pose3d/assets/character.blend",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the rigged character that drives both the 3D view and the FBX/mp4 export; missing it, the app silently falls back to a stick figure"
+    },
+    {
+      "pattern": "_internal/pose3d/assets/character.npz",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the baked rest pose and skin weights that go with character.blend; the same silent stick-figure fallback"
+    },
+    {
+      "pattern": "_internal/pose3d/ui/dark.qss",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the stylesheet; without it the window opens in a half-dark palette that reads as a broken install"
+    },
+    {
+      "pattern": "_internal/pose3d/export/blender_job.py",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "Blender runs this file in a separate process, so PyInstaller cannot see it as an import; without it every export dies with 'no such file' at the end of a long job"
+    },
+    {
+      "pattern": "models/*.onnx",
+      "kind": "required",
+      "min_count": 3,
+      "min_size": 1000000,
+      "sha256_from_inputs": "weights.balanced",
+      "stage": "pre-qt",
+      "why": "the three pose checkpoints (person detector plus both pose models); a missing or truncated one makes detection either fail or reach the network on the client's machine"
+    },
+    {
+      "pattern": "blender/blender.exe",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "pre-qt",
+      "why": "the export engine that ships beside the app; without it FBX, BVH and mp4 export all fail at the point the user asks for the deliverable"
+    },
+    {
+      "pattern": "workspace/",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 0,
+      "stage": "later",
+      "why": "where projects and exports default to; the app creates it if it has to, but its absence means the folder was assembled by something other than the bundle script"
+    },
+    {
+      "pattern": "README.txt",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "later",
+      "why": "how to run an unsigned build past SmartScreen; without it the first thing the client meets is a warning with no answer beside it"
+    },
+    {
+      "pattern": "**/OpenGL/DLLS/*vc9*",
+      "kind": "forbidden",
+      "stage": "later",
+      "why": "PyOpenGL's vc9 freeglut/gle builds import msvcr90.dll, a runtime this bundle does not ship and Windows does not provide; PyOpenGL would never open them (it hardcodes vc14), so they are unloadable weight that makes the DLL audit unresolvable"
+    },
+    {
+      "pattern": "**/OpenGL/DLLS/*vc10*",
+      "kind": "forbidden",
+      "stage": "later",
+      "why": "the same, for msvcr100.dll; only the vc14 pair can ever be loaded"
+    },
+    {
+      "pattern": "blender/*/datafiles/locale",
+      "kind": "forbidden",
+      "stage": "later",
+      "why": "Blender's translations, hundreds of MB the app never asks for; the purge that removes them ran with -ErrorAction SilentlyContinue and so could fail without failing the build"
+    }
+  ]
+}
