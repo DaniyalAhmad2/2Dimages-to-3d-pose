@@ -238,8 +238,14 @@ def main(argv=None) -> int:
         # the take's OWN head convention, not the process default: measuring a
         # skull-HEAD project under the nose convention applies the ~45 deg nose
         # correction to a point that needs none, and the retarget number that
-        # comes back is of a pose the app never shows
-        character = Character(head_source=project.head_source)
+        # comes back is of a pose the app never shows.
+        #
+        # `head_mode` is DECLARED rather than read from the project: it is the
+        # shipped default, and these numbers are the Nose-mode ones. A take the
+        # user has put in Face mode wants "face" passed here — the chain is
+        # rigid either way, so only what ORIENTS it changes.
+        character = Character(head_source=project.head_source,
+                              head_mode="nose")
 
     q = take_quality(project, rig, character)
     print(markdown(q, project_dir.name))

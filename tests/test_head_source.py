@@ -675,6 +675,9 @@ def test_the_camera_views_are_told_both_head_conventions(qapp):
 
 _METRICS = "phase5_metrics.json"
 _GATES = "phase5_gates.json"
+#: The Phase 7 head-chain table (the rigid neck+head chain and its two modes),
+#: re-derived from the same fixture by the last test in this file.
+_HEAD_CHAIN = "phase7_head_chain.json"
 #: The one gate that was restated after measurement, and the only bar in the
 #: table that is not the one fixed in advance. The reasoning is
 #: `tools.measure_head_gates.RESTATED_GATE`, quoted into both evidence files;
@@ -710,20 +713,33 @@ def measure_gate_table_on_fixture() -> dict:
     scoring AND the measurement are the shipped ones and neither can drift
     from what the evidence was written with. All this adds is the take.
     """
+    from tools.measure_head_gates import measure_project
+
+    p, rig = _fixture_reconstructed()
+    return measure_project(
+        "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)", p, rig)
+
+
+def _fixture_reconstructed():
+    """The committed take, run through the shipped pipeline: (project, rig).
+
+    Every evidence table in this file starts here, so they all measure the
+    SAME reconstruction: the fixture's 2D and calibration, triangulated (face
+    points and cross-view gate included) and bone-fitted with the shipped
+    defaults — no smoothing, no images, no detector.
+    """
     from pathlib import Path as _P
 
     from pose3d import pipeline
     from pose3d import quality as Q
     from pose3d.core.io_project import load_project
-    from tools.measure_head_gates import measure_project
 
     fixture = _P(__file__).resolve().parent / "fixtures" / "client_take"
     p = load_project(fixture)
     rig = Q.load_rig(fixture / "calibration")
     pipeline.triangulate_project(p, rig)
     pipeline.fit_project(p)                  # shipped defaults: no smoothing
-    return measure_project(
-        "Halpe-26, skull HEAD, derived NECK/PELVIS (the fixture)", p, rig)
+    return p, rig
 
 
 def test_the_pre_registered_gate_table_is_still_what_it_was():
@@ -1008,3 +1024,106 @@ def test_the_neck_follows_a_shoulder_drag_under_the_shipped_layout():
             f"{derived.name} left "
             f"{np.linalg.norm(f.kp2d[CAM_LEFT][int(derived)] - want):.1f} px "
             f"from the midpoint it is defined to be")
+
+
+# --- the head chain: the gates the rigid neck+head chain ships under --------
+
+#: Two of the four head-chain rows are angles an `arccos` returns on matrices
+#: the rigid chain makes IDENTICAL, so what the file records for them is
+#: floating-point noise: `head_turn_error_deg` is 0.0 and
+#: `head_neck_relative_rotation` is 1.6e-4 deg on top of a matrix difference
+#: the same file records as exactly 0. Pinning those at `rel=2e-3` would pin
+#: the noise — one ulp in the dot product moves an arccos near 1.0 by about
+#: 1e-6 deg, and by O(1) RELATIVE — and the test would go red on another
+#: BLAS/CPU/numpy build with nothing wrong. They are held to an ABSOLUTE
+#: epsilon instead: three orders of magnitude under the 2 deg bar the turn
+#: gate ships with, and three orders over the noise. Nothing is lost, because
+#: the rigid-chain verdict comes from the exact matrix comparison at the
+#: bottom of the test, never from this angle.
+_NOISE_FLOOR_DEG = 1e-3
+_ANGLE_ROWS_AT_THE_NOISE_FLOOR = ("head_neck_relative_rotation",
+                                  "head_turn_error_deg")
+
+
+@needs_character()
+def test_the_head_chain_gates_still_read_the_same_on_the_committed_fixture():
+    """The Phase 7 head-chain table, re-derived on the fixture in a second.
+
+    `docs/audit-2026-09/phase7_head_chain.json` is the evidence for Decision 4
+    (the dimensions invariant) and for the rigid chain that restored it: the
+    skull may not shear, the head bone must carry the neck's own matrix, the
+    nose must actually turn the chain in Nose mode, and the head must aim
+    where the capture says even with the face points in play. Every one of
+    those is measured HERE, on the committed take, through
+    `measure_head_gates.measure_head_chain` and `head_chain_table` — the same
+    functions the file was written with — so a change that gives the shear or
+    the aim back fails on a machine with no images and no detector.
+
+    Both modes are measured because the chain is rigid in both: Face mode
+    follows the mannequin's bad ears (which is why Nose is the default) but it
+    may not deform the skull either.
+
+    The shear gate was NARROWED after the measurement — off the throat seam,
+    which Decision 4 excludes — so the file carries that restatement the way
+    `phase5_gates.json` carries its own, and this test holds the file, the
+    module and the re-measurement to one set of words and one set of numbers.
+    """
+    import tools.measure_head_gates as gates
+    from pose3d.geometry.character import HEAD_MODES
+
+    p, rig = _fixture_reconstructed()
+    m = {mode: gates.measure_head_chain(p, rig, mode) for mode in HEAD_MODES}
+    rows = gates.head_chain_table(m)
+
+    doc = _audit(_HEAD_CHAIN)
+    recorded = {g["key"]: g for g in doc["gates"]}
+    assert {r["key"] for r in rows} == set(recorded) == set(gates.HEAD_CHAIN_GATES)
+    for r in rows:
+        want = recorded[r["key"]]
+        assert r["rule"] == want["rule"] == gates.HEAD_CHAIN_GATES[r["key"]]
+        if r["key"] in _ANGLE_ROWS_AT_THE_NOISE_FLOOR:
+            assert r["measured"] == pytest.approx(want["measured"],
+                                                  abs=_NOISE_FLOOR_DEG), \
+                (f"{r['key']}: {r['measured']:.6f} vs recorded "
+                 f"{want['measured']:.6f} deg")
+        else:
+            assert r["measured"] == pytest.approx(want["measured"], rel=2e-3), \
+                (f"{r['key']}: {r['measured']:.4f} vs recorded "
+                 f"{want['measured']:.4f}")
+        assert r["pass"] is True and want["pass"] is True, r["key"]
+    assert doc["passed"] == doc["of"] == len(rows) == len(gates.HEAD_CHAIN_GATES)
+
+    # the one gate that was narrowed after the measurement says so, in the
+    # module's own words, and the file records what it reads under the rule as
+    # it was first written rather than leaving the reader to find out
+    restated = doc["restated_gate"]
+    for field, value in gates.HEAD_CHAIN_RESTATED_GATE.items():
+        assert restated[field] == value, field
+    key = restated["key"]
+    assert key in gates.HEAD_CHAIN_GATES
+    assert restated["rule"] == gates.HEAD_CHAIN_GATES[key] \
+        == recorded[key]["rule"], "the row does not ship under the rule it quotes"
+    assert restated["pre_registered_rule"] != restated["rule"]
+    assert restated["reason"].strip() and restated["cost_if_wrong"].strip()
+    assert restated["what_would_reopen_it"].strip()
+    assert restated["verdict_under_the_pre_registered_rule"] == "fail"
+
+    # ...and both modes are in the file, with the shear each was measured at
+    assert set(doc["modes"]) == set(HEAD_MODES)
+    for mode, rec in doc["modes"].items():
+        assert m[mode]["skull_shear"]["max_ratio"] == pytest.approx(
+            rec["skull_shear"]["max_ratio"], rel=2e-3)
+        assert m[mode]["head_vs_neck"]["max_abs_matrix_diff"] == 0.0, mode
+        # the edges the narrowed gate drops are measured, not forgotten: the
+        # throat seam is pinned here too — and against the restatement's own
+        # column — so a regression that stretches it turns this test red even
+        # though it is not a gate
+        wider = m[mode]["skull_shear"]["with_the_throat_blend"]["max_ratio"]
+        assert wider == pytest.approx(
+            rec["skull_shear"]["with_the_throat_blend"]["max_ratio"], rel=2e-3)
+        assert wider == pytest.approx(
+            restated["measured_under_the_pre_registered_rule"][mode], rel=2e-3)
+        assert wider > 1.05, (
+            f"{mode}: the throat seam no longer stretches — the narrowed gate "
+            "has nothing left to exclude, so restate it back to every skull "
+            "edge (docs/audit-2026-09/phase7_head_chain.json:restated_gate)")

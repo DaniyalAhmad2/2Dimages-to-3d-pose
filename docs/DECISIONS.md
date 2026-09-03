@@ -18,6 +18,7 @@ plus the rulings made during implementation. Measurements are on the client take
 | Temporal roll smoothing across frames | would suppress roll pops between poses | rejected for stop-motion: consecutive poses are genuinely different (the captured bend normal itself moves up to 55.7°); smoothing references would re-introduce the cross-pose blending the EMA removal fixed |
 | Progress dialog for recompute-on-open | a long legacy take recomputes synchronously before the window shows | UI work; the recompute is one-time per project |
 | Wiring `intrinsics.checkerboard_override` to a UI or CLI | distortion and a non-central principal point — the only two intrinsics the scene tags can never recover (k1 = 0.03 moves a tag corner 10.9 px but the subject 0.27 px; a principal point 200 px off centre costs 19 px of epipolar error) | nothing invokes it, deliberately: the function and its `Intrinsics.source` gate are implemented and tested, and client question 5's default answer is "an unused override". A capture screen is the work; until a client shoots a board we would run the calibration for them from the photographs (CLIENT_GUIDE §5). This row exists so the next reader can tell it from an oversight. |
+| Re-weight `character.blend` so the skull is 100 % head bone | removes the last ~4 % of skull stretch (the throat seam, 1.05x in Nose mode and 1.16x in Face mode on the client take) and unblocks an articulated neck — a head that can nod independently of the neck | the client asking for an independently nodding head. The work is a re-weight in Blender (313 of the 991 head-weighted skull edges have an end sharing weight with the CHEST), then a re-bake with `tools/bake_character.py` and a re-baselined `test_bake_reproduces_the_shipped_asset`. Until then the chain is rigid, which is what keeps the skull's dimensions fixed (`docs/audit-2026-09/phase7_head_chain.json`). |
 | Consolidate `calib.rigio.load_rig` with `app.load_rig_with_reason` | one loader | small refactor; both exist because the headless callers must not import PySide6. The VALIDATION is now shared (`calib.rigio.check_extrinsics`), so the two loaders can no longer disagree about which files are usable; what is left is the reason-reporting. |
 
 ## Do not re-open (bounded by the audit)
@@ -51,6 +52,19 @@ never sees a tag (F42).
 - The Halpe-26 skull HEAD is switched on although one pre-set gate (neck-shoulder bone CV ≤ 5.15 %) reads
   5.98 %: that bar was set from an unmeasured assumption, the increase is ~0.13 mm on a 16 mm bone, and
   the head error falls from 12.7 % to 1.5 % of height. Restated gate: ≤ 6.5 %.
+- The neck and the head are ONE RIGID CHAIN, and the face keypoints may orient it but never deform it.
+  The head bone has no target of its own: it rides the neck's matrix. Two orientation modes, per project,
+  chosen in the app, default **Nose**: the chain aims at the canonical HEAD and the NOSE alone rolls it
+  about that aim (the nose is the one face point rigid enough to trust on a mannequin — nose-to-HEAD
+  varies 5.2 % over the client take against ear-to-ear's 14.4 %); **Face** takes the whole nose+ears
+  basis for humans, whose ears are real features. Measured on the client take: skull shear 1.428x → 1.000x
+  on the edges the chain owns outright — the shear gate's scope was restated to those edges after the
+  measurement, because over ALL head-weighted edges the take reads 1.05x (Nose) / 1.16x (Face), all of it
+  on the throat seam that Decision 4 puts out of scope and that the deferred re-weight above would
+  remove — head-vs-neck relative rotation 14.6–88.2° → the rest offset exactly, head
+  aim with the face points in play 3.78° → 1.28° median (22.95° → 3.82° max). Cost: the head cannot nod
+  independently of the neck, and on a mannequin whose ears are wrong Face mode still follows them —
+  which is why Nose is the default. Evidence and gates: `docs/audit-2026-09/phase7_head_chain.json`.
 - The Windows `python312.dll` failure is not a missing runtime in the build (build-12 ships the VC runtime);
   it is a file missing from the client's extracted copy. The build now audits every DLL import; the README
   tells the client to extract to a short local path and check antivirus quarantine.
