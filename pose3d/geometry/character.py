@@ -9,6 +9,25 @@ recovering a limb from its end effector when the elbow or knee is missing.
 One uniform scale, fitted once per take, sizes the whole character to the
 subject. Being uniform it changes size, never shape.
 
+THE NECK AND THE HEAD ARE ONE RIGID CHAIN. The head bone has no target of its
+own: it inherits the neck's matrix, always. Keypoints may ORIENT that chain,
+never deform it. Driving the two bones from two different estimates — the neck
+aimed at the ear midpoint, the head given a full nose+ears basis — is what
+stretched the skull 1.43x on the client take, because the rig's automatic
+weights blend head and neck across 240 of the 396 head-weighted vertices, so
+any relative rotation of the two bones shears the blend region.
+
+`head_mode` says what orients the chain (see `HEAD_MODES`):
+
+  "nose"  the default, and mannequin-safe: the chain aims at the canonical
+          HEAD (`_HEAD_AIM`) and its ROLL about that aim follows the nose
+          alone (`_FACE_REF`, `_nose_roll_target`). Eyes and ears cannot
+          reach the pose at all. With no usable nose this is bit for bit the
+          no-face-keypoints path.
+  "face"  for real humans, whose ears and nose are real features: the whole
+          chain takes the measured nose+ears basis (`_head_basis`), falling
+          back to "nose" for any frame that basis is unavailable on.
+
 Rig bone names are reached through ROLES (see `_ROLE_ALIASES`), so swapping in a
 differently-named rig is a data change rather than a code change.
 
@@ -49,8 +68,14 @@ class PoseUnavailable(Exception):
     """
 
 
-_MID = "MID"        # midpoint(pelvis, neck) — the torso split point
-_EAR_MID = "EAR_MID"  # midpoint of the ears — a real point on the skull axis
+_MID = "MID"          # midpoint(pelvis, neck) — the torso split point
+_HEAD_AIM = "HEAD_AIM"  # the canonical HEAD, bias-corrected — see
+#                         `_head_aim_target`. The neck aims here in BOTH head
+#                         modes and whether or not the frame has a face: the
+#                         ear midpoint it used to aim at was the least rigid
+#                         point on the take (nose-to-ear-midpoint distance
+#                         varied 33 % on a rigid mannequin, against 0.1 % for
+#                         NECK-HEAD).
 
 # LEGACY fallback only — used when a frame has no face keypoints (projects
 # saved before they existed, or the manual detector) AND the canonical HEAD is
@@ -117,6 +142,52 @@ def head_source_default(source: str | None):
         set_default_head_source(previous)
 
 
+# What ORIENTS the neck+head chain. "nose" is the default because it is the
+# only one that is safe on a mannequin: it never reads an ear. See the module
+# docstring for what each mode does.
+#
+# Deliberately the same shape as `head_source` above — a process-wide default,
+# a getter and a context manager — because it is needed for the same reason:
+# `pose3d.ui.view3d` and `export.blender_export` build their own `Character`
+# and never see a `ProjectData`, so the open project's choice has to reach
+# them through the process. Anything that DOES construct the `Character`
+# passes `head_mode=` instead; explicit beats ambient.
+HEAD_MODES = ("nose", "face")
+_DEFAULT_HEAD_MODE = "nose"
+
+
+def set_default_head_mode(mode: str | None) -> None:
+    """Set the head mode a `Character()` built with no argument uses."""
+    global _DEFAULT_HEAD_MODE
+    mode = mode or "nose"
+    if mode not in HEAD_MODES:
+        raise ValueError(f"head_mode must be one of {HEAD_MODES}, "
+                         f"not {mode!r}")
+    _DEFAULT_HEAD_MODE = mode
+
+
+def default_head_mode() -> str:
+    """The head mode a `Character()` built with no argument uses."""
+    return _DEFAULT_HEAD_MODE
+
+
+@contextlib.contextmanager
+def head_mode_default(mode: str | None):
+    """Make `Character()` build with `mode` for the duration of the block.
+
+    The `head_source_default` contract, verbatim, for the other head policy:
+    restores the previous value even when the block raises, so a tool cannot
+    leave a "face" default behind for whatever runs next in the process — on a
+    mannequin that would silently orient the head from ears that are noise.
+    """
+    previous = _DEFAULT_HEAD_MODE
+    set_default_head_mode(mode)
+    try:
+        yield
+    finally:
+        set_default_head_mode(previous)
+
+
 # Pipeline role -> candidate bone names, tried in order. Covers the legacy
 # Blender meta-rig (what we ship), Rigify, and Mixamo/UE naming so a replacement
 # rig usually needs no configuration at all. A rig can also carry an explicit
@@ -149,10 +220,10 @@ _ROLE_ALIASES = {
 _DIRECT = {
     "spine": (Joint.PELVIS, _MID),
     "chest": (_MID, Joint.NECK),
-    # aimed at the EAR MIDPOINT, which sits on the skull axis — so unlike the
-    # nose it needs no anatomical fudge factor. The head bone on top of it gets
-    # a full rotation from the face keypoints (see _head_basis).
-    "neck": (Joint.NECK, _EAR_MID),
+    # the neck aims the whole neck+head chain (the head bone has no entry
+    # here, so it inherits this matrix); what orients it ABOUT that aim is
+    # `head_mode`
+    "neck": (Joint.NECK, _HEAD_AIM),
     # the clavicles carry the arms; drive them or the arm roots miss the
     # shoulders and a noisy shoulder swings the whole arm
     "clavicle.L": (Joint.NECK, Joint.LEFT_SHOULDER),
@@ -220,11 +291,34 @@ _BEND_REF = {
 # makes the character's hips face where the subject's do instead of inheriting
 # whatever spin the torso aim left behind.
 #
-# `neck`/`head` get no reference (the face basis already gives the head a full
-# measured orientation, and a roll would double-drive it); `clavicle.*`,
-# `hand.*` and `foot.*` get none either — they have no keypoints of their own,
-# so once the parent's roll is right theirs is inherited right.
+# `neck`/`head` are not here: the neck's roll is the FACE, which is a
+# different measurement (see `_FACE_REF` below), and the head bone rides the
+# neck. `clavicle.*`, `hand.*` and `foot.*` get no reference either — they
+# have no keypoints of their own, so once the parent's roll is right theirs is
+# inherited right.
 _LINE_REF = {"hips": _HIP_LINE, "spine": _HIP_LINE, "chest": _SHOULDER_LINE}
+
+# role -> the torso line its REST face direction is measured against. The
+# neck's rest reference is cross(neck rest axis, rest shoulder line), taken
+# perpendicular to the axis: the direction the rig's face points at rest,
+# `(0, -0.996, -0.085)` on the bundled rig — 0.996 with the way its toes
+# point, which is what pins the SIGN (see
+# tests/test_retarget.py::test_the_rest_face_reference_points_at_the_face).
+#
+# In Nose mode `_nose_roll_target` supplies the captured counterpart and the
+# ordinary roll machinery spins the neck about its aim until the two meet. The
+# nose is the ONE face point rigid enough to trust on a mannequin: over the
+# client take nose-to-HEAD varies 5.2 % against ear-to-ear's 14.4 %.
+_FACE_REF = {"neck": _SHOULDER_LINE}
+
+# How far off the aim the nose has to sit before its direction is a
+# measurement rather than noise: |perpendicular component| / |aim length|. A
+# nose ON the aim says nothing about the spin about it, and normalising a
+# millimetre of perpendicular would hand the neck a random roll. The client
+# take's minimum is 0.32 and its median 0.40, so 0.12 rejects nothing real; a
+# COCO-17 nose (which is BOTH the aim and the roll reference) falls below it
+# only within 6.9 deg of the torso line.
+_NOSE_ROLL_MIN_LEVER = 0.12
 
 # Straight-limb fallback. Near full extension the bend plane is undefined, so
 # the roll fades out CONTINUOUSLY instead of switching off at a threshold: the
@@ -413,13 +507,22 @@ class Character:
     rig, and whether the legacy no-face-keypoints neck aim applies the nose's
     anatomical offset. Defaults to the process-wide `default_head_source()`,
     which is "nose" unless the application has said otherwise.
+
+    `head_mode` says what ORIENTS the rigid neck+head chain (see `HEAD_MODES`
+    and the module docstring) — "nose" (the default, mannequin-safe) or
+    "face". Defaults to the process-wide `default_head_mode()`.
     """
 
-    def __init__(self, path=_ASSET, head_source: str | None = None):
+    def __init__(self, path=_ASSET, head_source: str | None = None,
+                 head_mode: str | None = None):
         self.head_source = head_source or default_head_source()
         if self.head_source not in HEAD_SOURCES:
             raise ValueError(f"head_source must be one of {HEAD_SOURCES}, "
                              f"not {self.head_source!r}")
+        self.head_mode = head_mode or default_head_mode()
+        if self.head_mode not in HEAD_MODES:
+            raise ValueError(f"head_mode must be one of {HEAD_MODES}, "
+                             f"not {self.head_mode!r}")
         d = np.load(path, allow_pickle=True)
         self.verts0 = d["verts"].astype(float)          # (V,3) rest, world
         self.faces = d["faces"].astype(np.int32)
@@ -600,6 +703,23 @@ class Character:
             d = _unit(rj[int(jr)] - rj[int(jl)])
             if d is not None:
                 out[b] = d
+        # The rest FACE direction: cross(neck rest axis, rest shoulder line),
+        # which is automatically perpendicular to the axis already. This is
+        # the reference `_nose_roll_target`'s captured direction is measured
+        # against — see `_FACE_REF` and
+        # tests/test_retarget.py::test_the_rest_face_reference_points_at_the_face
+        # for what pins its sign.
+        for role, (jl, jr) in _FACE_REF.items():
+            b = self.role.get(role)
+            if b is None:
+                continue
+            axis = _unit(self.tail[b] - self.head[b])
+            line = _unit(rj[int(jr)] - rj[int(jl)])
+            if axis is None or line is None:
+                continue
+            d = _unit(np.cross(axis, line))
+            if d is not None:
+                out[b] = d
         return out
 
     def _rest_ankle_sole_drop(self, rj):
@@ -695,7 +815,8 @@ class Character:
 
     # --- posing ------------------------------------------------------------
     def _head_aim_target(self, J, pelvis):
-        """Neck target when a frame has no face keypoints.
+        """Neck target, in BOTH head modes and whether or not a frame has
+        face keypoints — the chain is rigid, so there is exactly one aim.
 
         With a SKULL head_source the captured HEAD is already on the head's
         axis, so it IS the target: the neck aims straight at it, with no
@@ -733,6 +854,80 @@ class Character:
             return n + dn * t_hat          # collinear: corrected angle is 0
         dir_c = np.cos(want) * t_hat + np.sin(want) * (perp / pn)
         return n + dn * dir_c
+
+    def _aim_is_collinear(self, J, pelvis):
+        """True when `_head_aim_target` took its exactly-collinear branch.
+
+        That branch (`pn < 1e-9`, NOSE head_source only) fires when the
+        captured HEAD sits ON the torso line, where the plane the nod happens
+        in — and so the spin about the aim — is undefined. `_nose_roll_target`
+        reads it as lever 0. The same `pn < 1e-9` test as the branch itself.
+        """
+        h, n = J(Joint.HEAD), J(Joint.NECK)
+        if h is None or n is None or pelvis is None:
+            return False
+        d, t = h - n, n - np.asarray(pelvis, float)
+        dn, tn = float(np.linalg.norm(d)), float(np.linalg.norm(t))
+        if dn < 1e-9 or tn < 1e-9:
+            return False
+        d, t = d / dn, t / tn
+        return bool(np.linalg.norm(d - float(np.dot(d, t)) * t) < 1e-9)
+
+    def _nose_roll_target(self, J, pelvis, head_pts, Rz) -> tuple[np.ndarray, float] | None:
+        """Captured roll reference for the neck in Nose mode, or None.
+
+        The nose is the one face point trusted to spin the chain about its
+        aim (`_head_aim_target`): `d = nose - NECK`, measured against the aim
+        direction `a`. The component of `d` perpendicular to `a`, as a
+        fraction of the aim's own length, is the nose's LEVER about that aim
+        — below `_NOSE_ROLL_MIN_LEVER` a nose that sits (almost) ON the aim is
+        read as noise, not a turn, and the frame takes the no-face path.
+
+        None (weight 0, so the caller leaves the minimal rotation alone) when
+        rolling is switched off (`_ROLL_WEIGHT <= 0`), there are no face
+        points, the nose is missing or non-finite (a NaN nose — Task 2's
+        cross-view gate rejecting it — is the same as no nose), NECK is
+        missing, `_head_aim_target` has nothing to aim at, its exactly-
+        collinear branch fired (`_aim_is_collinear` — that branch has no nod
+        plane, so it counts as lever 0), or the lever is under the gate.
+
+        The collinear check is belt and braces where the nose IS the captured
+        HEAD (every COCO-17 project, the only shape a NOSE head_source has in
+        the app): there the same `d` and the same torso-line reference make
+        the lever below reduce to exactly that branch's own `pn`. It is what
+        states the rule when the two points are ever decoupled.
+
+        Directions only, so only `Rz`'s yaw alignment applies — no scale, no
+        translation.
+        """
+        if _ROLL_WEIGHT <= 0.0 or head_pts is None:
+            return None
+        hp = np.asarray(head_pts, float).reshape(-1, 3)
+        if len(hp) < NUM_HEAD_KP:
+            return None
+        nose = hp[0]
+        if not np.isfinite(nose).all():
+            return None
+        neck = J(Joint.NECK)
+        if neck is None:
+            return None
+        target = self._head_aim_target(J, pelvis)
+        if target is None:
+            return None
+        if self.head_source != "skull" and self._aim_is_collinear(J, pelvis):
+            return None
+        a = target - neck
+        n_a = float(np.linalg.norm(a))
+        if n_a < 1e-9:
+            return None
+        a = a / n_a
+        d = nose - neck
+        perp = d - float(np.dot(d, a)) * a
+        lever = float(np.linalg.norm(perp)) / n_a
+        if lever < _NOSE_ROLL_MIN_LEVER:
+            return None
+        r = _unit(Rz @ d)
+        return None if r is None else (r, _ROLL_WEIGHT)
 
     def _head_basis(self, head_rig):
         """3x3 orientation of the head from the face keypoints, or None.
@@ -972,8 +1167,13 @@ class Character:
         translation — no bone is ever scaled.
 
         `head_pts` is the optional (NUM_HEAD_KP, 3) face keypoints in the same
-        space as `up_pose`; given them the head bone gets a real orientation
-        instead of riding the neck.
+        space as `up_pose`. THE NECK AND THE HEAD ARE ONE RIGID CHAIN — the
+        head bone never gets a target of its own, it always rides the neck's
+        matrix. What `head_pts` (and `self.head_mode`) can do is ORIENT that
+        chain: in Nose mode the nose alone spins it about its aim; in Face
+        mode, when a lateral pair is present, the whole chain takes the
+        measured nose+ears basis instead (falling back to Nose mode, frame by
+        frame, when it isn't).
 
         RIG SPACE means two things are removed here and put back by whoever
         needs them: `to_rig` centres on THIS frame's pelvis (so the subject's
@@ -1017,19 +1217,33 @@ class Character:
         def to_rig(p):
             return self.hips_world + (Rz @ (p - origin)) * scale
 
-        # Face keypoints, once: the ear midpoint aims the neck (it is on the
-        # skull axis, so no anatomical offset is needed) and the full basis
-        # orients the head bone.
-        head_rig = ear_mid = None
-        if head_pts is not None:
+        # Nose mode: the nose's direction off the aim, if it has enough lever
+        # to mean anything, becomes the neck's captured roll reference —
+        # exactly like every other bend-plane roll in `roll`. Computed
+        # unconditionally (cheap, and used only if the neck falls through to
+        # the ordinary aim+roll path below, which is every frame except a
+        # Face-mode one with a usable ear/eye pair).
+        neck_bone = self.role.get("neck")
+        if neck_bone is not None:
+            t = self._nose_roll_target(J, pelvis, head_pts, Rz)
+            if t is not None:
+                roll[neck_bone] = t
+
+        # Face mode: the face keypoints, once, in rig space — for the whole
+        # nose+ears(+eyes) basis that orients the chain when a lateral pair
+        # is present.
+        head_rig = None
+        if self.head_mode == "face" and head_pts is not None:
             hp = np.asarray(head_pts, float).reshape(-1, 3)
             if len(hp) >= NUM_HEAD_KP:
                 head_rig = np.array([to_rig(q) if not np.isnan(q).any()
                                      else q for q in hp])
-                for a, b in ((3, 4), (1, 2)):          # ears, then eyes
-                    if not (np.isnan(hp[a]).any() or np.isnan(hp[b]).any()):
-                        ear_mid = (hp[a] + hp[b]) / 2.0
-                        break
+
+        R_face = None
+        if head_rig is not None and self._rest_head is not None:
+            target = self._head_basis(head_rig)
+            if target is not None:
+                R_face = target @ self._rest_head.T
 
         def resolve(spec):
             if spec == _MID:
@@ -1038,11 +1252,9 @@ class Character:
                 # whenever the pelvis itself was missing
                 a = J(Joint.NECK)
                 return None if a is None else to_rig((a + pelvis) / 2.0)
-            if spec == _EAR_MID:
-                if ear_mid is not None:
-                    return to_rig(ear_mid)
-                # no face keypoints this frame: legacy bias-corrected aim at
-                # the canonical HEAD, so the neck still follows a nose drag
+            if spec == _HEAD_AIM:
+                # the neck's aim in BOTH modes and whether or not the frame
+                # has a face: what orients the chain ABOUT this is head_mode
                 p = self._head_aim_target(J, pelvis)
                 return None if p is None else to_rig(p)
             p = J(spec)
@@ -1070,23 +1282,22 @@ class Character:
         skin[self.hips_idx][:3, :3] = R_hips
         skin[self.hips_idx][:3, 3] = hips_pos - R_hips @ hips_head
 
-        # The head is the one bone whose ORIENTATION we can measure rather than
-        # infer from an aim: two ears give the lateral axis a single nose point
-        # cannot. Without face keypoints it falls through and rides the neck,
-        # exactly as before.
-        head_bone = self.role.get("head")
-        head_R = None
-        if head_rig is not None and self._rest_head is not None:
-            target = self._head_basis(head_rig)
-            if target is not None:
-                head_R = target @ self._rest_head.T
-
         solved: dict[int, np.ndarray] = {}     # bone -> target from an IK solve
         for b in self.order:
             if b == self.hips_idx:
                 continue
             p = int(self._eparent[b])
             base = skin[p] if p >= 0 else np.eye(4)
+
+            if b == neck_bone and R_face is not None:
+                # Face mode, this frame: the chain takes the measured basis
+                # whole, in place of the ordinary aim+roll (head pinned to
+                # the chest's tail exactly as `_bone_fk` pins it — only the
+                # rotation source differs). The head bone below has no
+                # `_direct` entry, so it rides THIS matrix unchanged, exactly
+                # as it rides the neck's aimed matrix in Nose mode.
+                skin[b] = self._bone_rot(b, base, R_face)
+                continue
 
             end = solved.pop(b, None)
             if end is None and b in self._ik:
@@ -1111,9 +1322,7 @@ class Character:
                 # so every joint DIRECTION follows the capture
                 end = resolve(self._direct[b][1])
 
-            if b == head_bone and head_R is not None:
-                skin[b] = self._bone_rot(b, base, head_R)
-            elif end is None:
+            if end is None:
                 skin[b] = base
             else:
                 tgt, w = roll.get(b, (None, 0.0))

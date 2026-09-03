@@ -131,6 +131,63 @@ def test_a_tool_cannot_leak_a_head_convention_into_the_process():
     assert ch.default_head_source() == "nose"
 
 
+def test_the_head_mode_default_does_not_leak():
+    """`head_mode` is the same kind of process-wide default as `head_source`,
+    and it leaks the same way if nothing puts it back.
+
+    It decides whether the neck's roll follows the NOSE alone or the whole
+    chain takes the ear-driven face basis, so a stray "face" left behind by
+    one tool silently re-poses the next take — on a mannequin, from ears that
+    are noise. The trio must therefore behave exactly as `head_source`'s does:
+    restore the OUTER value on nesting, restore it when the block raises,
+    reject a typo, and reach a bare `Character()` (what the 3D view and the
+    Blender export build, never having seen a `ProjectData`). Restored here by
+    hand rather than by the autouse fixture above, so this test states the
+    guarantee instead of relying on it.
+    """
+    from pose3d.geometry import character as ch
+
+    assert ch.HEAD_MODES == ("nose", "face")
+    previous = ch.default_head_mode()
+    try:
+        assert previous == "nose"                  # the shipped default
+        with ch.head_mode_default("face"):
+            assert ch.default_head_mode() == "face"
+            assert ch.Character().head_mode == "face"    # a bare build
+        assert ch.default_head_mode() == "nose"
+        assert ch.Character().head_mode == "nose"
+        # explicit still beats ambient
+        with ch.head_mode_default("face"):
+            assert ch.Character(head_mode="nose").head_mode == "nose"
+
+        # nesting composes, and the inner block restores the OUTER value
+        with ch.head_mode_default("face"):
+            with ch.head_mode_default("nose"):
+                assert ch.default_head_mode() == "nose"
+            assert ch.default_head_mode() == "face"
+        assert ch.default_head_mode() == "nose"
+
+        # an exception inside the block is not an excuse to keep it
+        with pytest.raises(RuntimeError):
+            with ch.head_mode_default("face"):
+                raise RuntimeError("the export died")
+        assert ch.default_head_mode() == "nose"
+
+        with pytest.raises(ValueError):            # a typo must not pass
+            with ch.head_mode_default("ears"):
+                pass
+        assert ch.default_head_mode() == "nose"
+        with pytest.raises(ValueError):
+            ch.Character(head_mode="ears")
+
+        ch.set_default_head_mode("face")
+        assert ch.default_head_mode() == "face"
+        ch.set_default_head_mode(None)             # None -> the safe default
+        assert ch.default_head_mode() == "nose"
+    finally:
+        ch.set_default_head_mode(previous)
+
+
 def test_the_detector_default_is_the_one_switch():
     """Which pose model the app runs is `RTMPoseDetector`'s own default, so
     the import wizard and the re-detect action cannot drift apart from it (or
