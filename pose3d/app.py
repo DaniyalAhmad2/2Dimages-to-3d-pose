@@ -283,6 +283,13 @@ def main():
         from pose3d.selftest import main as selftest
         sys.exit(selftest([a for a in sys.argv[1:] if a != "--selftest"]))
 
+    # Before _pre_qt_checks, like --selftest and for a sharper reason: a
+    # bundle with files missing is exactly when the client is asked to run
+    # this, and that check ends the process with a dialog.
+    if "--diagnose" in sys.argv[1:]:
+        from pose3d.diagnostics import main as diagnose
+        sys.exit(diagnose())
+
     _pre_qt_checks()
 
     folder = next((a for a in sys.argv[1:] if not a.startswith("-")), None)

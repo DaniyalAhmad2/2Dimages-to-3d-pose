@@ -11,6 +11,7 @@
           models\*.onnx              pose weights, so nothing downloads
           workspace\                 projects and exports default here
           README.txt                 how to run it, incl. SmartScreen
+          Diagnose.cmd               self-test + log, for a support email
 
     Blender and the weights sit BESIDE the exe rather than inside it because
     pose3d.runtime.app_dir() resolves them relative to the executable, and
@@ -169,6 +170,11 @@ try {
     # --- workspace + readme ----------------------------------------------
     New-Item -ItemType Directory -Force -Path (Join-Path $Out "workspace") | Out-Null
     Copy-Item -Force "packaging/windows/README.txt" (Join-Path $Out "README.txt")
+    # The fallback for a diagnose exe that will not run: a double-clickable
+    # script that runs the self-test and shows the log. It costs 1 KB and it
+    # is the only route to a diagnosis that needs neither the GUI nor the
+    # second executable.
+    Copy-Item -Force "packaging/windows/Diagnose.cmd" (Join-Path $Out "Diagnose.cmd")
 
     $mb = [math]::Round(
         ((Get-ChildItem $Out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 0)
