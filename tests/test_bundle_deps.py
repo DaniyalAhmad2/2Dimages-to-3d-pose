@@ -174,6 +174,10 @@ def _eval_spec(hook_datas=()):
     Windows the DLLs arrive in `binaries` instead. The stub reclassifies too,
     or the spec's filter would be tested against a list layout no real Windows
     build produces.
+
+    Returns the Analysis stub, with two extras hung off it: `executables`, the
+    keyword arguments of every EXE() the spec built, in order, and `collected`,
+    what COLLECT() was handed.
     """
     import types
 
@@ -191,11 +195,24 @@ def _eval_spec(hook_datas=()):
     def stub(*args, **kw):
         return types.SimpleNamespace()
 
+    executables, collected = [], []
+
+    def exe(*args, **kw):
+        executables.append(kw)
+        return types.SimpleNamespace(**kw)
+
+    def collect(*args, **kw):
+        collected.extend(args)
+        return types.SimpleNamespace()
+
     ns = {"__name__": "pose3d_spec", "Analysis": analysis,
-          "PYZ": stub, "EXE": stub, "COLLECT": stub}
+          "PYZ": stub, "EXE": exe, "COLLECT": collect}
     spec = ROOT / "pose3d.spec"
     exec(compile(spec.read_text(), str(spec), "exec"), ns)
-    return ns["a"]
+    a = ns["a"]
+    a.executables = executables
+    a.collected = collected
+    return a
 
 
 def _as_windows(monkeypatch, interpreter_dir):
@@ -324,3 +341,48 @@ def test_the_windows_build_drops_the_pyopengl_dlls_that_can_never_load(
     # and the reclassification really did happen, so the assertion above is
     # not passing for the wrong reason
     assert not [entry for entry in a.datas if "DLLS" in entry[0]]
+
+
+# --- the console build that lets the client read a self-test ---------------
+
+@pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
+                    reason="PyInstaller is a dev dependency")
+def test_a_console_build_ships_beside_the_windowed_one():
+    """Pose3D.exe is windowed, so it has no console: `Pose3D.exe --selftest`
+    writes its report into pose3d-log.txt and the client, who was asked to run
+    it precisely because something is wrong, sees nothing happen at all.
+
+    The second executable is the same application — same Analysis, same
+    scripts — built with console=True, so the same report prints where they
+    can read it and copy it."""
+    exes = _eval_spec().executables
+    assert [e["name"] for e in exes] == ["pose3d", "pose3d-diagnose"]
+    assert [e["console"] for e in exes] == [False, True]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
+                    reason="PyInstaller is a dev dependency")
+def test_the_windows_build_names_the_console_exe_the_manifest_expects(
+        monkeypatch, tmp_path):
+    """packaging/windows/manifest.json requires Pose3D-diagnose.exe, and
+    pose3d.selftest spawns it by that name for the software-OpenGL retry."""
+    _as_windows(monkeypatch, tmp_path)
+    for name in VC_RUNTIME:
+        (tmp_path / name).write_bytes(b"")
+    exes = _eval_spec().executables
+    assert [e["name"] for e in exes] == ["Pose3D", "Pose3D-diagnose"]
+    assert [e["console"] for e in exes] == [False, True]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
+                    reason="PyInstaller is a dev dependency")
+def test_both_executables_share_one_internal_folder():
+    """One COLLECT, so the second exe is a bootloader and a pure-Python
+    archive — 12 MB in a 516 MB dist — rather than another copy of Qt,
+    onnxruntime and the character rig, and so the two can never disagree about
+    what they are running."""
+    a = _eval_spec()
+    assert [getattr(x, "name", None) for x in a.collected][:2] == [
+        "pose3d", "pose3d-diagnose"]
+    assert all(e["exclude_binaries"] for e in a.executables), \
+        "onedir: the binaries live in _internal, not inside either exe"
