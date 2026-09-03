@@ -15,7 +15,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import cv2
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDoubleSpinBox, QFormLayout, QGroupBox,
     QHBoxLayout, QLabel, QLineEdit, QMessageBox, QPushButton,
@@ -28,7 +27,9 @@ from pose3d.calib.resolve import (
 )
 from pose3d.core.importer import build_project, match_frames
 from pose3d.core.io_project import save_project
-from pose3d.ui import filedialog
+from pose3d.core.names import safe_name
+from pose3d.imageio import read_image
+from pose3d.ui import filedialog, guard
 from pose3d.ui.worker import run_job
 
 
@@ -157,15 +158,19 @@ class ImportDialog(QDialog):
         """
         left, right = self.left_pick.paths, self.right_pick.paths
         if not left or not right:
-            QMessageBox.warning(self, "Missing images",
-                                "Please choose both left and right images.")
+            guard.report_error(self, "Missing images",
+                               "Please choose both left and right images.")
             return
         out_root = Path(self.out_pick.first() or self._projects_root)
-        folder = out_root / self.name.text().strip().replace(" ", "_")
+        # `safe_name`, not `replace(" ", "_")`: a colon or a question mark in
+        # the typed name is a folder Windows refuses to create, and the
+        # refusal arrived after the whole dialog had been filled in.
+        folder = out_root / safe_name(self.name.text())
         try:
             folder.mkdir(parents=True, exist_ok=True)
         except OSError as e:
-            QMessageBox.critical(self, "Cannot create folder", str(e)); return
+            guard.report_error(self, "Cannot create folder", str(e))
+            return
 
         try:
             # No Cancel on the phases that cannot honour one: a button that
@@ -180,7 +185,8 @@ class ImportDialog(QDialog):
             if isinstance(project, Exception):
                 return                    # cancelled, or already reported
             if not project.frames:
-                QMessageBox.warning(self, "No pairs", "No image pairs matched.")
+                guard.report_error(self, "No pairs",
+                                   "No image pairs matched.")
                 return
 
             # calibration inputs
@@ -193,7 +199,7 @@ class ImportDialog(QDialog):
             cal = run_job(
                 self, "Resolving calibration", lambda report, cancelled:
                 resolve_calibration(
-                    project, lambda p: cv2.imread(str(p)),
+                    project, read_image,
                     marker_length=self.marker.value(),
                     intr_left=il, intr_right=ir, ext_left=el, ext_right=er),
                 cancellable=False)
@@ -226,8 +232,7 @@ class ImportDialog(QDialog):
 
             def detect(report, cancelled):
                 det = self._ensure_detector()      # loading the model is slow
-                return detect_project(project, det,
-                                      lambda p: cv2.imread(str(p)),
+                return detect_project(project, det, read_image,
                                       on_progress=report, cancelled=cancelled)
 
             # ... and this one IS cancellable: it is the long phase, and
@@ -276,7 +281,10 @@ class ImportDialog(QDialog):
             QMessageBox.information(self, "Done", msg)
             self.accept()
         except Exception as e:                       # surface any failure cleanly
-            QMessageBox.critical(self, "Import failed", str(e))
+            import traceback
+            traceback.print_exc()          # into the log the user is asked for
+            guard.report_error(self, "Import failed",
+                               f"{type(e).__name__}: {e}")
 
     def _ensure_detector(self):
         if self._detector is None:

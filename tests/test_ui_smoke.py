@@ -251,7 +251,8 @@ def test_is_writable_holds_on_every_platform(tmp_path):
     assert list(tmp_path.iterdir()) == [], "the write probe left a file behind"
 
 
-def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatch):
+def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatch,
+                                                      recorded_errors):
     """Picking an unwritable folder must be refused up front.
 
     /host is shared read-only so source images can be browsed, and choosing it
@@ -274,10 +275,6 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
     data, rig, gt = _project_with_rig()
     win = MainWindow(ProjectModel(data, rig))
     monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(dest))
-    warned = {}
-    import PySide6.QtWidgets as W
-    monkeypatch.setattr(W.QMessageBox, "warning",
-                        lambda *a, **k: warned.setdefault("msg", a[2]))
     started = {"n": 0}
     # the real guard: nothing may reach the worker mechanism at all. (It used
     # to patch a `_start_export_worker` that has never existed, so the
@@ -287,7 +284,8 @@ def test_export_refuses_a_destination_it_cannot_write(qapp, tmp_path, monkeypatc
                         lambda *a, **k: started.__setitem__("n", 1))
 
     win._on_export()
-    assert "read-only" in warned.get("msg", "").lower(), warned
+    assert len(recorded_errors) == 1, recorded_errors
+    assert "read-only" in recorded_errors[0][1].lower(), recorded_errors
     assert started["n"] == 0, "export ran despite an unwritable destination"
 
 
@@ -847,6 +845,160 @@ def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
     src = inspect.getsource(import_dialog)
     assert "processEvents" not in src
     assert "run_job(" in src
+
+
+# --- the window uses the helpers written for Windows ------------------------
+#
+# `pose3d.imageio.read_image`, `pose3d.core.names.safe_name` and
+# `pose3d.ui.guard` were written on one branch and the call sites that need
+# them live on another. These are the seams where they meet.
+
+
+def _accented_image(tmp_path):
+    """A real JPEG under a folder name the machine's ANSI code page cannot
+    encode — the client's own `C:\\Users\\Müller`."""
+    import cv2
+
+    folder = tmp_path / "Müller"
+    folder.mkdir()
+    path = folder / "left_0001.jpg"
+    ok, buf = cv2.imencode(".jpg", np.full((4, 6, 3), 127, np.uint8))
+    assert ok
+    path.write_bytes(buf.tobytes())
+    return path
+
+
+def test_the_window_reads_images_through_a_path_windows_can_encode(
+        qapp, tmp_path):
+    """`cv2.imread` hands the path to OpenCV's C++ file layer, which encodes it
+    in the machine's code page; a name that does not survive that comes back as
+    a silent None. The window's default reader must be the one that does not."""
+    from pose3d.imageio import read_image
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    path = _accented_image(tmp_path)
+    data, rig, gt = _project_with_rig()
+    for f in data.frames:
+        f.images = {CAM_LEFT: str(path), CAM_RIGHT: str(path)}
+    win = MainWindow(ProjectModel(data, rig))
+
+    assert win.load_image is read_image
+    img = win.load_image(str(path))
+    assert img is not None and img.shape[:2] == (4, 6)
+
+
+def test_an_unreadable_image_reaches_the_user_by_name(qapp, tmp_path,
+                                                      recorded_errors):
+    """The 0-byte OneDrive placeholder. It used to arrive in the detector as
+    `'NoneType' object has no attribute 'shape'`, naming nothing."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    empty = tmp_path / "left_0001.jpg"
+    empty.write_bytes(b"")
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+    win.detector = _NoseDetector()
+
+    def redetect_all(det, load_image, on_progress=None, cancelled=None):
+        load_image(str(empty))
+
+    model.redetect_all = redetect_all
+    win._on_run_detection()
+
+    assert recorded_errors, "an unreadable image was swallowed"
+    assert str(empty) in recorded_errors[-1][1]
+
+
+def test_a_project_name_windows_would_refuse_still_makes_a_folder(
+        qapp, tmp_path, monkeypatch):
+    """`a:b?` is a perfectly ordinary folder name here and an impossible one on
+    the client's machine, where the import died on `mkdir` after the user had
+    filled the whole dialog in."""
+    from pose3d.ui import import_dialog
+    from pose3d.ui.worker import Cancelled
+
+    dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
+    dlg.name.setText("a:b?")
+    dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
+    dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
+    # stop at the first phase: the folder is made before it, and that is the
+    # step under test
+    monkeypatch.setattr(import_dialog, "run_job",
+                        lambda *a, **k: Cancelled())
+
+    dlg._process()
+
+    assert [p.name for p in tmp_path.iterdir() if p.is_dir()] == ["ab"]
+
+
+def test_the_export_names_the_file_after_a_stem_windows_accepts(
+        qapp, tmp_path, monkeypatch):
+    """The project name reaches Blender as a file stem, so a take called
+    `Take 1: "final"?` produced paths no Windows API can create."""
+    from pose3d.core.names import safe_name
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+    names = []
+
+    def fake_export(poses, out_dir, name="pose3d", **kw):
+        names.append(name)
+        return blender_export._failure("blender_cancelled", "Cancelled.", 125)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+    data, rig, gt = _project_with_rig()
+    data.name = 'Take 1: "final"?'
+    win = MainWindow(ProjectModel(data, rig))
+    win._on_export()
+
+    assert names == [safe_name(data.name)] == ["Take_1_final"]
+
+
+def test_no_failure_dialog_bypasses_the_one_sink():
+    """`QMessageBox.critical` called by hand is a second way for a failure to
+    reach the user — with its own wording, and invisible to the autouse
+    fixture that keeps a modal from parking in front of CI."""
+    import inspect
+
+    from pose3d.ui import import_dialog, main_window
+
+    for module in (main_window, import_dialog):
+        assert "QMessageBox.critical(" not in inspect.getsource(module), \
+            module.__name__
+
+
+def test_a_slot_that_raises_says_so_instead_of_appearing_to_do_nothing(
+        qapp, recorded_errors):
+    """Qt swallows an exception raised inside a slot: the button does nothing,
+    and the traceback reaches only a log nobody has been told about."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+
+    def boom():
+        raise RuntimeError("the project folder went away")
+
+    model.save = boom
+    win.btn_save.click()
+
+    assert len(recorded_errors) == 1
+    title, text = recorded_errors[0]
+    assert "_on_save" in text
+    assert "the project folder went away" in text
+
 
 # --- a machine with no usable OpenGL ---------------------------------------
 #

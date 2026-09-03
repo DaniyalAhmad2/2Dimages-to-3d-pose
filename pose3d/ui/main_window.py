@@ -24,8 +24,12 @@ HEAD_MODE_ITEMS = (("nose", "Head: nose"),
                    ("face", "Head: face (nose + ears)"))
 
 
+from pose3d.core.names import safe_name
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+from pose3d.imageio import read_image
+from pose3d.ui import guard
 from pose3d.ui.camera_view import CameraPanel
+from pose3d.ui.guard import guarded
 from pose3d.ui.model import ProjectModel, frame_stat, worst_per_joint
 from pose3d.ui.panels import (
     JointAccuracyList, PoseAccuracyPanel, Sidebar,
@@ -33,6 +37,28 @@ from pose3d.ui.panels import (
 from pose3d.ui.timeline import Timeline, TimelineHeader
 from pose3d.ui.view3d import View3D
 from pose3d.ui.worker import Cancelled, run_job
+
+#: The size the dashboard was laid out at, before the screen has a say.
+DESIGNED_SIZE = (1540, 920)
+
+
+def _initial_size(designed=DESIGNED_SIZE) -> tuple[int, int]:
+    """The size to open at: the designed one, clamped to this screen.
+
+    1540x920 is larger than the client's 1366x768 laptop, so the window opened
+    with its timeline off the bottom and its right column off the side — and
+    Windows offers no way to drag a title bar above the top of the desktop to
+    get them back. The margins leave room for the taskbar's neighbours and the
+    title bar itself, which `availableGeometry` does not account for.
+    """
+    from PySide6.QtGui import QGuiApplication
+
+    screen = QGuiApplication.primaryScreen()
+    if screen is None:                   # no display at all: nothing to clamp
+        return designed
+    avail = screen.availableGeometry()
+    return (min(designed[0], avail.width() - 40),
+            min(designed[1], avail.height() - 80))
 
 
 def _export_status(line: str) -> str:
@@ -58,10 +84,10 @@ class MainWindow(QMainWindow):
         self.model = model
         self.detector = detector
         self.open_callback = open_callback   # open_project_window(folder)
-        if load_image is None:
-            import cv2
-            load_image = lambda p: cv2.imread(p)
-        self.load_image = load_image
+        # NOT cv2.imread: it encodes the path in the machine's ANSI code page
+        # and answers None for one it cannot, which reached the detector as
+        # `'NoneType' object has no attribute 'shape'`. See pose3d.imageio.
+        self.load_image = read_image if load_image is None else load_image
         # The 3D view and the Blender export each build their own Character
         # and never see this project, so the head convention it was detected
         # under — and the mode the user chose to orient the head by — are
@@ -72,7 +98,7 @@ class MainWindow(QMainWindow):
         set_default_head_source(getattr(model.project, "head_source", "nose"))
         set_default_head_mode(getattr(model.project, "head_mode", "nose"))
         self.setWindowTitle("Pose3D — Animation Dashboard")
-        self.resize(1540, 920)
+        self.resize(*_initial_size())
         self.statusBar().showMessage("Ready")
 
         central = QWidget(); self.setCentralWidget(central)
@@ -273,6 +299,7 @@ class MainWindow(QMainWindow):
         self.sidebar.showCaptureToggled.connect(self.view3d.set_show_capture)
 
     # --- handlers ---
+    @guarded
     def _on_drag(self, cam, joint, pos):
         self.model.set_joint_2d(cam, joint, pos.x(), pos.y())
         self._mark_unsaved()
@@ -312,6 +339,7 @@ class MainWindow(QMainWindow):
         if message:
             self.statusBar().showMessage(message, 10000)
 
+    @guarded
     def _on_set_scale(self, real_height_m: float):
         from PySide6.QtWidgets import QApplication
         QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
@@ -326,6 +354,7 @@ class MainWindow(QMainWindow):
         self._refresh_calibration_status()
         self._mark_unsaved()
 
+    @guarded
     def _on_head_mode_changed(self, index: int):
         """Adopt the head-orientation mode the user just picked.
 
@@ -351,10 +380,12 @@ class MainWindow(QMainWindow):
             self._refresh_overlays()     # the face dots the mode shows/hides
         self._mark_unsaved()
 
+    @guarded
     def _on_auto_toggled(self, on):
         self.model.auto_recalc = on
         self.statusBar().showMessage(f"Auto Recalculate 3D {'ON' if on else 'OFF'}", 4000)
 
+    @guarded
     def _on_save(self):
         self.model.save()
         self.saved_label.setText("✓ Project Saved")
@@ -408,6 +439,7 @@ class MainWindow(QMainWindow):
         self._on_status(f"{what} {how} — nothing was changed")
         return True
 
+    @guarded
     def _on_run_detection(self):
         from pose3d.geometry.character import (
             default_head_source, set_default_head_source)
@@ -440,6 +472,7 @@ class MainWindow(QMainWindow):
             return
         self._refresh_after_job()
 
+    @guarded
     def _on_redetect_head(self):
         det = self._ensure_detector()
         if det is None:
@@ -475,6 +508,7 @@ class MainWindow(QMainWindow):
         if cached is not None and cached.head_source != source:
             view._character = None
 
+    @guarded
     def _on_recalibrate(self):
         # No Cancel: the triangulation and the bone fit are ONE answer about
         # the whole take, and a button that could only abort before the work
@@ -528,7 +562,7 @@ class MainWindow(QMainWindow):
             return None, ""
         path = (Path(self.model.project_dir) / "calibration" / "report.json")
         try:
-            return json.loads(path.read_text()), ""
+            return json.loads(path.read_text(encoding="utf-8")), ""
         except FileNotFoundError:
             return None, ""
         except Exception as e:
@@ -560,22 +594,13 @@ class MainWindow(QMainWindow):
             subject_height_m=None if q is None else q.subject_height_m,
             marker=report, marker_error=report_error)
 
+    @guarded
     def _on_import(self):
-        from PySide6.QtWidgets import QMessageBox
-        try:
-            from pose3d.ui.import_dialog import ImportDialog
-            dlg = ImportDialog(self)
-        except Exception as e:
-            # Qt swallows exceptions raised inside a slot, so without this the
-            # button just appears to do nothing and the traceback goes only to
-            # the container log, where nobody is looking.
-            import traceback
-            traceback.print_exc()
-            QMessageBox.critical(
-                self, "Could not open the import dialog",
-                f"{type(e).__name__}: {e}")
-            return
-        return self._run_import_dialog(dlg)
+        # No try/except of its own any more: `@guarded` is the one place a
+        # failure inside a slot becomes a dialog, and it prints the traceback
+        # to the log as this used to.
+        from pose3d.ui.import_dialog import ImportDialog
+        return self._run_import_dialog(ImportDialog(self))
 
     def _run_import_dialog(self, dlg):
         if dlg.exec() and dlg.result_folder:
@@ -586,8 +611,9 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage(
                     f"Imported to {dlg.result_folder}", 8000)
 
+    @guarded
     def _on_export(self):
-        from PySide6.QtWidgets import QApplication, QMessageBox
+        from PySide6.QtWidgets import QMessageBox
         from pose3d.ui import filedialog
         import numpy as np
         from pose3d.core.skeleton import NUM_JOINTS
@@ -602,7 +628,7 @@ class MainWindow(QMainWindow):
                      for f in frames]
         total = sum(per_frame)
         if not frames or total == 0:
-            QMessageBox.warning(
+            guard.report_error(
                 self, "Nothing to export",
                 "No 3D pose was reconstructed, so there is nothing to render.\n\n"
                 "This usually means calibration failed or the two camera views "
@@ -628,15 +654,17 @@ class MainWindow(QMainWindow):
         # Fail here, with an explanation, rather than minutes later inside
         # Blender with a bare errno from a read-only mount.
         if not filedialog.is_writable(out):
-            QMessageBox.warning(self, "Cannot save there",
-                                filedialog.not_writable_message(out))
+            guard.report_error(self, "Cannot save there",
+                               filedialog.not_writable_message(out))
             return
         poses = np.stack([f.fitted3d for f in frames])   # native units; camera auto-frames
         heads = np.stack([f.head3d for f in frames])
         # the same flags the 3D view draws amber, so the export agrees with
         # the preview about which joints were interpolated
         filled = np.stack([f.filled for f in frames])
-        name = self.model.project.name
+        # the name reaches Blender as a file STEM, so it goes through the
+        # same rule the import used to make the project folder
+        name = safe_name(self.model.project.name)
         fps = self.model.project.fps
         display_frame = self.model.current
         recorded_up = self._recorded_vertical()
@@ -697,7 +725,7 @@ class MainWindow(QMainWindow):
             # Say WHY, from the reason the export carries, instead of the
             # tail of Blender's log: nothing was written on purpose, and
             # the user needs to know that rather than guess.
-            QMessageBox.critical(
+            guard.report_error(
                 self, "Export failed",
                 res.message or (res.stderr or res.stdout or "")[-1500:])
 
@@ -721,7 +749,8 @@ class MainWindow(QMainWindow):
             calib = Path(self.model.project_dir) / "calibration"
             from pose3d.calib.intrinsics import Intrinsics
             intr = Intrinsics.load(calib / "left_intrinsics.json")
-            ext = json.loads((calib / "extrinsics.json").read_text())["left"]
+            ext = json.loads(
+                (calib / "extrinsics.json").read_text(encoding="utf-8"))["left"]
             return {"K": intr.K.tolist(), "R": ext["R"], "t": ext["t"],
                     "image_size": list(intr.image_size)}
         except FileNotFoundError:
@@ -733,6 +762,7 @@ class MainWindow(QMainWindow):
                   f"calibration could not be read ({type(e).__name__}: {e})")
             return None
 
+    @guarded
     def _toggle_fullscreen(self):
         """Toggle the 3D view filling the app window (in-app, not a popup).
 
@@ -785,6 +815,7 @@ class MainWindow(QMainWindow):
             super().keyPressEvent(event)
 
     # --- refresh ---
+    @guarded
     def _on_frame_changed(self, idx):
         self._refresh_views()
         f = self.model.frame()
