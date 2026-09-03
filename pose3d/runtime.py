@@ -29,7 +29,7 @@ LOG_ROTATE_BYTES = 5 * 1024 * 1024
 
 # Where the log actually went. Decided once, by ensure_std_streams(); None
 # means the devnull fallback was taken and there is no file to point at.
-_LOG_FILE: "Path | None" = None
+_LOG_FILE: Path | None = None
 _LOG_DECIDED = False
 
 
@@ -80,7 +80,7 @@ def _rotate(path: Path) -> None:
         pass                             # a log we cannot roll is still a log
 
 
-def _open_log() -> "tuple[object, Path | None] | None":
+def _open_log() -> tuple[object, Path | None] | None:
     """(stream, path) for the best log location available, or None."""
     for folder, make in ((app_dir(), False), (user_state_dir(), True)):
         path = folder / _LOG_NAME
@@ -121,7 +121,7 @@ def ensure_std_streams() -> None:
         setattr(sys, name, sink)
 
 
-def log_path() -> "Path | None":
+def log_path() -> Path | None:
     """The log file that was actually opened, or None when there is none.
 
     It used to name app_dir()/pose3d-log.txt unconditionally — including after

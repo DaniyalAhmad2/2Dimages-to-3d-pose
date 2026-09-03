@@ -261,7 +261,10 @@ class View3D(gl.GLViewWidget):
         # a perfectly good machine to the placeholder.
         if not self._gl_checked:
             self._gl_checked = True
-            QTimer.singleShot(0, self.check_gl)
+            # `self` as the context object: if the view is destroyed
+            # first, Qt drops the call instead of invoking a method on a
+            # deleted widget.
+            QTimer.singleShot(0, self, self.check_gl)
 
     def resizeEvent(self, ev):
         super().resizeEvent(ev)

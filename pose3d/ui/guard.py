@@ -27,9 +27,9 @@ def log_hint() -> str:
 
     log = log_path()
     if log is None:
-        return ("No log file could be written on this machine, so there are "
-                "no details to send. Run Pose3D-diagnose.exe from the same "
-                "folder and send what it prints instead.")
+        return ("No log file could be written on this machine, so there is "
+                "nothing to send. Run the diagnostics tool next to the app "
+                "(Pose3D-diagnose) and send what it prints instead.")
     return f"Details were written to:\n{log}"
 
 
