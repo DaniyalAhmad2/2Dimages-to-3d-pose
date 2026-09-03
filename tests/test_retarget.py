@@ -415,6 +415,14 @@ def test_the_rest_face_reference_points_at_the_face():
     at rest it agrees with the direction the rig's toes point, and after posing
     a head whose face looks along the shoulder line's right, the mesh's own
     face lands where the captured nose is.
+
+    Both measurements are read against the TOE direction, never against the
+    reference under test. Part (b) used to pick its probe vertex with
+    `argmax(verts0 @ ref)`, which made it self-referential: negating the
+    reference moved the probe to the back of the skull, where the (equally
+    negated) roll then spun it onto the captured nose. Both errors cancelled
+    and it passed at cos 0.9954 against a 0.94 gate — the very cancellation
+    this test exists to defeat.
     """
     ch = _ch(head_mode="nose")
     nb = ch.role["neck"]
@@ -433,7 +441,9 @@ def test_the_rest_face_reference_points_at_the_face():
 
     # ...and it is the mesh's face, not merely a sign convention: pose a head
     # whose face looks along the subject's RIGHT and the skull vertex furthest
-    # along the rest face direction must go there too.
+    # along the rig's own TOE direction must go there too. The probe is chosen
+    # by `toe` — the datum part (a) uses, independent of `_rest_ref` — so this
+    # is a second pin on the same sign and not a restatement of the first.
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     valid = ~np.isnan(sub).any(1)
@@ -447,7 +457,7 @@ def test_the_rest_face_reference_points_at_the_face():
     w = _head_weights(ch)
     cand = np.flatnonzero(w >= 0.9)
     assert len(cand) > 0
-    tip = int(cand[np.argmax(ch.verts0[cand] @ ref)])
+    tip = int(cand[np.argmax(ch.verts0[cand] @ toe)])
     verts, _, joints = ch.pose_and_joints(sub, valid, pts)
     a = _aim_vec(ch, sub)
     a = a / np.linalg.norm(a)
@@ -509,11 +519,17 @@ def test_the_head_is_not_flipped(mode):
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     valid = ~np.isnan(sub).any(1)
-    pts = _head_pts(ch, sub)
-    # NOT gated on `_assert_the_nose_acts`: `pts` here is deliberately the
-    # untouched rest direction (a flip is an ABSOLUTE defect, not one a turn
-    # is needed to see), and in Nose mode that is legitimately a no-op — see
-    # test_the_head_follows_the_face_keypoints for why.
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    up = torso / np.linalg.norm(torso)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    # A head TURNED 40 deg about the torso axis, and gated. With the untouched
+    # rest direction this test was INERT in Nose mode: the default `pts`
+    # reproduce the rest reference exactly, the frame takes the no-face path,
+    # and both sides of every comparison below were the same pose. A flip is
+    # still an absolute defect — a turned stimulus shows it just as plainly —
+    # but now there is a face acting when the parametrisation says there is.
+    pts = _head_pts(ch, sub, right=_rot_about(up, 40.0) @ right)
+    _assert_the_nose_acts(ch, sub, pts)
 
     with_pts = ch.posed_joints(sub, valid, pts)
     without = ch.posed_joints(sub, valid)
@@ -524,8 +540,6 @@ def test_the_head_is_not_flipped(mode):
         "— the head basis is probably flipped")
 
     # and the head bone still points broadly up the body, not back down it
-    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
-    up = torso / np.linalg.norm(torso)
     head_axis = with_pts[int(Joint.HEAD)] - with_pts[int(Joint.NECK)]
     assert np.dot(head_axis / np.linalg.norm(head_axis), up) > 0.3
 
