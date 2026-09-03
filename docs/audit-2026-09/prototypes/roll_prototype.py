@@ -19,7 +19,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.join(os.path.dirname(HERE), "baseline"))
 import metrics as M  # noqa
 from pose3d.core.skeleton import Joint, NUM_JOINTS, JOINT_NAMES
-from pose3d.geometry.character import Character, _align, _MID, _EAR_MID
+from pose3d.geometry.character import Character, _align, _MID, _HEAD_AIM  # renamed from _EAR_MID (rigid neck+head chain, task 1)
 from pose3d.geometry.orient import sequence_up, de_tilt_matrix
 
 u = lambda v: v / (np.linalg.norm(v) + 1e-12)
@@ -143,7 +143,7 @@ class RollCharacter(Character):
             if spec == _MID:
                 a = J(Joint.NECK)
                 return None if a is None else to_rig((a + pelvis) / 2.0)
-            if spec == _EAR_MID:
+            if spec == _HEAD_AIM:
                 p = self._head_aim_target(J, pelvis)
                 return None if p is None else to_rig(p)
             p = J(spec)

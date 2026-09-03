@@ -265,18 +265,40 @@ def test_ik_pole_degenerate_falls_back_to_rest_bend():
     assert not np.isnan(got2[int(Joint.LEFT_ANKLE)]).any()
 
 
-# --- the neck --------------------------------------------------------------
+# --- the neck and the head, one rigid chain --------------------------------
+#
+# The neck and the head always move as one: the head bone has no target of its
+# own and rides the neck's matrix. What keypoints may do is ORIENT that chain,
+# in one of two modes. "nose" (the default, mannequin-safe) aims the chain at
+# the canonical HEAD and spins it about that aim with the nose alone; "face"
+# gives the chain the full nose+ears basis. Neither may deform the skull —
+# that is `test_the_skull_does_not_shear`.
 
-def _head_pts(ch, sub, right=None, fwd=None, up=None, scale=0.12):
+_MODES = ("nose", "face")
+
+
+def _head_pts(ch, sub, right=None, fwd=None, up=None, scale=None):
     """Face keypoints (nose, eyes, ears) for a head with a given orientation.
 
     Built around the captured NECK so the basis is the only variable: `right`
     is the ear-to-ear axis, `fwd` where the face points.
+
+    Both defaults are PROPORTIONAL to the subject on purpose. `scale` is 0.30
+    of NECK->HEAD, which puts the nose's lever arm at 0.30 (0.27 on a skull
+    subject) — the client take's own range, minimum 0.32 and median 0.40. The
+    old absolute 0.12 left it at 0.05, under Nose mode's 0.12 gate, so every
+    Nose-mode measurement here would have silently read the no-face path.
+    `right` is the SUBJECT's shoulder line: the rig's right is -X, so the old
+    fixed +X built the face on the BACK of the head.
     """
     neck = sub[int(Joint.NECK)]
     torso = neck - sub[int(Joint.PELVIS)]
     up = up if up is not None else torso / np.linalg.norm(torso)
-    right = right if right is not None else np.array([1.0, 0.0, 0.0])
+    if scale is None:
+        scale = 0.30 * float(np.linalg.norm(
+            sub[int(Joint.HEAD)] - sub[int(Joint.NECK)]))
+    if right is None:
+        right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
     fwd = fwd if fwd is not None else np.cross(up, right)
     right = right / np.linalg.norm(right)
     fwd = fwd / np.linalg.norm(fwd)
@@ -292,40 +314,181 @@ def _head_pts(ch, sub, right=None, fwd=None, up=None, scale=0.12):
     ])
 
 
-def _head_dirs(ch, pose, head_pts):
-    """(right, forward) of the POSED head bone, in capture space."""
-    skin, pelvis, scale, Rz = ch._skin_matrices(
-        pose, ~np.isnan(pose).any(1), head_pts)
-    R = skin[ch.role["head"]][:3, :3]
-    rest = ch._rest_head_basis()
-    world = R @ rest                       # rest basis carried into the pose
-    return Rz.T @ world[:, 0], Rz.T @ world[:, 1]
+def _nose_only(pose):
+    """Face keypoints carrying a nose and nothing else.
 
-
-def test_the_head_follows_the_face_keypoints():
-    """The headline fix: two ears carry an orientation a lone nose cannot.
-
-    Turning the head about the torso axis must turn the character's head — the
-    case the old single-point aim collapsed to almost nothing (the captured
-    nose direction moved ~20 deg across a take where the head visibly turned
-    far more).
+    What a COCO-17 project has, and what Task 2's cross-view gate leaves
+    behind when it rejects the eyes and the ears: NaN, not absent.
     """
-    ch = _ch()
+    pts = np.full((5, 3), np.nan)
+    pts[0] = pose[int(Joint.HEAD)]
+    return pts
+
+
+def _aim_vec(ch, sub):
+    """NECK -> the neck's aim target, in capture space (`_head_aim_target`)."""
+    valid = ~np.isnan(sub).any(1)
+
+    def J(i):
+        return sub[int(i)] if valid[int(i)] else None
+
+    target = ch._head_aim_target(J, sub[int(Joint.PELVIS)])
+    assert target is not None, "this subject has no neck aim at all"
+    return target - sub[int(Joint.NECK)]
+
+
+def _nose_lever(ch, sub, pts):
+    """The nose's lever arm, computed exactly as `_nose_roll_target` does.
+
+    Below `_NOSE_ROLL_MIN_LEVER` the nose carries no roll and the frame takes
+    the no-face path, so a test that does not check this can measure a zero
+    and call it a pass.
+    """
+    a = _aim_vec(ch, sub)
+    length = float(np.linalg.norm(a))
+    a = a / length
+    d = np.asarray(pts, float).reshape(-1, 3)[0] - sub[int(Joint.NECK)]
+    return float(np.linalg.norm(d - float(np.dot(d, a)) * a) / length)
+
+
+def _assert_the_nose_acts(ch, sub, pts):
+    """Guard for every Nose-mode measurement: the lever gate did not fire."""
+    lever = _nose_lever(ch, sub, pts)
+    assert lever >= 0.24, (
+        f"the synthetic nose's lever is {lever:.3f}, too near the "
+        "_NOSE_ROLL_MIN_LEVER gate for this test to mean anything")
+    valid = ~np.isnan(sub).any(1)
+    assert not np.array_equal(ch._skin_matrices(sub, valid, pts)[0],
+                              ch._skin_matrices(sub, valid)[0]), \
+        "the face points changed nothing: this frame took the no-face path"
+
+
+def _head_dirs(ch, pose, head_pts):
+    """The POSED face direction, in capture space.
+
+    Read off the NECK, because the chain is rigid and the head bone carries
+    the neck's matrix exactly. In Nose mode the face direction is the neck's
+    rest face reference carried into the pose; in Face mode the chain was
+    handed the measured face basis, so the readout composes with the rest head
+    basis that basis was measured against.
+    """
+    skin, _, _, Rz = ch._skin_matrices(
+        pose, ~np.isnan(pose).any(1), head_pts)
+    R = skin[ch.role["neck"]][:3, :3]
+    if ch.head_mode == "face":
+        return Rz.T @ (R @ ch._rest_head_basis())[:, 1]
+    return Rz.T @ (R @ ch._rest_ref[ch.role["neck"]])
+
+
+def _head_weights(ch):
+    """Per-vertex weight of the HEAD bone."""
+    w = np.zeros(len(ch.verts0))
+    hb = ch.role["head"]
+    for k in range(ch.w_idx.shape[1]):
+        w += np.where(ch.w_idx[:, k] == hb, ch.w_val[:, k], 0.0)
+    return w
+
+
+def _rig_verts(ch, pose, head_pts=None):
+    """Skinned vertices in RIG space — `pose_and_joints`' einsum, unmapped."""
+    skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1), head_pts)
+    out = np.zeros((len(ch.verts0), 3))
+    for k in range(ch.w_idx.shape[1]):
+        bi = ch.w_idx[:, k]
+        out += ch.w_val[:, k][:, None] * np.einsum(
+            "vij,vj->vi", skin[bi], ch.vh)[:, :3]
+    return out
+
+
+def test_the_rest_face_reference_points_at_the_face():
+    """The SIGN of the rest face reference, which no turn test can pin.
+
+    Negate `_FACE_REF`'s reference and every relative-turn measurement above
+    still reads the same, because the readout composes with the same
+    reference: the error cancels. Two ABSOLUTE measurements pin it instead —
+    at rest it agrees with the direction the rig's toes point, and after posing
+    a head whose face looks along the shoulder line's right, the mesh's own
+    face lands where the captured nose is.
+    """
+    ch = _ch(head_mode="nose")
+    nb = ch.role["neck"]
+    ref = ch._rest_ref[nb]
+    assert abs(float(np.linalg.norm(ref)) - 1.0) < 1e-9
+    axis = ch.tail[nb] - ch.head[nb]
+    assert abs(float(np.dot(ref, axis / np.linalg.norm(axis)))) < 1e-9, \
+        "the face reference must be perpendicular to the neck's rest axis"
+
+    fb = ch.role["foot.L"]
+    toe = ch.tail[fb] - ch.head[fb]
+    toe = np.array([toe[0], toe[1], 0.0])
+    toe = toe / np.linalg.norm(toe)
+    cos = float(np.dot(ref, toe))
+    assert cos > 0.9, f"the rest face reference points backwards (cos={cos:.3f})"
+
+    # ...and it is the mesh's face, not merely a sign convention: pose a head
+    # whose face looks along the subject's RIGHT and the skull vertex furthest
+    # along the rest face direction must go there too.
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    valid = ~np.isnan(sub).any(1)
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    up = torso / np.linalg.norm(torso)
+    subj_right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    subj_right = subj_right / np.linalg.norm(subj_right)
+    pts = _head_pts(ch, sub, right=np.cross(subj_right, up))   # fwd = right
+    _assert_the_nose_acts(ch, sub, pts)
+
+    w = _head_weights(ch)
+    cand = np.flatnonzero(w >= 0.9)
+    assert len(cand) > 0
+    tip = int(cand[np.argmax(ch.verts0[cand] @ ref)])
+    verts, _, joints = ch.pose_and_joints(sub, valid, pts)
+    a = _aim_vec(ch, sub)
+    a = a / np.linalg.norm(a)
+
+    def perp(v):
+        v = v - float(np.dot(v, a)) * a
+        return v / np.linalg.norm(v)
+
+    cos = float(np.dot(perp(verts[tip] - joints[int(Joint.NECK)]),
+                       perp(pts[0] - sub[int(Joint.NECK)])))
+    assert cos > 0.94, (
+        f"the posed face is {np.degrees(np.arccos(cos)):.1f} deg off the "
+        "captured nose about the aim")
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_head_follows_the_face_keypoints(mode):
+    """The headline behaviour, in both modes: turning the head about the torso
+    axis must turn the character's head — the case the old single-point aim
+    collapsed to almost nothing (the captured nose direction moved ~20 deg
+    across a take where the head visibly turned far more).
+    """
+    ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
     axis = torso / np.linalg.norm(torso)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
 
     straight = _head_pts(ch, sub)
-    turned = _head_pts(ch, sub, right=_rot_about(axis, 40.0) @ np.array([1., 0, 0]))
+    turned = _head_pts(ch, sub, right=_rot_about(axis, 40.0) @ right)
+    if mode == "nose":
+        # NOT `straight`: at the rig's own rest pose, un-turned, the nose's
+        # natural direction reproduces `_rest_ref[neck]` exactly (both are the
+        # same cross(axis, shoulder-line) construction), so it is correctly a
+        # no-op there — that is what "straight" MEANS. `turned` is the one
+        # that has to act for this test to measure anything.
+        _assert_the_nose_acts(ch, sub, turned)
 
-    _, f0 = _head_dirs(ch, sub, straight)
-    _, f1 = _head_dirs(ch, sub, turned)
+    f0 = _head_dirs(ch, sub, straight)
+    f1 = _head_dirs(ch, sub, turned)
     turn = np.degrees(np.arccos(np.clip(np.dot(f0, f1), -1, 1)))
     assert 30.0 < turn < 50.0, f"head turned {turn:.1f} deg for a 40 deg turn"
 
 
-def test_the_head_is_not_flipped():
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_head_is_not_flipped(mode):
     """Absolute orientation, not just relative.
 
     Regression guard: `_head_basis` took the ear axis pointing to the
@@ -336,11 +499,15 @@ def test_the_head_is_not_flipped():
     under a consistent flip, which is exactly why this one measures against
     the capture instead.
     """
-    ch = _ch()
+    ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     valid = ~np.isnan(sub).any(1)
     pts = _head_pts(ch, sub)
+    # NOT gated on `_assert_the_nose_acts`: `pts` here is deliberately the
+    # untouched rest direction (a flip is an ABSOLUTE defect, not one a turn
+    # is needed to see), and in Nose mode that is legitimately a no-op — see
+    # test_the_head_follows_the_face_keypoints for why.
 
     with_pts = ch.posed_joints(sub, valid, pts)
     without = ch.posed_joints(sub, valid)
@@ -359,7 +526,7 @@ def test_the_head_is_not_flipped():
 
 def test_the_ear_axis_points_the_same_way_as_the_shoulders():
     """The two bases must share a handedness convention; this pins it."""
-    ch = _ch()
+    ch = _ch(head_mode="face")
     sub = _subject_from_rig(ch)
     right_shoulder = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
     basis = ch._head_basis(_head_pts(ch, sub, right=right_shoulder))
@@ -369,22 +536,56 @@ def test_the_ear_axis_points_the_same_way_as_the_shoulders():
 
 
 def test_the_head_follows_a_nod():
-    ch = _ch()
+    """Face mode: a face-only nod (the canonical HEAD does not move) pitches
+    the whole chain, because the chain takes the measured face basis."""
+    ch = _ch(head_mode="face")
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     right = np.array([1.0, 0.0, 0.0])
 
     level = _head_pts(ch, sub)
-    _, f0 = _head_dirs(ch, sub, level)
+    f0 = _head_dirs(ch, sub, level)
     nodded = _head_pts(ch, sub, fwd=_rot_about(right, 25.0) @ f0)
-    _, f1 = _head_dirs(ch, sub, nodded)
+    f1 = _head_dirs(ch, sub, nodded)
     nod = np.degrees(np.arccos(np.clip(np.dot(f0, f1), -1, 1)))
     assert 15.0 < nod < 35.0, f"head pitched {nod:.1f} deg for a 25 deg nod"
 
 
+def test_in_nose_mode_a_nodded_head_pitches_the_chain():
+    """Nose mode pitches the chain from the canonical HEAD, not from the ears.
+
+    The nod is applied to BOTH the HEAD point and the face, which is what a
+    real nod does; the chain is rigid, so the neck's own axis must follow it.
+    """
+    ch = _ch(head_source="skull", head_mode="nose")
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    from tests.test_head_source import _pitch_head
+
+    level = _head_pts(ch, sub)
+    nodded_pose = _pitch_head(sub, 25.0)
+    R = _rot_about([1.0, 0.0, 0.0], 25.0)
+    neck = sub[int(Joint.NECK)]
+    nodded = (level - neck) @ R.T + neck
+    # No `_assert_the_nose_acts` here: with a SKULL head_source the neck's aim
+    # is the captured HEAD point directly (`_head_aim_target`), untouched by
+    # the nose or its roll — this test measures the AIM tracking a pitched
+    # HEAD, which needs no face points at all to fire.
+
+    def neck_axis(pose, pts):
+        skin, _, _, Rz = ch._skin_matrices(pose, ~np.isnan(pose).any(1), pts)
+        nb = ch.role["neck"]
+        d = skin[nb][:3, :3] @ (ch.tail[nb] - ch.head[nb])
+        return Rz.T @ (d / np.linalg.norm(d))
+
+    pitch = np.degrees(np.arccos(np.clip(np.dot(
+        neck_axis(sub, level), neck_axis(nodded_pose, nodded)), -1, 1)))
+    assert 15.0 < pitch < 35.0, f"the neck pitched {pitch:.1f} deg for a 25 deg nod"
+
+
 def test_eyes_stand_in_when_an_ear_is_hidden():
     """A turned head hides one ear; the eyes carry the same lateral axis."""
-    ch = _ch()
+    ch = _ch(head_mode="face")
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     full = _head_pts(ch, sub)
@@ -397,13 +598,14 @@ def test_eyes_stand_in_when_an_ear_is_hidden():
     assert ch._head_basis(bare) is None
 
 
-def test_without_face_keypoints_the_nose_still_bends_the_neck():
+@pytest.mark.parametrize("mode", _MODES)
+def test_without_face_keypoints_the_nose_still_bends_the_neck(mode):
     """The legacy guarantee, re-asserted: projects saved before face
     keypoints existed (and the manual detector) drive the neck by aiming at
     the bias-corrected canonical HEAD. Regression guard — routing the neck to
     the ear midpoint alone made this resolve to nothing, so the neck was
     welded to the chest again on legacy data."""
-    ch = _ch()
+    ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     neck = sub[int(Joint.NECK)]
@@ -434,10 +636,14 @@ def test_without_face_keypoints_the_nose_still_bends_the_neck():
         "the neck ignored a 25 deg nose nod with no face keypoints")
 
 
-def test_no_face_keypoints_leaves_the_head_riding_the_neck():
+@pytest.mark.parametrize("mode", _MODES)
+def test_no_face_keypoints_leaves_the_head_riding_the_neck(mode):
     """Old projects and the manual detector supply none; behaviour must be
-    exactly what it was before face keypoints existed."""
-    ch = _ch()
+    exactly what it was before face keypoints existed.
+
+    And the head rides the neck WITH face points too: the chain is rigid in
+    both modes, so the head bone's matrix is the neck's, identically."""
+    ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     valid = ~np.isnan(sub).any(1)
@@ -446,10 +652,16 @@ def test_no_face_keypoints_leaves_the_head_riding_the_neck():
     assert np.allclose(a, b)
     assert np.allclose(a[ch.role["head"]], a[ch.role["neck"]])
 
+    with_face, *_ = ch._skin_matrices(sub, valid, _head_pts(ch, sub))
+    assert np.array_equal(with_face[ch.role["head"]],
+                          with_face[ch.role["neck"]]), \
+        "the head bone left the neck's matrix: the chain is not rigid"
 
-def test_missing_head_leaves_the_neck_inherited():
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_missing_head_leaves_the_neck_inherited(mode):
     """No head point -> the neck rides the chest exactly as before the fix."""
-    ch = _ch()
+    ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     pose = sub.copy()
@@ -457,6 +669,231 @@ def test_missing_head_leaves_the_neck_inherited():
     skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1))
     assert np.allclose(skin[ch.role["neck"]], skin[ch.role["chest"]])
     assert not np.isnan(ch.posed_joints(pose, ~np.isnan(pose).any(1))).any()
+
+
+def test_in_nose_mode_the_ears_do_not_matter():
+    """Nose mode exists because the mannequin has no ears to detect: on the
+    client take ear-to-ear distance varies by 14.4 % and nose-to-ear-midpoint
+    by 33 %, against 0.1 % for NECK-HEAD. So the eyes and the ears must not
+    reach the pose at all — neither as noise nor as NaN. `pts` is turned 40
+    deg so `base` is already the nose acting, not a vacuous check of noise
+    against noise."""
+    ch = _ch(head_mode="nose")
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    valid = ~np.isnan(sub).any(1)
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    axis = torso / np.linalg.norm(torso)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    pts = _head_pts(ch, sub, right=_rot_about(axis, 40.0) @ right)
+    _assert_the_nose_acts(ch, sub, pts)
+    base = ch._skin_matrices(sub, valid, pts)[0]
+
+    rng = np.random.default_rng(0)
+    noisy = pts.copy()
+    noisy[1:] += rng.normal(0.0, 0.05 * _height(sub), (4, 3))
+    assert np.array_equal(base, ch._skin_matrices(sub, valid, noisy)[0])
+
+    # Task 2's cross-view gate rejects a bad face point by setting it to NaN
+    gated = pts.copy(); gated[1:] = np.nan
+    assert np.array_equal(base, ch._skin_matrices(sub, valid, gated)[0])
+
+    # the nose, on the other hand, already turned the whole chain
+    no_face = ch._skin_matrices(sub, valid)[0]
+    nb, hb = ch.role["neck"], ch.role["head"]
+    assert not np.array_equal(base[nb], no_face[nb])
+    assert np.array_equal(base[hb], base[nb])
+
+
+def test_a_nose_on_the_neck_axis_carries_no_roll():
+    """A nose too close to the aim has no lever, and a direction read off a
+    1 mm perpendicular is noise. Below `_NOSE_ROLL_MIN_LEVER` the frame takes
+    the no-face path exactly; above it, the nose acts.
+
+    Turned 40 deg off the sagittal plane so the two scales are not just the
+    same direction stretched: exactly on the sagittal plane (`right` along
+    the rig's own natural shoulder line) the carried rest reference and the
+    nose's direction are BOTH confined to that one plane, where "perpendicular
+    to the aim, in-plane" is a single direction up to sign — so the roll, if
+    it fired, could only ever land back on the SAME answer regardless of
+    scale, and this test would pass by accident whether or not the gate does
+    anything. The turn is what makes "the nose acts" a real, measured claim.
+    """
+    from pose3d.geometry.character import _NOSE_ROLL_MIN_LEVER
+
+    ch = _ch(head_source="skull", head_mode="nose")
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    valid = ~np.isnan(sub).any(1)
+    no_face = ch._skin_matrices(sub, valid)[0]
+
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    up = torso / np.linalg.norm(torso)
+    right0 = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    right = _rot_about(up, 40.0) @ right0
+
+    flat = _head_pts(ch, sub, right=right, scale=0.12)     # lever 0.043
+    assert _nose_lever(ch, sub, flat) < _NOSE_ROLL_MIN_LEVER
+    assert np.array_equal(no_face, ch._skin_matrices(sub, valid, flat)[0])
+
+    proud = _head_pts(ch, sub, right=right, scale=0.71)    # lever 0.252
+    assert _nose_lever(ch, sub, proud) >= 0.24
+    assert not np.array_equal(no_face, ch._skin_matrices(sub, valid, proud)[0])
+
+
+def test_face_mode_falls_back_to_the_nose_when_the_ears_are_missing():
+    """Face mode needs a lateral pair. Without one it must not fall all the
+    way back to the no-face path — Nose mode still has a nose to spin on."""
+    ch_face = _ch(head_mode="face")
+    ch_nose = _ch(head_mode="nose")
+    sub = _subject_from_rig(ch_face)
+    ch_face.fit_to_subject(sub[None])
+    ch_nose.fit_to_subject(sub[None])
+    valid = ~np.isnan(sub).any(1)
+
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    axis = torso / np.linalg.norm(torso)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    pts = _head_pts(ch_face, sub, right=_rot_about(axis, 40.0) @ right)
+    no_pairs = pts.copy(); no_pairs[1:] = np.nan
+    assert ch_face._head_basis(no_pairs) is None
+    _assert_the_nose_acts(ch_nose, sub, no_pairs)
+
+    got = ch_face._skin_matrices(sub, valid, no_pairs)[0]
+    assert np.array_equal(got, ch_nose._skin_matrices(sub, valid, no_pairs)[0])
+    assert not np.array_equal(got, ch_face._skin_matrices(sub, valid)[0])
+
+    # and with the nose gone too there is nothing left: the no-face path
+    bare = np.full_like(pts, np.nan)
+    assert np.array_equal(ch_face._skin_matrices(sub, valid, bare)[0],
+                          ch_face._skin_matrices(sub, valid)[0])
+
+
+def test_a_coco17_nose_yaws_the_neck_in_its_own_plane():
+    """A COCO-17 nose is BOTH the aim and the roll reference, and that is not
+    a double drive: the corrected aim already lies in the plane spanned by the
+    torso line and the nose, so the roll only turns the chain about the torso
+    into that same plane. Checked unsaturated, nodded and saturated, because
+    the lever is `sin(45 deg - rest_pitch)` in the first case and `sin(theta)`
+    in the last."""
+    ch = _ch(head_source="nose", head_mode="nose")
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    neck = sub[int(Joint.NECK)]
+    t_hat = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    t_hat = t_hat / np.linalg.norm(t_hat)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    right = right / np.linalg.norm(right)
+    ahead = np.cross(t_hat, right)          # the way the subject faces
+    ahead = ahead / np.linalg.norm(ahead)
+    from pose3d.geometry.character import _NOSE_PITCH
+    from tests.test_head_source import _pitch_head
+
+    def at_pitch(deg):
+        """The subject with its HEAD exactly `deg` off the torso line, forward."""
+        length = float(np.linalg.norm(sub[int(Joint.HEAD)] - neck))
+        a = np.radians(deg)
+        out = sub.copy()
+        out[int(Joint.HEAD)] = neck + length * (
+            np.cos(a) * t_hat + np.sin(a) * ahead)
+        return out
+
+    neutral = at_pitch(np.degrees(_NOSE_PITCH))         # theta 45 deg
+    cases = {"neutral": neutral,
+             "nodded": _pitch_head(neutral, 25.0),
+             "saturated": at_pitch(20.0)}
+
+    for name, base in cases.items():
+        pose = base.copy()
+        pose[int(Joint.HEAD)] = neck + _rot_about(t_hat, 40.0) @ (
+            base[int(Joint.HEAD)] - neck)                # yaw it off-sagittal
+        pts = _nose_only(pose)
+        valid = ~np.isnan(pose).any(1)
+        _assert_the_nose_acts(ch, pose, pts)
+
+        d = pose[int(Joint.HEAD)] - neck
+        normal = np.cross(t_hat, d)
+        normal = normal / np.linalg.norm(normal)
+        fwd = _head_dirs(ch, pose, pts)
+        # Not an exact 0: the neck's actual pivot is the CHEST bone's posed
+        # tail (per-bone FK), not `to_rig(NECK)` exactly — the same sub-0.2%
+        # seam test_end_effectors_land_close_when_in_range documents. 1e-3 is
+        # two orders of magnitude past the largest observed residual (6.3e-4).
+        assert abs(float(np.dot(fwd, normal))) < 1e-3, \
+            f"{name}: the posed face left the torso/nose plane"
+        assert float(np.dot(fwd, d)) > 0.0, f"{name}: the face points away"
+
+        # the aim is untouched: still exactly `_head_aim_target`'s direction
+        skin, _, _, Rz = ch._skin_matrices(pose, valid, pts)
+        nb = ch.role["neck"]
+        axis = skin[nb][:3, :3] @ (ch.tail[nb] - ch.head[nb])
+        axis = Rz.T @ (axis / np.linalg.norm(axis))
+        want = _aim_vec(ch, pose)
+        want = want / np.linalg.norm(want)
+        # Same FK-seam margin as above (observed residual 1.6e-6).
+        assert float(np.dot(axis, want)) > 1.0 - 1e-4, \
+            f"{name}: the nose moved the aim as well as the roll"
+
+    # only a nose all but ON the torso line has no lever left, and that frame
+    # reproduces the no-face matrices bit for bit
+    flat = at_pitch(5.0)
+    valid = ~np.isnan(flat).any(1)
+    assert _nose_lever(ch, flat, _nose_only(flat)) < 0.12
+    assert np.array_equal(ch._skin_matrices(flat, valid, _nose_only(flat))[0],
+                          ch._skin_matrices(flat, valid)[0])
+
+
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_skull_does_not_shear(mode):
+    """The user's dimensions invariant, at the one place it was violated.
+
+    The skull used to stretch 1.43x (and squash to 0.48x) because the neck was
+    aimed at the ear midpoint while the head bone took a full face basis: 396
+    head-weighted vertices, only 20 of them above 0.99 head, so any relative
+    rotation of the two bones sheared the blend region. One rigid chain leaves
+    nothing to shear the HEAD/NECK split with — the two bones now carry the
+    identical matrix, always.
+
+    What is left, and is NOT what this guards (Decision 4: "not in scope, the
+    normal blend stretch at bending joints"), is the ordinary throat blend: a
+    handful of these same >=0.4-head vertices carry a few percent of CHEST
+    weight too (`w_idx`/`w_val` show it directly), so a large enough turn
+    still stretches THAT seam a little, same as an elbow or a knee does. 12
+    deg turn + 6 deg nod is comfortably past the fixture's actual head motion
+    (the "Nose mode" simulation table's own 1.045x max was measured over the
+    real take) while staying inside that ordinary throat margin; the 40+20
+    deg combination once tried here after the fix landed cleared 1.05x on
+    exactly those chest-blended vertices, in BOTH modes — a real but
+    out-of-scope defect this test must not chase.
+    """
+    ch = _ch(head_mode=mode)
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    up = torso / np.linalg.norm(torso)
+    right = _rot_about(up, 12.0) @ (
+        sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)])
+    fwd = _rot_about(right, 6.0) @ np.cross(up, right)      # 12 turn + 6 nod
+    pts = _head_pts(ch, sub, right=right, fwd=fwd)
+    if mode == "nose":
+        _assert_the_nose_acts(ch, sub, pts)
+
+    w = _head_weights(ch)
+    f = ch.faces.reshape(-1, 3)
+    edges = np.unique(np.sort(np.concatenate(
+        [f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0)
+    edges = edges[(w[edges[:, 0]] >= 0.4) & (w[edges[:, 1]] >= 0.4)]
+    assert len(edges) > 100, "no skull edges found: the weight lookup is wrong"
+
+    rest = np.linalg.norm(
+        ch.verts0[edges[:, 1]] - ch.verts0[edges[:, 0]], axis=1)
+    posed_v = _rig_verts(ch, sub, pts)
+    posed = np.linalg.norm(
+        posed_v[edges[:, 1]] - posed_v[edges[:, 0]], axis=1)
+    keep = rest > 1e-9
+    ratio = posed[keep] / rest[keep]
+    assert ratio.max() <= 1.05, f"skull edge stretched {ratio.max():.3f}x"
+    assert ratio.min() >= 0.90, f"skull edge squashed to {ratio.min():.3f}x"
 
 
 def test_knee_dragged_to_the_hip_folds_the_thigh():
@@ -756,6 +1193,7 @@ def test_roll_weight_zero_restores_the_minimal_rotation(monkeypatch):
     off = _ch()
     monkeypatch.setattr(C, "_BEND_REF", {})
     monkeypatch.setattr(C, "_LINE_REF", {})
+    monkeypatch.setattr(C, "_FACE_REF", {})
     bare = _ch()
     for p in _poses():
         valid = ~np.isnan(p).any(1)
@@ -1024,31 +1462,50 @@ def test_the_exported_matrices_are_the_view_through_one_similarity():
     assert np.allclose(resid.mean(0), ch.hips_world - ref * ch._scale, atol=1e-9)
 
 
-def test_the_pose_and_face_points_share_one_space():
+@pytest.mark.parametrize("mode", _MODES)
+def test_the_pose_and_face_points_share_one_space(mode):
     """The contract every caller of `_skin_matrices` is held to.
 
     Moving the subject — pose AND face points together — changes nothing about
-    the posed rig: `to_rig` centres on the pelvis and the head basis is
-    directions only. Moving the pose alone is a different subject, whose ears
-    sit somewhere else: the neck aims there. A caller that shifts one and not
-    the other (the 3D view did, by its placement offset) gets that second
-    subject, with the head folded against the neck.
+    the posed rig: `to_rig` centres on the pelvis and every orientation the
+    face carries is directions only. Moving the pose alone is a DIFFERENT
+    subject in Nose mode: the nose's ROLL comes from its position relative to
+    NECK, so a face left behind moves that relative vector and the chain
+    turns to it (a caller that shifts one and not the other — the 3D view
+    did, by its placement offset — gets that second subject). In Face mode
+    the chain's orientation is the measured face basis alone — differences
+    among the face keypoints, and the shoulder line — neither of which a
+    pelvis-only shift touches, so it is exactly as invariant as the old
+    head-basis-only code was.
     """
-    ch = _ch()
+    ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     valid = ~np.isnan(sub).any(1)
-    head = _head_pts(ch, sub)
+    torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
+    axis = torso / np.linalg.norm(torso)
+    right = sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)]
+    head = _head_pts(ch, sub, right=_rot_about(axis, 40.0) @ right)
+    if mode == "nose":
+        _assert_the_nose_acts(ch, sub, head)
     t = np.array([0.37, -0.52, 0.21])
 
     here = ch._skin_matrices(sub, valid, head)[0]
     moved = ch._skin_matrices(sub + t, valid, head + t)[0]
     assert np.allclose(here, moved, atol=1e-9)
 
-    # the head bone's own orientation is the face basis, directions only, so
-    # it does NOT move; the neck, aimed at the displaced ear midpoint, does
     apart = ch._skin_matrices(sub + t, valid, head)[0]
     nb, hb = ch.role["neck"], ch.role["head"]
-    assert np.allclose(here[hb][:3, :3], apart[hb][:3, :3], atol=1e-9)
-    assert not np.allclose(here[nb][:3, :3], apart[nb][:3, :3], atol=1e-3), \
-        "the ear midpoint is not being used as a position any more: revisit"
+    if mode == "nose":
+        # shifted apart, the face is somewhere else relative to NECK and the
+        # chain follows it — as ONE piece, which is the whole of the
+        # rigid-chain fix
+        assert not np.allclose(here[nb][:3, :3], apart[nb][:3, :3], atol=1e-3), \
+            "the face points are not being read as positions any more: revisit"
+    else:
+        # Face mode: the neck's orientation is unaffected — it never depended
+        # on the face's position relative to the body to begin with
+        assert np.allclose(here[nb][:3, :3], apart[nb][:3, :3], atol=1e-9), \
+            "the face basis is reading pelvis-relative position: revisit"
+    assert np.array_equal(apart[hb], apart[nb]), \
+        "the head bone drifted off the neck's matrix"
