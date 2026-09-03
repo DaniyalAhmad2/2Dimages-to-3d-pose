@@ -22,6 +22,7 @@ from pose3d.geometry.triangulate import (
 from pose3d.pipeline import (
     CalibratedRig, bone_length_targets, cross_view_rejection, fill_frame_gaps,
     fit_frame, gated_kp2d, per_image_allowances, revalidate_joint,
+    triangulate_face,
 )
 
 HEAD_JOINT = int(Joint.HEAD)
@@ -394,7 +395,6 @@ class ProjectModel(QObject):
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
         from pose3d.pipeline import detect_project
-        from pose3d.geometry.triangulate import triangulate_points
         self.statusMessage.emit("Re-detecting face points…")
         wrote = detect_project(self.project, detector, load_image,
                                fields="head")
@@ -407,11 +407,16 @@ class ProjectModel(QObject):
                 "This build's detector does not produce face points, so "
                 "nothing was changed — the head keeps its nose-pitch estimate")
             return
+        # the same gate the batch recompute applies, from the same take-wide
+        # threshold: a re-detect must not leave face points a recompute would
+        # refuse (nor refuse ones it would keep)
+        epi_thr = self.epipolar_gate()
+        F = fundamental_matrix(
+            self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
+            self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+        allow = per_image_allowances(self.rig)
         for f in self.project.frames:
-            f.head3d = triangulate_points(
-                f.head2d[CAM_LEFT], f.head2d[CAM_RIGHT],
-                self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
-                self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+            triangulate_face(f, self.rig, epi_thr, F, allow)
         self.set_frame(self.current)
         self.statusMessage.emit(
             f"Face points re-detected on {len(self.project.frames)} frames; "
@@ -489,11 +494,13 @@ class ProjectModel(QObject):
         self._targets()
         f = self.frame()
         if joint >= NUM_JOINTS:
-            k = joint - NUM_JOINTS
-            f.head3d[k] = triangulate_one(
-                f.head2d[CAM_LEFT][k], f.head2d[CAM_RIGHT][k],
-                self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
-                self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+            # THE CROSS-VIEW GATE APPLIES HERE TOO, exactly as it does to a
+            # dragged canonical joint in `_retriangulate`: one helper, so a
+            # drag and the next recompute cannot reach different `head3d`.
+            # The whole face is re-derived rather than the one point dragged —
+            # five triangulations and five verdicts, and no branch that could
+            # leave the other four judged by an older rig.
+            triangulate_face(f, self.rig, self.epipolar_gate())
             # face points have no bones: no re-fit, just re-orient the head
             self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
             self.accuracyChanged.emit(self._accuracy(self.current))
@@ -512,10 +519,10 @@ class ProjectModel(QObject):
             for c in (CAM_LEFT, CAM_RIGHT):
                 if not np.isnan(f.head2d[c]).all():     # cam has face points
                     f.head2d[c][0] = f.kp2d[c][joint]
-            f.head3d[0] = triangulate_one(
-                f.head2d[CAM_LEFT][0], f.head2d[CAM_RIGHT][0],
-                self.rig.intr[CAM_LEFT], self.rig.intr[CAM_RIGHT],
-                self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
+            # and through the same gate as any other face edit: the synced
+            # nose is a cross-view pair like the rest, and a drag that pulls
+            # it off its epipolar line must lose its 3D here too
+            triangulate_face(f, self.rig, self.epipolar_gate())
         touched = [joint] + self._sync_derived(f, joint, cam)
         for j in touched:
             self._retriangulate(f, j)

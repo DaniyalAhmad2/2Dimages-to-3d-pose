@@ -90,6 +90,7 @@ def test_triangulation_fills_head3d_without_touching_pose3d():
     from tests.synth import default_two_cam, project as project_points, sample_skeleton_3d
     from pose3d.calib.extrinsics import Extrinsics
     from pose3d.calib.intrinsics import Intrinsics
+    from pose3d.geometry.triangulate import fundamental_matrix
     from pose3d.pipeline import CalibratedRig, triangulate_project
 
     geo = default_two_cam()
@@ -106,9 +107,36 @@ def test_triangulation_fills_head3d_without_touching_pose3d():
         f.head2d[cam] = project_points(head_gt, geo["K"], geo["dist"], *ext)
     data.frames.append(f)
 
-    triangulate_project(data, rig)
+    dropped = triangulate_project(data, rig)
     assert data.frames[0].pose3d.shape == (NUM_JOINTS, 3)
     assert np.allclose(data.frames[0].head3d, head_gt, atol=1e-6)
+
+    # A second frame identical to the first except that its RIGHT nose sits
+    # 80 px off the epipolar line its LEFT twin defines — the occlusion
+    # hallucination the canonical joints have been gated against since the
+    # cross-view check existed, on a point that was never gated at all. The
+    # offset runs along the line's own normal, so 80 px IS the distance.
+    bad = Frame(frame_id="0001")
+    for cam, ext in ((CAM_LEFT, geo["left"]), (CAM_RIGHT, geo["right"])):
+        bad.kp2d[cam] = project_points(gt, geo["K"], geo["dist"], *ext)
+        bad.scores[cam] = np.full(NUM_JOINTS, 0.9)
+        bad.head2d[cam] = project_points(head_gt, geo["K"], geo["dist"], *ext)
+    F = fundamental_matrix(rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+    a, b, _ = F @ np.array([*bad.head2d[CAM_LEFT][0], 1.0])
+    bad.head2d[CAM_RIGHT][0] += 80.0 * np.array([a, b]) / np.hypot(a, b)
+    before2d = {c: bad.head2d[c].copy() for c in (CAM_LEFT, CAM_RIGHT)}
+    data.frames.append(bad)
+
+    # the face gate is not a keypoint rejection: it writes no mask and is not
+    # counted, so the number the user is told about does not move
+    assert triangulate_project(data, rig) == dropped
+    assert np.isnan(bad.head3d[0]).all(), "the disagreeing nose kept its 3D"
+    assert np.isfinite(bad.head3d[1:]).all(), "the four agreeing points were gated too"
+    assert np.allclose(data.frames[0].head3d, head_gt, atol=1e-6)
+    for c in (CAM_LEFT, CAM_RIGHT):
+        assert np.allclose(bad.head2d[c], before2d[c]), "the gate wrote into head2d"
+        assert not np.asarray(bad.rejected[c]).any(), "the gate wrote a joint mask"
 
 
 # --- editing: the loop the user actually closes -----------------------------
@@ -142,7 +170,7 @@ def _model_with_heads():
     return ProjectModel(data, rig)
 
 
-def test_dragging_an_ear_updates_head3d_with_undo():
+def test_dragging_the_nose_updates_head3d_with_undo():
     from pose3d.core.project import CAM_LEFT as L
 
     m = _model_with_heads()
@@ -150,16 +178,40 @@ def test_dragging_an_ear_updates_head3d_with_undo():
     before3d = f.head3d.copy()
     before2d = f.head2d[L].copy()
 
-    ear = NUM_JOINTS + 3                        # left ear, offset convention
-    x, y = f.head2d[L][3]
-    m.set_joint_2d(L, ear, x + 40.0, y)
+    nose = NUM_JOINTS + 0                       # face point 0, offset convention
+    x, y = f.head2d[L][0]
+    # 40 px ALONG the epipolar line (this rig's lines run near-horizontal):
+    # a correction the two views still agree about, so the gate keeps it
+    m.set_joint_2d(L, nose, x + 40.0, y)
 
-    assert not np.allclose(f.head2d[L][3], before2d[3])
-    assert not np.allclose(f.head3d[3], before3d[3]), "head3d not re-triangulated"
+    assert not np.allclose(f.head2d[L][0], before2d[0])
+    assert not np.allclose(f.head3d[0], before3d[0]), "head3d not re-triangulated"
+    assert np.isfinite(f.head3d).all(), "an agreeing pair lost its 3D"
     assert np.allclose(f.kp2d[L], m.frame().kp2d[L]), "canonical joints touched"
 
     m.undo()
-    assert np.allclose(f.head2d[L][3], before2d[3])
+    assert np.allclose(f.head2d[L][0], before2d[0])
+    assert np.allclose(f.head3d, before3d), "undo left the head somewhere else"
+
+
+def test_dragging_a_face_point_off_the_epipolar_line_drops_its_3d():
+    """The drag path is gated exactly as the recompute is.
+
+    A drag that the two views cannot both be right about must reach the same
+    `head3d` as the next full recompute would — otherwise the head is oriented
+    by a point the recompute is about to delete, and the 3D view changes under
+    the user for no edit they made.
+    """
+    from pose3d.core.project import CAM_LEFT as L
+
+    m = _model_with_heads()
+    f = m.frame()
+    x, y = f.head2d[L][0]
+    m.set_joint_2d(L, NUM_JOINTS + 0, x, y + 200.0)      # across the lines
+
+    assert np.isnan(f.head3d[0]).all(), "a pair 200 px apart was triangulated"
+    assert np.isfinite(f.head3d[1:]).all(), "the untouched face points were gated too"
+    assert np.allclose(f.head2d[L][0], [x, y + 200.0]), "the gate wrote into head2d"
 
 
 def test_dragging_the_nose_moves_the_face_nose_too():
