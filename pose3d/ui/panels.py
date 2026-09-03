@@ -8,11 +8,12 @@ not in a separate panel.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal, QRectF
+from PySide6.QtCore import Qt, QRectF, QSize, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox, QDoubleSpinBox, QFrame, QHBoxLayout, QLabel, QListWidget,
-    QListWidgetItem, QPushButton, QScrollArea, QVBoxLayout, QWidget,
+    QListWidgetItem, QPushButton, QScrollArea, QSizePolicy, QVBoxLayout,
+    QWidget,
 )
 
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
@@ -358,6 +359,10 @@ _SUBJECT_VERTICAL = (
     "upright.")
 
 
+#: Preferred width of the left column. A minimum, never a maximum.
+SIDEBAR_WIDTH = 232
+
+
 class Sidebar(QWidget):
     runDetection = Signal()
     recalibrate = Signal()
@@ -370,7 +375,13 @@ class Sidebar(QWidget):
     def __init__(self):
         super().__init__()
         self.setObjectName("sidebar")
-        self.setFixedWidth(232)
+        # A MINIMUM, not a fixed width: setFixedWidth pins the maximum too, so
+        # the layout could never hand the column another pixel however much
+        # the content needed. `sizeHint` below keeps 232 as the PREFERRED
+        # width, so the dashboard looks exactly as it did.
+        self.setMinimumWidth(SIDEBAR_WIDTH)
+        self.setSizePolicy(QSizePolicy.Policy.Minimum,
+                           QSizePolicy.Policy.Preferred)
         # The CALIBRATION section grew a section's worth of measurements, and
         # what it holds depends on the take (a symmetry note appears only when
         # a limb pair disagrees). Scroll rather than squeeze: a column that
@@ -554,6 +565,11 @@ class Sidebar(QWidget):
                       "automatically when Auto Recalculate 3D is on.")
         hint.setObjectName("hintBox"); hint.setWordWrap(True)
         lay.addWidget(hint)
+
+    def sizeHint(self):
+        """232 wide, as before — but as a preference the layout may exceed,
+        not a pin. The scroll area handles anything taller."""
+        return QSize(SIDEBAR_WIDTH, super().sizeHint().height())
 
     def set_project(self, name, n_frames, n_cams, res):
         self.project_name.setText(name)

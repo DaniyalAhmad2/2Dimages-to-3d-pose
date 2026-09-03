@@ -8,11 +8,14 @@ from __future__ import annotations
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QListView, QStyledItemDelegate, QStyle,
-    QWidget,
+    QComboBox, QHBoxLayout, QLabel, QListView, QSizePolicy,
+    QStyledItemDelegate, QStyle, QWidget,
 )
 
 _STATUS_ROLE = Qt.ItemDataRole.UserRole + 1
+
+#: Preferred height of the filmstrip. A minimum, never a maximum.
+TIMELINE_HEIGHT = 120
 
 STATUS_COLORS = {
     "green": QColor(80, 220, 120),
@@ -71,6 +74,9 @@ class _ThumbDelegate(QStyledItemDelegate):
 class Timeline(QListView):
     frameSelected = Signal(int)
 
+    def sizeHint(self):
+        return QSize(super().sizeHint().width(), TIMELINE_HEIGHT)
+
     def __init__(self):
         super().__init__()
         self.setViewMode(QListView.ViewMode.IconMode)
@@ -82,7 +88,12 @@ class Timeline(QListView):
         self.setSelectionMode(QListView.SelectionMode.SingleSelection)
         self.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        self.setFixedHeight(120)
+        # A MINIMUM, not a fixed height: setFixedHeight pins the maximum
+        # too, so the filmstrip could never be given another pixel. sizeHint()
+        # keeps 120 as the preferred height, so the dashboard is unchanged.
+        self.setMinimumHeight(TIMELINE_HEIGHT)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding,
+                           QSizePolicy.Policy.Minimum)
         self._model = QStandardItemModel(self)
         self.setModel(self._model)
         self.setItemDelegate(_ThumbDelegate(self))

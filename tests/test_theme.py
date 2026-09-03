@@ -225,3 +225,46 @@ def test_a_cjk_code_page_would_refuse_the_stylesheet_outright():
     qss = Path(__file__).resolve().parent.parent / "pose3d" / "ui" / "dark.qss"
     with pytest.raises(UnicodeDecodeError):
         qss.read_text(encoding="cp932")
+
+
+# --- room on a small, scaled screen -----------------------------------------
+#
+# The client's laptop is 1366x768 at 150 % scaling, i.e. 910x512 in the
+# logical pixels Qt lays out in. Every size below is logical.
+
+SMALL_SCREEN = (910, 512)          # 1366x768 @ 150 %
+TOPBAR_H = 46
+VIEW3D_MIN_H = 220
+
+
+def test_the_sidebar_is_no_longer_pinned_to_one_width(qapp):
+    """setFixedWidth pins the maximum as well as the minimum, so the layout
+    can never give the column another pixel however much the content needs —
+    at 150 % scaling that is how a measurement ends up elided to "5…"."""
+    from pose3d.ui.panels import Sidebar
+
+    s = Sidebar()
+    assert s.minimumWidth() == 232
+    assert s.maximumWidth() > s.minimumWidth(), "still a fixed width"
+    assert s.sizeHint().width() == 232, "the column changed width"
+    assert s.minimumWidth() < SMALL_SCREEN[0]
+
+
+def test_the_timeline_is_no_longer_pinned_to_one_height(qapp):
+    from pose3d.ui.timeline import Timeline
+
+    t = Timeline()
+    assert t.minimumHeight() == 120
+    assert t.maximumHeight() > t.minimumHeight(), "still a fixed height"
+    assert t.sizeHint().height() == 120, "the filmstrip changed height"
+
+
+def test_the_fixed_parts_still_fit_a_1366x768_screen_at_150_percent(qapp):
+    """What has to be true for the window to be usable at all: the parts that
+    cannot shrink, plus the 3D view's own minimum, fit the screen."""
+    from pose3d.ui.panels import Sidebar
+    from pose3d.ui.timeline import Timeline
+
+    used = TOPBAR_H + VIEW3D_MIN_H + Timeline().minimumHeight()
+    assert used <= SMALL_SCREEN[1], f"{used}px of fixed chrome on a 512px screen"
+    assert Sidebar().minimumWidth() * 2 < SMALL_SCREEN[0]

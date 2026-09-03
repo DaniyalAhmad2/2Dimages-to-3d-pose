@@ -27,9 +27,23 @@ WORKSPACE = Path(os.environ.get("POSE3D_WORKSPACE", "/workspace"))
 HOST = Path(os.environ.get("POSE3D_HOST", "/host"))
 
 
+def mounts_apply() -> bool:
+    """Do /workspace and /host mean anything on this machine?
+
+    Only inside the image, or where the user named them. Written as absolute
+    POSIX paths they are DRIVE-RELATIVE on Windows — `Path("/workspace")` is
+    `C:\\workspace` — so a client who happens to have a folder of that name
+    got it pinned into the file dialog and used as the starting directory,
+    under a hint explaining that the app can only see files somewhere it has
+    never heard of.
+    """
+    return in_container() or bool(os.environ.get("POSE3D_WORKSPACE")
+                                  or os.environ.get("POSE3D_HOST"))
+
+
 def shared_folders() -> list[Path]:
     """Folders the app can actually read, most useful first."""
-    out = [p for p in (WORKSPACE, HOST) if p.is_dir()]
+    out = [p for p in (WORKSPACE, HOST) if mounts_apply() and p.is_dir()]
     if not out:
         # Running natively: nothing is restricted, so this is only about where
         # to start. The Windows bundle ships a `workspace` folder next to the
@@ -83,7 +97,7 @@ def writable_dir() -> str:
 
 def not_writable_message(path) -> str:
     """Why this folder cannot be written to, and where to put things instead."""
-    if HOST.is_dir() and str(path).startswith(str(HOST)):
+    if mounts_apply() and HOST.is_dir() and str(path).startswith(str(HOST)):
         return (f"'{path}' is read-only.\n\nThat folder is shared with the app "
                 f"for reading your images only. Save to {WORKSPACE} instead — "
                 f"it is the 'workspace' folder next to docker-compose.yml, so "
