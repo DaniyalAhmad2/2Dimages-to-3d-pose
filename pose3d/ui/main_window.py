@@ -15,6 +15,14 @@ from PySide6.QtWidgets import (
     QToolButton, QVBoxLayout, QWidget,
 )
 
+# The head-orientation modes as the 3D PREVIEW combo lists them: one row per
+# `character.HEAD_MODES` entry, in that order, so the row index the combo
+# reports and the mode string the geometry is told are the same fact. A row
+# whose mode drifted from that tuple would be rejected by
+# `set_default_head_mode` on the first switch rather than posing anything.
+HEAD_MODE_ITEMS = (("nose", "Head: nose"),
+                   ("face", "Head: face (nose + ears)"))
+
 
 class _ExportWorker(QThread):
     """Runs the Blender export off the UI thread, streaming progress."""
@@ -86,10 +94,13 @@ class MainWindow(QMainWindow):
         self.load_image = load_image
         # The 3D view and the Blender export each build their own Character
         # and never see this project, so the head convention it was detected
-        # under is published process-wide here, once, before anything is drawn.
-        # Both then read the same value and stay pose-identical.
-        from pose3d.geometry.character import set_default_head_source
+        # under — and the mode the user chose to orient the head by — are
+        # published process-wide here, once, before anything is drawn. Both
+        # then read the same values and stay pose-identical.
+        from pose3d.geometry.character import (
+            set_default_head_mode, set_default_head_source)
         set_default_head_source(getattr(model.project, "head_source", "nose"))
+        set_default_head_mode(getattr(model.project, "head_mode", "nose"))
         self.setWindowTitle("Pose3D — Animation Dashboard")
         self.resize(1540, 920)
         self.statusBar().showMessage("Ready")
@@ -171,9 +182,10 @@ class MainWindow(QMainWindow):
         project made before face keypoints existed."""
         tools = self.menuBar().addMenu("&Tools")
         act = tools.addAction("Re-detect face points only")
-        act.setToolTip("Detect the nose/eyes/ears again so the character's "
-                       "head can be oriented, leaving the body pose and every "
-                       "hand correction exactly as they are")
+        act.setToolTip("Detect the nose and face points again so the "
+                       "character's head can turn toward the detected nose "
+                       "(or the face, in Face mode), leaving the body pose and "
+                       "every hand correction exactly as they are")
         act.triggered.connect(self._on_redetect_head)
 
     def _build_action_row(self):
@@ -200,6 +212,23 @@ class MainWindow(QMainWindow):
         head = QHBoxLayout()
         t = QLabel("3D PREVIEW"); t.setObjectName("panelTitle"); head.addWidget(t)
         head.addStretch(1)
+        # What orients the character's head, per project. "nose" is the
+        # mannequin-safe mode (the chain aims at the canonical HEAD point and
+        # the nose only turns it about that axis); "face" takes the full
+        # nose+ears basis and is for subjects whose ears are real features.
+        # Set from the project here and wired in `_wire`, so building the
+        # window never runs the handler and never marks it unsaved.
+        self.head_combo = QComboBox()
+        self.head_combo.addItems([label for _, label in HEAD_MODE_ITEMS])
+        self.head_combo.setToolTip(
+            "What orients the character's head. Nose: the head follows the "
+            "detected nose only — the safe choice for a mannequin, whose "
+            "moulded ears the detector guesses at. Face: the head takes the "
+            "nose and both ears, for subjects whose ears are real features.")
+        modes = [m for m, _ in HEAD_MODE_ITEMS]
+        self.head_combo.setCurrentIndex(
+            modes.index(self.model.project.head_mode))
+        head.addWidget(self.head_combo)
         self.proj_combo = QComboBox(); self.proj_combo.addItems(["Perspective", "Orthographic"])
         head.addWidget(self.proj_combo)
         self.btn_full = QToolButton(); self.btn_full.setText("⤢")
@@ -251,6 +280,10 @@ class MainWindow(QMainWindow):
         self.btn_auto.toggled.connect(self._on_auto_toggled)
         self.btn_full.clicked.connect(self._toggle_fullscreen)
         self.proj_combo.currentTextChanged.connect(self.view3d.set_projection)
+        # connected HERE, not where the combo is built: construction sets the
+        # index from the project, and a handler live at that moment would mark
+        # a freshly opened project as having unsaved changes
+        self.head_combo.currentIndexChanged.connect(self._on_head_mode_changed)
 
         self.btn_import.clicked.connect(self._on_import)
         self.btn_export.clicked.connect(self._on_export)
@@ -318,6 +351,31 @@ class MainWindow(QMainWindow):
         self._apply_view_orientation()   # the character is sized to the take
         self._refresh_views(); self._refresh_timeline_status()
         self._refresh_calibration_status()
+        self._mark_unsaved()
+
+    def _on_head_mode_changed(self, index: int):
+        """Adopt the head-orientation mode the user just picked.
+
+        The mode belongs to the project (a mannequin's ears are moulded
+        scenery the detector guesses at; a person's are real features), so it
+        is stored there and saved with the corrections. It also has to reach
+        the 3D view and the Blender export, which build their own Characters
+        and never see a ProjectData — hence the process-wide default, and
+        hence dropping the view's cached Character so the preview and the
+        export cannot end up posing the same frame under different modes.
+        """
+        from pose3d.geometry.character import set_default_head_mode
+        mode = HEAD_MODE_ITEMS[int(index)][0]
+        if mode == self.model.project.head_mode:
+            return                     # no churn, and no invented edit
+        self.model.project.head_mode = mode
+        set_default_head_mode(mode)
+        self.view3d._character = None  # rebuilt under the new mode on next draw
+        self._apply_view_orientation()   # the rebuilt character is re-fitted
+        if self.model.project.frames:    # as `_load_model` guards it
+            f = self.model.frame()       # re-pose this frame under the new mode
+            self.view3d.set_pose(f.fitted3d, f.head3d, f.filled)
+            self._refresh_overlays()     # the face dots the mode shows/hides
         self._mark_unsaved()
 
     def _on_auto_toggled(self, on):
@@ -711,9 +769,14 @@ class MainWindow(QMainWindow):
     def _refresh_overlays(self):
         """Reposition/recolour the joint overlays from the current model state."""
         f = self.model.frame()
+        project = self.model.project
         for cam, panel in ((CAM_LEFT, self.cam_left), (CAM_RIGHT, self.cam_right)):
+            # both head conventions: they decide which face dots are drawn
+            # (see CameraView.set_pose), and the view has no other way to know
             panel.view.set_pose(f.kp2d[cam], f.scores[cam], f.corrected[cam],
-                                head_xy=f.head2d[cam], filled=f.filled)
+                                head_xy=f.head2d[cam], filled=f.filled,
+                                head_source=project.head_source,
+                                head_mode=project.head_mode)
 
     def _refresh_history(self):
         self.btn_undo.setEnabled(self.model.stack.can_undo())

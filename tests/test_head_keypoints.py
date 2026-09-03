@@ -245,25 +245,89 @@ def test_nose_sync_leaves_legacy_projects_alone():
     assert np.isnan(f.head2d[L]).all(), "sync invented face points"
 
 
-def test_face_items_are_drawn_and_editable(qapp=None):
+def _face_panel():
     import os
     os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
     from PySide6.QtWidgets import QApplication
     QApplication.instance() or QApplication([])
-    from pose3d.ui.camera_view import FACE_KP_IDS, CameraPanel
+    from pose3d.ui.camera_view import CameraPanel
 
-    p = CameraPanel("left", "LEFT CAMERA")
+    return CameraPanel("left", "LEFT CAMERA")
+
+
+def _face_pose(panel, head_source, head_mode, head=None):
+    """Draw one frame with all five face points and return {id: visible}."""
     xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
+    if head is None:
+        head = np.tile(
+            np.arange(NUM_HEAD_KP, dtype=float)[:, None], (1, 2)) * 8 + 200
+    panel.view.set_pose(xy, np.full(NUM_JOINTS, 0.9), head_xy=head,
+                        head_source=head_source, head_mode=head_mode)
+    return {it.joint_id: it.isVisible() for it in panel.view._face}
+
+
+def test_face_items_are_drawn_and_editable():
+    """All five face points exist as items; which of them the user SEES is
+    decided per frame by the two conventions, and by nothing else.
+
+    The nose dot is drawn only under the skull convention, where the nose and
+    the canonical HEAD are two different detections: under the nose convention
+    the HEAD dot IS the nose (`_resolve_joint` syncs the two), so a second dot
+    on top of it would be the same point drawn twice, draggable to two
+    different places. Eyes and ears are drawn only in Face mode, the only mode
+    in which they orient anything — in Nose mode they are still detected and
+    still stored, they simply do not steer the character.
+    """
+    from pose3d.core.skeleton import HEAD_KP_INDEX
+    from pose3d.ui.camera_view import FACE_KP_IDS
+
+    p = _face_panel()
+    assert len(p.view._face) == NUM_HEAD_KP, "all five face points are items"
+    assert [it.joint_id for it in p.view._face] == list(FACE_KP_IDS)
+    assert FACE_KP_IDS[0] == NUM_JOINTS + HEAD_KP_INDEX["nose"]
+
+    nose_id = NUM_JOINTS + HEAD_KP_INDEX["nose"]
+    eyes_ears = [NUM_JOINTS + k for k in range(1, NUM_HEAD_KP)]
+
+    # the full matrix: head_source decides the nose dot, head_mode the rest
+    for source in ("nose", "skull"):
+        for mode in ("nose", "face"):
+            vis = _face_pose(p, source, mode)
+            assert vis[nose_id] is (source == "skull"), (source, mode)
+            for jid in eyes_ears:
+                assert vis[jid] is (mode == "face"), (source, mode, jid)
+
+    # tooltips say what each dot does, and they differ: the nose turns the
+    # head in both modes, the eyes and ears only in Face mode
+    tips = {it.joint_id: it.toolTip() for it in p.view._face}
+    assert "turns the character's head" in tips[nose_id]
+    for jid in eyes_ears:
+        assert "orient the character's head (Face mode)" in tips[jid]
+
+
+def test_a_face_point_without_a_detection_is_never_drawn():
+    """NaN beats both conventions: a face point this view has no detection for
+    is not on the image, so no mode may put a draggable dot at (nan, nan) —
+    and `set_show_joints(True)`, which knows nothing about either convention,
+    may not resurrect one either."""
+    p = _face_panel()
     head = np.tile(np.arange(NUM_HEAD_KP, dtype=float)[:, None], (1, 2)) * 8 + 200
     head[2] = np.nan                            # a hidden eye stays hidden
-    p.view.set_pose(xy, np.full(NUM_JOINTS, 0.9), head_xy=head)
 
-    assert len(p.view._face) == 4, "eyes+ears only; the nose stays the HEAD dot"
-    assert [it.joint_id for it in p.view._face] == list(FACE_KP_IDS)
-    vis = {it.joint_id: it.isVisible() for it in p.view._face}
-    assert vis[NUM_JOINTS + 1] and vis[NUM_JOINTS + 3] and vis[NUM_JOINTS + 4]
+    vis = _face_pose(p, "skull", "face", head)
     assert not vis[NUM_JOINTS + 2]
-    assert "head" in p.view._face[0].toolTip().lower()
+    assert vis[NUM_JOINTS + 1] and vis[NUM_JOINTS + 3] and vis[NUM_JOINTS + 4]
+
+    p.view.set_show_joints(False)
+    p.view.set_show_joints(True)
+    vis = {it.joint_id: it.isVisible() for it in p.view._face}
+    assert not vis[NUM_JOINTS + 2], "the joints toggle resurrected a NaN dot"
+
+    # and the same toggle may not resurrect a dot the MODE hides either
+    _face_pose(p, "nose", "nose", head)
+    p.view.set_show_joints(True)
+    vis = {it.joint_id: it.isVisible() for it in p.view._face}
+    assert not any(vis.values()), "the joints toggle overrode Nose mode"
 
 
 def test_frame_change_delivers_head3d_to_the_3d_view():

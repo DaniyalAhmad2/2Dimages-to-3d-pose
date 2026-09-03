@@ -382,11 +382,12 @@ class ProjectModel(QObject):
             f"hand-corrected points were kept")
 
     def redetect_head(self, detector, load_image) -> None:
-        """Re-run the detector for the FACE keypoints only.
+        """Re-run the detector for the nose and the other face points only.
 
         The migration path for a project made before face keypoints existed:
-        it gives the character's head something to be oriented by without
-        touching the body pose or a single hand correction.
+        it gives the character's head something to turn toward — the nose in
+        both modes, the whole face in Face mode — without touching the body
+        pose or a single hand correction.
         """
         if detector is None:
             self.statusMessage.emit("No detector available in this build")
@@ -395,7 +396,7 @@ class ProjectModel(QObject):
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
         from pose3d.pipeline import detect_project
-        self.statusMessage.emit("Re-detecting face points…")
+        self.statusMessage.emit("Re-detecting the nose and face points…")
         wrote = detect_project(self.project, detector, load_image,
                                fields="head")
         if not wrote:
@@ -404,8 +405,9 @@ class ProjectModel(QObject):
             # saying "re-detected" here would be a success message for work
             # that did not happen, and the head would go on riding the neck.
             self.statusMessage.emit(
-                "This build's detector does not produce face points, so "
-                "nothing was changed — the head keeps its nose-pitch estimate")
+                "This build's detector does not produce face points (the nose, "
+                "the eyes and the ears), so nothing was changed — the head "
+                "keeps its nose-pitch estimate")
             return
         # the same gate the batch recompute applies, from the same take-wide
         # threshold: a re-detect must not leave face points a recompute would
@@ -419,8 +421,9 @@ class ProjectModel(QObject):
             triangulate_face(f, self.rig, epi_thr, F, allow)
         self.set_frame(self.current)
         self.statusMessage.emit(
-            f"Face points re-detected on {len(self.project.frames)} frames; "
-            f"the body pose and every correction were left alone")
+            f"Nose and face points re-detected on "
+            f"{len(self.project.frames)} frames; the body pose and every "
+            f"correction were left alone")
 
     def save(self) -> None:
         from pose3d.core.io_project import save_project
@@ -501,21 +504,26 @@ class ProjectModel(QObject):
             # five triangulations and five verdicts, and no branch that could
             # leave the other four judged by an older rig.
             triangulate_face(f, self.rig, self.epipolar_gate())
-            # face points have no bones: no re-fit, just re-orient the head
+            # face points have no bones and never change the character's
+            # dimensions: no re-fit, just re-orient the rigid neck+head chain
+            # (the nose turns it in both modes, the ears only in Face mode)
             self.pose3dChanged.emit(f.fitted3d, f.head3d, f.filled)
             self.accuracyChanged.emit(self._accuracy(self.current))
             return
         if joint == HEAD_JOINT and self._head_is_the_nose():
             # Under the nose convention the canonical HEAD and the nose face
             # point ARE the same physical detection, so a drag must move both —
-            # otherwise the head's orientation (built from nose + ears) ignores
-            # it entirely. Synced here rather than as a second stack edit, so
-            # one Ctrl+Z reverses the whole drag (undo re-resolves and
-            # re-syncs). Under the skull convention they are two different
-            # detections ~86 px apart on frame 0 of the client take, and
-            # copying one onto the other would teleport the nose onto the skull
-            # vertex — silently, into head2d, which is persisted and is what
-            # the head basis is built from.
+            # otherwise the head's orientation (the nose in both modes, the
+            # nose + ears face basis in Face mode) ignores it entirely. That
+            # is also why the camera views draw no separate nose dot under
+            # this convention: the HEAD dot IS it. Synced here rather than as
+            # a second stack edit, so one Ctrl+Z reverses the whole drag (undo
+            # re-resolves and re-syncs). Under the skull convention they are
+            # two different detections ~86 px apart on frame 0 of the client
+            # take, and copying one onto the other would teleport the nose onto
+            # the skull vertex — silently, into head2d, which is persisted and
+            # is what the head basis is built from. That is the convention
+            # under which the nose does get its own draggable dot.
             for c in (CAM_LEFT, CAM_RIGHT):
                 if not np.isnan(f.head2d[c]).all():     # cam has face points
                     f.head2d[c][0] = f.kp2d[c][joint]
@@ -876,9 +884,9 @@ _NO_RIG_NOTE = (
 
 _HEAD_HINT = (
     " This take also has no face points, so the head keeps its old "
-    "nose-pitch guess — run Tools ▸ \"Re-detect face points only\" to orient "
-    "it from the eyes and ears (your body pose and every correction are left "
-    "untouched).")
+    "nose-pitch guess — run Tools ▸ \"Re-detect face points only\" so the "
+    "character's head can turn toward the detected nose (or the face, in Face "
+    "mode). Your body pose and every correction are left untouched.")
 
 
 def _head_hint(project: ProjectData) -> str:

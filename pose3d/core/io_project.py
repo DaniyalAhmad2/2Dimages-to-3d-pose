@@ -129,6 +129,8 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
         "keypoint_model": project.keypoint_model,
         # what the stored HEAD point is: see ProjectData.head_source
         "head_source": project.head_source,
+        # which mode orients the head: see ProjectData.head_mode
+        "head_mode": project.head_mode,
         "frames": [],
     }
     for f in project.frames:
@@ -210,6 +212,9 @@ def load_project(folder: str | Path) -> ProjectData:
         # absent -> "nose": every project written before the key existed was
         # detected with COCO-17, whose HEAD is the nose
         head_source=doc.get("head_source") or "nose",
+        # absent -> "nose": the mannequin-safe mode, which is how every take
+        # written before the choice existed was posed
+        head_mode=doc.get("head_mode") or "nose",
         # 0, not PIPELINE_VERSION: a file written before the key existed was
         # produced by the causal-EMA build and must be recomputed on open.
         pipeline_version=int(doc.get("pipeline_version", 0)),

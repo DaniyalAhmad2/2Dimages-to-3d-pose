@@ -167,6 +167,34 @@ def test_head_source_round_trips(tmp_path):
     assert load_project(tmp_path).head_source == "nose"
 
 
+def test_head_mode_round_trips(tmp_path):
+    """Which mode ORIENTS the neck+head chain is a per-project choice the user
+    makes in the app, so it has to survive save/load: reopening a take set to
+    Face mode and getting Nose back would silently re-pose every frame's head.
+
+    Unlike `head_source` this is a preference, not a fact about the data —
+    which is why a file written before the key existed loads as the safe
+    default ("nose", the mannequin-safe mode), the same value a fresh project
+    starts with.
+    """
+    import json
+
+    p = _make_project()
+    assert p.head_mode == "nose"              # the safe default in memory
+    p.head_mode = "face"
+    save_project(p, tmp_path)
+
+    doc = json.loads((tmp_path / "project.json").read_text())
+    assert doc["head_mode"] == "face"
+
+    q = load_project(tmp_path)
+    assert q.head_mode == "face"
+
+    doc.pop("head_mode")
+    (tmp_path / "project.json").write_text(json.dumps(doc))
+    assert load_project(tmp_path).head_mode == "nose"
+
+
 def test_halpe_frame_loses_nothing(tmp_path):
     """Halpe-26 detections must survive storage unchanged.
 

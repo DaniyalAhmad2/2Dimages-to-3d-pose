@@ -58,15 +58,20 @@ HOLLOW_STATES = ("filled", "unmeasured", "rejected")
 # constants desync on a typo with nothing to catch it — the dots would simply
 # stop being drawn as "rejected" and no test would notice.
 
-# The face keypoints (eyes/ears) that orient the character's head. Drawn
-# smaller and in one fixed accent colour: they are not part of the skeleton,
-# carry no accuracy banding, and exist to be nudged when the head points the
-# wrong way. Their item ids are offset by NUM_JOINTS — the single convention
-# the model and the correction stack share. The NOSE face point is not drawn:
-# it is the same physical detection as the canonical HEAD dot, which stays
-# the one to drag.
+# The face keypoints (nose, eyes, ears) that orient the character's head.
+# Drawn smaller and in one fixed accent colour: they are not part of the
+# skeleton, carry no accuracy banding, and exist to be nudged when the head
+# points the wrong way. Their item ids are offset by NUM_JOINTS — the single
+# convention the model and the correction stack share.
+#
+# An item exists for all five, but which of them the user SEES is decided per
+# frame by `set_pose` from the project's two head conventions, never here:
+# under the "nose" head_source the nose face point and the canonical HEAD dot
+# are the SAME physical detection (`ProjectModel._resolve_joint` syncs them),
+# so a second dot on top of it would be one point drawn twice and draggable
+# to two places; and the eyes and ears steer nothing outside Face mode.
 FACE_COLOR = QColor(94, 200, 245)
-FACE_KP_IDS = tuple(range(NUM_JOINTS + 1, NUM_JOINTS + NUM_HEAD_KP))
+FACE_KP_IDS = tuple(range(NUM_JOINTS, NUM_JOINTS + NUM_HEAD_KP))
 
 
 class _JointSignals(QObject):
@@ -132,7 +137,12 @@ class CameraView(QGraphicsView):
         self.setCursor(Qt.CursorShape.OpenHandCursor)   # hint: draggable to pan
         self._pixmap_item = None
         self._joints: list[JointItem] = []
-        self._face: list[JointItem] = []       # eyes/ears, ids NUM_JOINTS+1..
+        self._face: list[JointItem] = []       # nose/eyes/ears, ids NUM_JOINTS..
+        # per-face-item "this frame's conventions say draw it" flag. Kept
+        # because `set_show_joints` knows nothing about either convention: it
+        # may only hide dots and un-hide the ones that were shown, never
+        # resurrect one this frame's mode (or a NaN) took away.
+        self._face_shown = [False] * NUM_HEAD_KP
         self._bones: list[QGraphicsLineItem] = []
         self._show_joints = True
         self._show_bones = True
@@ -163,8 +173,11 @@ class CameraView(QGraphicsView):
             item = JointItem(jid, radius=4.0)
             item.setBrush(QBrush(FACE_COLOR))
             k = jid - NUM_JOINTS
-            item.setToolTip(f"<b>{HEAD_KP_NAMES[k].upper()}</b><br>"
-                            f"orients the character's head")
+            # the nose turns the head in BOTH modes; the eyes and ears steer
+            # it only in Face mode, and the tooltip says which is which
+            what = ("turns the character's head" if HEAD_KP_NAMES[k] == "nose"
+                    else "orient the character's head (Face mode)")
+            item.setToolTip(f"<b>{HEAD_KP_NAMES[k].upper()}</b><br>{what}")
             item.signals.released.connect(self._on_released)      # commit
             item.setVisible(False)
             self._scene.addItem(item)
@@ -184,11 +197,20 @@ class CameraView(QGraphicsView):
     def set_pose(self, xy: np.ndarray, scores: np.ndarray,
                  corrected: np.ndarray | None = None,
                  head_xy: np.ndarray | None = None,
-                 filled: np.ndarray | None = None):
+                 filled: np.ndarray | None = None,
+                 head_source: str | None = None,
+                 head_mode: str = "nose"):
         """Place joints from (NUM_JOINTS,2) pixel coords + scores.
 
-        `head_xy` is the optional (NUM_HEAD_KP,2) face keypoints; eyes and
-        ears become small draggable dots (the nose stays the HEAD dot).
+        `head_xy` is the optional (NUM_HEAD_KP,2) face keypoints, drawn as
+        small draggable dots. `head_source` and `head_mode` are the project's
+        two head conventions and they decide which of the five are drawn: the
+        NOSE only under "skull", where it is a different detection from the
+        canonical HEAD dot (under "nose" they are the same point, and drawing
+        both would let the user drag one detection to two places); the eyes
+        and ears only in Face mode, the only mode in which they orient
+        anything. They stay detected and stored in both modes either way.
+
         `filled` flags joints whose 3D was interpolated across a one-frame
         dropout (pipeline.fill_gaps); they are drawn as hollow rings.
         """
@@ -198,9 +220,13 @@ class CameraView(QGraphicsView):
         for item in self._face:
             k = item.joint_id - NUM_JOINTS
             q = None if head_xy is None else head_xy[k]
-            if q is None or np.isnan(q).any():
+            wanted = (head_source == "skull" if HEAD_KP_NAMES[k] == "nose"
+                      else head_mode == "face")
+            if not wanted or q is None or np.isnan(q).any():
+                self._face_shown[k] = False
                 item.setVisible(False)
                 continue
+            self._face_shown[k] = True
             item.setVisible(self._show_joints)
             item.signals.blockSignals(True)
             item.setPos(float(q[0]), float(q[1]))
@@ -338,8 +364,12 @@ class CameraView(QGraphicsView):
 
     def set_show_joints(self, on: bool):
         self._show_joints = on
-        for it in self._joints + self._face:
+        for it in self._joints:
             it.setVisible(on and not np.isnan(it.pos().x()))
+        # face dots go by what the last `set_pose` decided: this toggle knows
+        # nothing about the head conventions and may not overrule them.
+        for shown, it in zip(self._face_shown, self._face):
+            it.setVisible(on and shown)
         self._refresh_bones()
 
     def set_show_bones(self, on: bool):

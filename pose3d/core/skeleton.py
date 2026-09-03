@@ -40,12 +40,18 @@ COCO17_NAMES: list[str] = [
 COCO17_INDEX: dict[str, int] = {n: i for i, n in enumerate(COCO17_NAMES)}
 
 # The face keypoints, kept ALONGSIDE the canonical joints rather than inside
-# them. One nose cannot carry head orientation — the reconstructed nose
-# direction moved only ~20 deg across a take in which the head visibly turned
-# far more — but two ears plus a nose give a full 3-axis head basis. The ears
-# are detected at least as reliably as the nose (0.91/0.93 vs 0.71 on the
-# client's mannequin). Indices 0-4 are identical in COCO-17 and Halpe-26, so
-# one extractor serves both models.
+# them. Two ears plus a nose give a full 3-axis head basis, which one nose
+# cannot — but on a MANNEQUIN that basis is built on noise. Confidence said
+# the ears were the more reliable points (0.91/0.93 vs the nose's 0.71); the
+# rigid-body check on the client's 26-frame take says otherwise. The subject
+# does not deform, so the coefficient of variation of a distance across the
+# take IS the reconstruction noise on it: NECK-HEAD 0.1 %, shoulders 0.4 %,
+# nose-HEAD 5.2 %, eye-eye 9.4 %, ear-ear 14.4 %, nose-ear-mid 33 %. So the
+# ears drive the pose only in Face mode (`character.HEAD_MODES`), chosen per
+# project for a subject whose ears are real features; the default Nose mode
+# turns the head by the nose alone. They stay detected and stored either way.
+# Indices 0-4 are identical in COCO-17 and Halpe-26, so one extractor serves
+# both models.
 HEAD_KP_NAMES: list[str] = ["nose", "left_eye", "right_eye",
                             "left_ear", "right_ear"]
 NUM_HEAD_KP = len(HEAD_KP_NAMES)

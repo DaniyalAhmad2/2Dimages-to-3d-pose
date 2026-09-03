@@ -317,10 +317,13 @@ class View3D(gl.GLViewWidget):
         # ankle, which would pierce it.
         vpose = np.where(valid[:, None], v, np.nan)
         # The face points take the SAME rigid map as the pose — the rotation
-        # AND the shift — because the character reads a POSITION off them: the
-        # neck aims at the ear midpoint (`character._EAR_MID`). They used to
+        # AND the shift — because the character reads them RELATIVE to the
+        # captured pose, not on their own: in Nose mode the nose is a
+        # direction from the captured NECK, and in Face mode the face basis is
+        # built from differences between the face points. Both are wrong the
+        # moment the two sets of points sit in different frames. They used to
         # get the rotation only, on the claim that just a direction basis is
-        # read off them; that left the ears one placement offset away from the
+        # read off them; that left the face one placement offset away from the
         # head, the neck aimed there, and the head bone (oriented by the face
         # basis, which IS shift-invariant) folded 136 deg against it on the
         # client's take, crushing the mesh between the two. The grounding `dz`
