@@ -123,6 +123,56 @@ def _qt_image_formats() -> set[str]:
             for f in QImageReader.supportedImageFormats()}
 
 
+def qt_platform_problem() -> str | None:
+    """Why Qt would not find a platform plugin here, or None.
+
+    Qt does not raise when the platform plugin is missing or misnamed: it
+    calls qFatal(), and qFatal() calls abort(). No exception is raised, no
+    `finally` runs, nothing buffered is flushed — the process is simply gone.
+    So code that is about to build the first QApplication in a process that
+    has to survive (the diagnostics report, above all) asks this first.
+
+    Only what the filesystem can answer: a plugin whose own dependencies are
+    missing looks exactly like a working one from here, which is why the
+    diagnostics report also writes itself out as it goes.
+    """
+    platforms = _qt_plugin_dir() / "platforms"
+    try:
+        # libqxcb.so, qwindows.dll, libqcocoa.dylib -> qxcb, qwindows, qcocoa
+        present = {p.name.split(".")[0].lower().removeprefix("lib")
+                   for p in platforms.glob("*") if p.is_file()}
+    except OSError as e:
+        return f"the Qt plugin directory {platforms} could not be read: {e}"
+    if not present:
+        return f"there is no Qt platform plugin in {platforms}"
+    # QT_QPA_PLATFORM is a ';'-separated list of candidates, each of which may
+    # carry ':' options; Qt is happy if any one of them loads.
+    wanted = [name.split(":")[0].strip()
+              for name in os.environ.get("QT_QPA_PLATFORM", "").split(";")
+              if name.split(":")[0].strip()]
+    if not wanted:
+        # Nothing asked, so Qt uses the platform's own default. Only Windows
+        # has one we can name with certainty — and it is the one the client's
+        # bundle has been missing.
+        wanted = ["windows"] if IS_WINDOWS else []
+    if wanted and not any(f"q{name}".lower() in present for name in wanted):
+        return (f"Qt has no platform plugin for {' or '.join(wanted)} in "
+                f"{platforms} (it has: {', '.join(sorted(present))})")
+    return None
+
+
+def qt_would_abort() -> str | None:
+    """The same question asked of this process, which may already have Qt up.
+
+    A QApplication that exists is proof that a platform plugin loaded, so
+    nothing further is going to abort over one.
+    """
+    from PySide6.QtWidgets import QApplication
+    if QApplication.instance() is not None:
+        return None
+    return qt_platform_problem()
+
+
 def check_qt_plugins() -> str:
     """Qt's plugins are loaded by name at run time, so no import scan sees them.
 
@@ -364,6 +414,16 @@ def check_qt_opengl() -> str:
         from pose3d.ui.view3d import View3D
     except ImportError as e:
         raise AssertionError(f"the 3D view is missing from this build: {e}") from e
+
+    # A third failure, and it has to be caught before the constructor rather
+    # than after it: Qt aborts the process when the platform plugin will not
+    # load. It is a packaging fault and not a GL one, so the software-GL child
+    # is not spawned either — it would abort in exactly the same way.
+    problem = qt_would_abort()
+    if problem is not None:
+        raise AssertionError(
+            f"{problem}. Building a QApplication would abort this process, so "
+            "the 3D view was never created; the platform plugin comes first.")
 
     try:
         app = QApplication.instance() or QApplication([])

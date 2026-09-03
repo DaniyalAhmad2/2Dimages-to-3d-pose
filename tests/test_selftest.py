@@ -624,3 +624,75 @@ def test_the_gl_only_flag_reaches_run(monkeypatch):
                         lambda **kw: seen.update(kw) or 0)
     selftest.main(["--gl-only", "--no-video"])
     assert seen["gl_only"] is True and seen["video"] is False
+
+
+# --- a Qt that cannot start ------------------------------------------------
+#
+# Qt does not raise when it cannot load a platform plugin: it calls qFatal(),
+# and qFatal() calls abort(). No exception is raised, no `finally` runs, no
+# report is written — the process is simply gone (exit 134). Anything about to
+# build the first QApplication in a process that must survive asks first.
+
+def _platforms(tmp_path, *names):
+    folder = tmp_path / "platforms"
+    folder.mkdir()
+    for name in names:
+        (folder / name).write_bytes(b"MZ")
+    return folder
+
+
+def test_a_platform_qt_cannot_load_is_named_rather_than_walked_into(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "nosuchplatform")
+    monkeypatch.setattr(selftest, "_qt_plugin_dir", lambda: tmp_path)
+    _platforms(tmp_path, "libqxcb.so", "libqoffscreen.so")
+    problem = selftest.qt_platform_problem()
+    assert "nosuchplatform" in problem
+    assert "qxcb" in problem, "what it does have is half the answer"
+
+
+def test_the_platform_this_process_asked_for_is_not_a_problem(
+        monkeypatch, tmp_path):
+    monkeypatch.setenv("QT_QPA_PLATFORM", "offscreen")
+    monkeypatch.setattr(selftest, "_qt_plugin_dir", lambda: tmp_path)
+    _platforms(tmp_path, "libqoffscreen.so")
+    assert selftest.qt_platform_problem() is None
+
+
+def test_windows_needs_its_own_plugin_even_when_nothing_asked_for_one(
+        monkeypatch, tmp_path):
+    """The client's failure: nothing sets QT_QPA_PLATFORM, Qt looks for
+    qwindows.dll, and a bundle without it aborts before the first window."""
+    monkeypatch.setattr(selftest, "IS_WINDOWS", True)
+    monkeypatch.delenv("QT_QPA_PLATFORM", raising=False)
+    monkeypatch.setattr(selftest, "_qt_plugin_dir", lambda: tmp_path)
+    _platforms(tmp_path, "qminimal.dll")
+    assert "windows" in selftest.qt_platform_problem()
+
+
+def test_no_platform_plugin_at_all_is_the_problem(monkeypatch, tmp_path):
+    monkeypatch.setattr(selftest, "_qt_plugin_dir", lambda: tmp_path)
+    _platforms(tmp_path)
+    assert "no Qt platform plugin" in selftest.qt_platform_problem()
+
+
+def test_a_qt_that_is_already_running_found_its_plugin(monkeypatch):
+    """Whatever the environment says now, this process has a QApplication, so
+    its constructor is not going to abort anything."""
+    from PySide6.QtWidgets import QApplication
+    QApplication.instance() or QApplication([])
+    monkeypatch.setattr(selftest, "qt_platform_problem", lambda: "nonsense")
+    assert selftest.qt_would_abort() is None
+
+
+def test_the_gl_check_does_not_build_a_qapplication_that_would_abort(
+        monkeypatch, gl_env):
+    """A platform plugin that will not load is a packaging fault, not a GL
+    one. The software-GL child would abort in exactly the same way, so it is
+    not spawned, and the check says what is actually wrong."""
+    monkeypatch.setattr(selftest, "qt_would_abort",
+                        lambda: "there is no Qt platform plugin in /nowhere")
+    with pytest.raises(AssertionError) as e:
+        selftest.check_qt_opengl()
+    assert "/nowhere" in str(e.value)
+    assert gl_env == [], "no child either: it would abort too"

@@ -11,13 +11,21 @@ in one plain-text report the client can copy or attach:
     Pose3D-diagnose.exe --diagnose      # a console, and a dialog
     Help > Diagnostics                  # the same report from the running app
 
-Two rules shape the whole module.
+Three rules shape the whole module.
 
 **Nothing in here may raise.** A diagnostics report that dies on the machine
 it was meant to diagnose is worse than none: it removes the last channel we
 have. Every fact is gathered behind `_safe`, so a missing Qt, an absent
 Blender, a drive that will not answer or a locale API that is not there costs
 its own line and nothing else.
+
+**And not everything that goes wrong raises.** Qt calls qFatal() when it
+cannot load a platform plugin, and qFatal() calls abort(): no exception, no
+`finally`, nothing flushed — which is exactly the machine this report exists
+for. So the report is written and printed as it is produced rather than
+assembled and saved at the end, the two sections that start Qt come last, and
+neither of them builds a QApplication without asking `selftest.qt_would_abort`
+first.
 
 **Its own wording is ASCII, deliberately.** It gets printed to a console
 whose code page is cp1252 in Europe and cp932 in Japan, where a single em dash
@@ -27,7 +35,6 @@ than lose the whole report to protect one character.
 """
 from __future__ import annotations
 
-import io
 import locale
 import os
 import platform
@@ -142,6 +149,15 @@ def _opengl() -> str:
     from PySide6.QtGui import QOffscreenSurface, QOpenGLContext
     from PySide6.QtWidgets import QApplication
 
+    from pose3d import selftest
+
+    # The one thing in this module that can end the process instead of
+    # raising: Qt calls qFatal() when the platform plugin will not load, and
+    # qFatal() aborts. `_safe` cannot catch that, so it is asked about first.
+    problem = selftest.qt_would_abort()
+    if problem is not None:
+        return (f"not asked: {problem}. Building a QApplication to ask would "
+                "abort this process and take the report with it.")
     if QApplication.instance() is None:
         _QAPP = QApplication([])
     surface = QOffscreenSurface()
@@ -198,17 +214,35 @@ def _bundle_check() -> str:
     return integrity.explain(found) if found else "no problems found"
 
 
-def _selftest() -> str:
+class _Sink:
+    """A file-like that hands every write straight on to the report."""
+
+    def __init__(self, out):
+        self._out = out
+
+    def write(self, text: str) -> int:
+        self._out(text)
+        return len(text)
+
+    def flush(self) -> None:
+        pass
+
+
+def _selftest(out) -> None:
     """The self-test transcript, without the preview render.
+
+    Written through as the checks print it rather than collected and returned:
+    the check after the plugin check builds a QApplication, and if that aborts
+    the process, the line naming the missing plugin is the single most useful
+    thing in the whole report. It is not going to sit in a StringIO for that.
 
     Rendering a video drives EEVEE through whatever GL the machine has and can
     take minutes; everything else here answers in seconds. The release gate is
     where the video check belongs.
     """
     from pose3d import selftest
-    buffer = io.StringIO()
-    status = selftest.run(video=False, out=buffer)
-    return f"{buffer.getvalue().rstrip()}\n(exit status {status})"
+    status = selftest.run(video=False, out=_Sink(out))
+    out(f"(exit status {status})\n")
 
 
 # --- assembling it ---------------------------------------------------------
@@ -221,36 +255,82 @@ def _safe(fn) -> str:
     return "(unknown)" if value is None else str(value)
 
 
-def report() -> str:
-    """The whole report, as text. Never raises."""
+def report(emit=None) -> str:
+    """The whole report, as text. Never raises.
+
+    `emit`, when given, is handed every piece of the report the moment it
+    exists, before the next section is gathered. That ordering is the point of
+    it: gathering a section can end the process outright instead of raising
+    (Qt calls qFatal() when it cannot load a platform plugin, and qFatal()
+    aborts), and a report assembled in memory and saved at the end would be
+    lost in precisely the situation it was written for.
+    """
+    parts: list[str] = []
+
+    def out(chunk: str) -> None:
+        parts.append(chunk)
+        if emit is not None:
+            emit(chunk)
+
     # Looked up here rather than in a module-level table so that a caller (and
-    # a test) can replace one of them.
+    # a test) can replace one of them. Qt is the only thing in this module
+    # that can kill the process rather than raise, so the two sections that
+    # start it are ordered behind every section that does not.
     facts = [("system", _system), ("python", _python), ("frozen", _frozen),
              ("app folder", _app_folder), ("log file", _log_file),
              ("install", _install), ("free disk", _free_disk),
-             ("code page", _code_page), ("OpenGL", _opengl),
-             ("Blender", _blender)]
+             ("code page", _code_page), ("Blender", _blender)]
     blocks = [("models", _models), ("bundle check", _bundle_check),
-              ("self-test", _selftest)]
+              ("OpenGL", _opengl)]
 
-    lines = ["Pose3D diagnostics", "==================",
-             f"{'generated':<12}{datetime.now():%Y-%m-%d %H:%M:%S}", ""]
-    lines += [f"{label:<12}{_safe(fn)}" for label, fn in facts]
+    out("Pose3D diagnostics\n==================\n"
+        f"{'generated':<12}{datetime.now():%Y-%m-%d %H:%M:%S}\n\n")
+    for label, fn in facts:
+        out(f"{label:<12}{_safe(fn)}\n")
     for label, fn in blocks:
-        lines += ["", label, "-" * len(label), _safe(fn)]
-    return "\n".join(lines) + "\n"
+        out(f"\n{label}\n{'-' * len(label)}\n{_safe(fn)}\n")
+    out("\nself-test\n---------\n")
+    try:
+        _selftest(out)
+    except Exception as e:                # noqa: BLE001 - see the docstring
+        out(f"(could not be determined: {type(e).__name__}: {e})\n")
+    return "".join(parts)
+
+
+def _open_report_file(path=None):
+    """(handle, path) for the report's file, opened for writing.
+
+    Raises OSError when it cannot be — a read-only install under Program
+    Files, a full disk — which is a fact the report says out loud rather than
+    a reason to produce no report at all.
+    """
+    path = Path(path) if path is not None else default_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return open(path, "w", encoding="utf-8"), path
 
 
 def write_report(path=None, text: str | None = None) -> Path:
     """Write the report to `path` (default: beside the log) and return it.
 
-    `text` is for the caller that already has one: producing it twice would
-    run the self-test twice, Blender and all.
+    Produced straight into the open file, a piece at a time and flushed after
+    each, so a section that kills the process still leaves everything found
+    before it on disk. `text` is for the caller that already has one:
+    producing it twice would run the self-test twice, Blender and all.
     """
-    path = Path(path) if path is not None else default_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(report() if text is None else text, encoding="utf-8")
-    return path
+    handle, path = _open_report_file(path)
+    try:
+        if text is not None:
+            handle.write(text)
+            return path
+
+        def emit(chunk: str) -> None:
+            handle.write(chunk)
+            handle.flush()
+
+        report(emit)
+        return path
+    finally:
+        handle.close()
 
 
 # --- showing it ------------------------------------------------------------
@@ -301,26 +381,39 @@ def show_report(parent, text: str, path=None) -> None:
 
 
 def _print(text: str) -> None:
-    """Print the report to a console that may not be able to spell it."""
+    """Write a piece of the report to a console that may not be able to spell
+    it — and that may not be there at all, in the windowed executable."""
+    stream = sys.stdout
+    if stream is None:
+        return
     try:
-        print(text, flush=True)
+        stream.write(text)
+        stream.flush()
     except UnicodeEncodeError:
-        encoding = getattr(sys.stdout, "encoding", None) or "ascii"
-        print(text.encode(encoding, "replace").decode(encoding, "replace"),
-              flush=True)
+        encoding = getattr(stream, "encoding", None) or "ascii"
+        stream.write(text.encode(encoding, "replace").decode(encoding,
+                                                             "replace"))
+        stream.flush()
 
 
 def _show(text: str, path) -> None:
     """The dialog, from the command line. A failure here costs the dialog and
-    not the report: the console output is the deliverable."""
+    not the report: the console output and the file are the deliverable."""
     global _QAPP
     import traceback
     try:
         from PySide6.QtWidgets import QApplication
 
+        from pose3d import selftest
         from pose3d.app import apply_dark_theme
         app = QApplication.instance()
         if app is None:
+            # Not an exception to catch: Qt aborts the process over a platform
+            # plugin it cannot load, and the report is already written.
+            problem = selftest.qt_would_abort()
+            if problem is not None:
+                _print(f"\n(no dialog: {problem})\n")
+                return
             _QAPP = app = QApplication(sys.argv)
         apply_dark_theme(app)
         show_report(None, text, path)
@@ -331,17 +424,38 @@ def _show(text: str, path) -> None:
 def main() -> int:
     """`--diagnose`: write the report, print it, show it. Always exits 0.
 
+    The file and the console are written as the report is produced rather than
+    after it. This is the command a client is asked to run when the app is
+    already dying, and a Qt that aborts halfway through must still leave
+    behind the part of the report that says so.
+
     The report is not a verdict — `--selftest` is, and its exit status is what
     the release gate reads. This one is a description, and a description that
     exits non-zero would be read as a second failure.
     """
-    text = report()
-    path = None
+    handle, path, unsaved = None, None, ""
     try:
-        path = write_report(text=text)
+        handle, path = _open_report_file()
     except OSError as e:
-        text += (f"\n(this report could not be saved: "
-                 f"{type(e).__name__}: {e})\n")
-    _print(text)
-    _show(text, path)
+        unsaved = (f"\n(this report could not be saved: "
+                   f"{type(e).__name__}: {e})\n")
+
+    parts: list[str] = []
+
+    def emit(chunk: str) -> None:
+        parts.append(chunk)
+        _print(chunk)
+        if handle is not None:
+            handle.write(chunk)
+            handle.flush()
+
+    try:
+        report(emit)
+    finally:
+        if handle is not None:
+            handle.close()
+
+    if unsaved:
+        _print(unsaved)
+    _show("".join(parts) + unsaved, path)
     return 0

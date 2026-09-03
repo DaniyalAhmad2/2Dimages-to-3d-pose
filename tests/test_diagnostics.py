@@ -7,6 +7,8 @@ in CI. The tests below are about the two properties that make it worth
 anything: it answers those questions, and it never fails to be produced.
 """
 import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -133,7 +135,7 @@ def test_the_dialog_hands_over_the_whole_report_not_a_summary(qapp, tmp_path):
 
 def test_diagnose_writes_the_file_and_shows_it(monkeypatch, tmp_path):
     shown = []
-    monkeypatch.setattr(diagnostics, "report", lambda: "REPORT")
+    monkeypatch.setattr(diagnostics, "report", lambda emit=None: emit("REPORT"))
     monkeypatch.setattr(diagnostics, "_show",
                         lambda text, path: shown.append((text, path)))
     monkeypatch.setattr("pose3d.runtime.log_path",
@@ -148,11 +150,11 @@ def test_a_report_that_cannot_be_saved_is_still_shown(monkeypatch, tmp_path):
     """Every reason the file cannot be written — a read-only install under
     Program Files, a full disk — is itself a thing worth reading."""
     shown = []
-    monkeypatch.setattr(diagnostics, "report", lambda: "REPORT")
+    monkeypatch.setattr(diagnostics, "report", lambda emit=None: emit("REPORT"))
     monkeypatch.setattr(diagnostics, "_show",
                         lambda text, path: shown.append((text, path)))
-    monkeypatch.setattr(diagnostics, "write_report",
-                        lambda *a, **k: (_ for _ in ()).throw(
+    monkeypatch.setattr(diagnostics, "_open_report_file",
+                        lambda: (_ for _ in ()).throw(
                             OSError("read-only file system")))
     assert diagnostics.main() == 0
     text, path = shown[0]
@@ -164,9 +166,10 @@ def test_the_console_report_survives_a_code_page_that_cannot_spell_it(
     """The diagnose exe prints to whatever console the client has — cp1252 in
     Europe, cp932 in Japan. A UnicodeEncodeError here would lose the report to
     protect a dash."""
-    monkeypatch.setattr(diagnostics, "report", lambda: "café — 3D")
-    monkeypatch.setattr(diagnostics, "write_report",
-                        lambda *a, **k: (_ for _ in ()).throw(OSError("nope")))
+    monkeypatch.setattr(diagnostics, "report",
+                        lambda emit=None: emit("café — 3D"))
+    monkeypatch.setattr(diagnostics, "_open_report_file",
+                        lambda: (_ for _ in ()).throw(OSError("nope")))
     monkeypatch.setattr(diagnostics, "_show", lambda text, path: None)
 
     class Narrow:
@@ -279,3 +282,99 @@ def test_a_report_that_cannot_be_saved_still_reaches_the_user(
     assert shown == [("REPORT", None)]
     assert recorded_errors, "the save failure is worth saying out loud"
     assert "Access is denied" in recorded_errors[0][1]
+
+
+# --- a Qt that cannot start ------------------------------------------------
+#
+# The machine that needs this report is, more often than not, the machine
+# where Qt itself is broken: the bundle is missing platforms/qwindows.dll, or
+# that DLL is there but a dependency of it is not. Qt does not raise then. It
+# calls qFatal(), which calls abort(): no exception, no `finally`, no file.
+
+def test_the_gl_probe_is_not_run_when_starting_qt_would_abort(monkeypatch):
+    """Asking about OpenGL means building a QApplication, and building one
+    where the platform plugin will not load ends the process. The question is
+    asked before the constructor, because there is no asking it after."""
+    from pose3d import selftest
+    monkeypatch.setattr(selftest, "qt_would_abort",
+                        lambda: "there is no Qt platform plugin in /nowhere")
+    line = diagnostics._opengl()
+    assert "/nowhere" in line
+    assert "abort" in line, "the report has to say why it did not look"
+
+
+def test_the_sections_that_can_kill_the_process_come_last():
+    """Nothing but Qt in here can end the process instead of raising, so the
+    two sections that start Qt are ordered behind every fact that does not."""
+    text = diagnostics.report()
+    assert text.index("models") < text.index("OpenGL") < text.index("self-test")
+
+
+def test_every_fact_is_handed_over_before_the_next_one_is_gathered(monkeypatch):
+    """`report(emit)` is not a convenience: a report assembled in memory and
+    saved at the end is lost in exactly the case it exists for."""
+    emitted = []
+    already = []
+    real = diagnostics._models
+
+    def models():
+        already.extend(emitted)          # everything found before this one
+        return real()
+
+    monkeypatch.setattr(diagnostics, "_models", models)
+    text = diagnostics.report(emitted.append)
+    assert "".join(emitted) == text, "emitted piecemeal, whole at the end"
+    early = "".join(already)
+    assert "system" in early and "Blender" in early
+
+
+def test_the_file_holds_what_was_found_before_the_process_died(
+        monkeypatch, tmp_path):
+    class Aborted(BaseException):
+        """qFatal() in miniature: nothing catches it, nothing runs after."""
+
+    def die(out):
+        raise Aborted()
+
+    monkeypatch.setattr(diagnostics, "_selftest", die)
+    with pytest.raises(Aborted):
+        diagnostics.write_report(tmp_path / "out.txt")
+    text = (tmp_path / "out.txt").read_text(encoding="utf-8")
+    for label in ("system", "install", "models", "OpenGL"):
+        assert label in text, label
+
+
+CHILD = """
+import pathlib
+import sys
+
+from pose3d import diagnostics, selftest
+
+selftest.run = lambda video=True, out=None, **kw: (
+    out.write("  PASS  stubbed for the test\\n"), 0)[1]
+diagnostics.default_path = lambda: pathlib.Path(sys.argv[1])
+raise SystemExit(diagnostics.main())
+"""
+
+
+def test_a_qt_that_cannot_start_does_not_take_the_report_with_it(tmp_path):
+    """The whole feature, against a real Qt that really cannot start.
+
+    `QT_QPA_PLATFORM=nosuchplatform` is the client's broken bundle in
+    miniature. This used to abort the interpreter (exit 134, core dumped)
+    while gathering the OpenGL line, and every fact already found died with
+    it: the Windows version, where the app was extracted, the free disk, the
+    missing files and the self-test transcript that names the plugin.
+    """
+    out = tmp_path / "pose3d-diagnostics.txt"
+    env = dict(os.environ, QT_QPA_PLATFORM="nosuchplatform",
+               PYTHONPATH=str(ROOT))
+    res = subprocess.run([sys.executable, "-c", CHILD, str(out)],
+                         capture_output=True, text=True, timeout=300,
+                         cwd=str(tmp_path), env=env)
+    assert res.returncode == 0, f"{res.returncode}\n{res.stderr[-2000:]}"
+    written = out.read_text(encoding="utf-8")
+    assert "Pose3D diagnostics" in written
+    assert "nosuchplatform" in written, "it says why there is no OpenGL line"
+    assert "stubbed for the test" in written, "the transcript still got there"
+    assert written in res.stdout, "and the console has it too"
