@@ -347,3 +347,45 @@ def test_a_real_character_fault_in_the_placement_is_reported():
     assert view._take_placement() == (None, 0.0)
     assert said and "RuntimeError" in said[0][0]
     assert said[0][1] == "place"           # not withdrawn by a later good skin
+
+
+@needs_character()
+def test_the_face_points_reach_the_character_in_the_pose_space():
+    """The neck aims at the EAR MIDPOINT, which is a POSITION.
+
+    So the face points must reach `Character` in the same space as the pose.
+    `set_pose` shifts the pose — by the take placement, or by the per-frame
+    centring before a take is known — and used to hand the face points over
+    unshifted, on the claim that only a direction basis is read off them. The
+    neck then aimed at ears sitting one whole placement offset away from the
+    head: on the client's take that folded the head bone 136 deg against the
+    neck and crushed the mesh between them. The drawn body must be the body
+    the character gives for the pose and the face points in ONE space.
+    """
+    from tests.test_retarget import _head_pts
+    poses = _travelling_take()
+    view = _headless_view(poses)
+    ch = view._character
+    place, _travel = view._take_placement()
+    assert place is not None
+
+    k = 3
+    pose = poses[k]
+    valid = ~np.isnan(pose).any(1)
+    head = _head_pts(ch, pose)                  # capture space, like the pose
+
+    def shape(v):
+        return v - v.mean(0)
+
+    # the take-placement path: exact
+    view.set_pose(pose, head)
+    want, _faces, _cj = ch.pose_and_joints(pose - place, valid, head - place)
+    assert np.allclose(view.drawn["body"], want, atol=1e-6), \
+        "the face points were not placed with the body"
+
+    # the per-frame path (no take yet): same shape, wherever it is seated
+    view._take, view._place = None, None
+    view.set_pose(pose, head)
+    got = view.drawn["body"]
+    assert np.allclose(shape(got), shape(want), atol=1e-6), \
+        "the face points were not centred with the body"

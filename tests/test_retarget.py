@@ -1022,3 +1022,33 @@ def test_the_exported_matrices_are_the_view_through_one_similarity():
         f"the export is not the view: {np.abs(resid - resid.mean(0)).max():.9f}"
     # ...and the constant IS the take's pelvis mapped onto the rig's hips
     assert np.allclose(resid.mean(0), ch.hips_world - ref * ch._scale, atol=1e-9)
+
+
+def test_the_pose_and_face_points_share_one_space():
+    """The contract every caller of `_skin_matrices` is held to.
+
+    Moving the subject — pose AND face points together — changes nothing about
+    the posed rig: `to_rig` centres on the pelvis and the head basis is
+    directions only. Moving the pose alone is a different subject, whose ears
+    sit somewhere else: the neck aims there. A caller that shifts one and not
+    the other (the 3D view did, by its placement offset) gets that second
+    subject, with the head folded against the neck.
+    """
+    ch = _ch()
+    sub = _subject_from_rig(ch)
+    ch.fit_to_subject(sub[None])
+    valid = ~np.isnan(sub).any(1)
+    head = _head_pts(ch, sub)
+    t = np.array([0.37, -0.52, 0.21])
+
+    here = ch._skin_matrices(sub, valid, head)[0]
+    moved = ch._skin_matrices(sub + t, valid, head + t)[0]
+    assert np.allclose(here, moved, atol=1e-9)
+
+    # the head bone's own orientation is the face basis, directions only, so
+    # it does NOT move; the neck, aimed at the displaced ear midpoint, does
+    apart = ch._skin_matrices(sub + t, valid, head)[0]
+    nb, hb = ch.role["neck"], ch.role["head"]
+    assert np.allclose(here[hb][:3, :3], apart[hb][:3, :3], atol=1e-9)
+    assert not np.allclose(here[nb][:3, :3], apart[nb][:3, :3], atol=1e-3), \
+        "the ear midpoint is not being used as a position any more: revisit"

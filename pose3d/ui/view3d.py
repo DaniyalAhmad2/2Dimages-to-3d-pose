@@ -305,21 +305,29 @@ class View3D(gl.GLViewWidget):
             # ONE placement for the whole take, so what moves on screen is the
             # subject and nothing else — and it is the same rigid map the
             # export applies (see `_take_placement`).
-            v = v - place
+            shift = np.asarray(place, float)
         else:
             # no take yet: centre horizontally and ground tentatively on the
             # lowest joint (the ankle, since feet aren't detected)
-            cx, cy = vv[:, 0].mean(), vv[:, 1].mean()
-            v[:, 0] -= cx; v[:, 1] -= cy; v[:, 2] -= vv[:, 2].min()
+            shift = np.array([vv[:, 0].mean(), vv[:, 1].mean(), vv[:, 2].min()])
+        v = v - shift
 
         # pose the character, then (per-frame path only) ground it on the sole
         # under its lower ankle so the feet rest ON the plane instead of the
         # ankle, which would pierce it.
         vpose = np.where(valid[:, None], v, np.nan)
-        # Same world->view rotation as the pose; the grounding translation is
-        # deliberately NOT applied, because only a direction basis is read off
-        # these and directions are translation-invariant.
-        vhead = self._to_view(head3d) if head3d is not None else None
+        # The face points take the SAME rigid map as the pose — the rotation
+        # AND the shift — because the character reads a POSITION off them: the
+        # neck aims at the ear midpoint (`character._EAR_MID`). They used to
+        # get the rotation only, on the claim that just a direction basis is
+        # read off them; that left the ears one placement offset away from the
+        # head, the neck aimed there, and the head bone (oriented by the face
+        # basis, which IS shift-invariant) folded 136 deg against it on the
+        # client's take, crushing the mesh between the two. The grounding `dz`
+        # below is applied after the skin, so it needs no counterpart here.
+        vhead = None
+        if head3d is not None:
+            vhead = self._to_view(np.asarray(head3d, float).reshape(-1, 3)) - shift
         verts, faces, cj, drop = self._skin(vpose, vhead)
         if place is None and verts is not None and len(verts):
             dz = ground_datum(verts, cj, drop)
