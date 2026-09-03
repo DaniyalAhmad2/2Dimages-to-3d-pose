@@ -180,6 +180,27 @@ def _pump(proc, chunks: list, on_line, timeout, idle_timeout, cancelled) -> str:
     return stopped
 
 
+def _timeout_detail(timeout, idle_timeout) -> str:
+    """Why a stopped export was stopped, naming only the deadlines there are.
+
+    Either may be None, which means there is no deadline of that kind — and
+    `f"{None:g}"` is a TypeError, so the old message died while reporting the
+    timeout instead of returning it.
+    """
+    if idle_timeout is not None and timeout is not None:
+        what = (f"produced nothing for {idle_timeout:g} s (or ran past "
+                f"{timeout:g} s)")
+    elif idle_timeout is not None:
+        what = f"produced nothing for {idle_timeout:g} s"
+    elif timeout is not None:
+        what = f"ran past {timeout:g} s"
+    else:                                 # no deadline: only _stop's own wait
+        what = "did not finish"
+    return (f"Blender {what} and was stopped.\n\nA long take can legitimately "
+            "take a while to render; try exporting without the video, or a "
+            "shorter selection.")
+
+
 def _failure(reason: str, detail: str, returncode: int,
              note: str = "", stdout: str = "") -> "ExportResult":
     """The failure as a value. `stdout` is whatever the child did manage to
@@ -589,10 +610,7 @@ def export_animation(
     stdout, stderr, rc = "".join(chunks), "", proc.returncode
     if stopped == "timeout":
         return _failure("blender_timeout",
-                        f"Blender produced nothing for {idle_timeout:g} s (or "
-                        f"ran past {timeout} s) and was stopped.\n\nA long "
-                        "take can legitimately take a while to render; try "
-                        "exporting without the video, or a shorter selection.",
+                        _timeout_detail(timeout, idle_timeout),
                         124, note=fallback_note, stdout=stdout)
     if stopped == "cancelled":
         return _failure("blender_cancelled",

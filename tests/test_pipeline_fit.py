@@ -389,6 +389,47 @@ def test_a_cancelled_detection_changes_nothing():
     assert (data.keypoint_model, data.head_source, data.detector) == provenance
 
 
+class _ReusedBuffer(KeypointDetector):
+    """A detector that hands back the SAME face arrays on every call.
+
+    Reusing an output buffer is ordinary in an inference wrapper, and it is
+    what makes the staged answer's `.copy()` load-bearing.
+    """
+    head_source = "nose"
+
+    def __init__(self, base_xy):
+        from pose3d.core.skeleton import NUM_HEAD_KP
+
+        self._xy = np.asarray(base_xy, float) + 40.0
+        self._head_xy = np.zeros((NUM_HEAD_KP, 2))
+        self._head_scores = np.full(NUM_HEAD_KP, 0.5)
+
+    def detect(self, image_bgr):
+        return Detection(xy=self._xy.copy(),
+                         scores=np.full(NUM_JOINTS, 0.5),
+                         head_xy=self._head_xy,
+                         head_scores=self._head_scores)
+
+
+def test_a_detection_keeps_its_own_copy_of_the_face_points():
+    """The body arrays were copied out of the detector's answer and the face
+    ones were not, so every frame's face points were the same array — the
+    detector's — and the next thing to write into that buffer moved all of
+    them at once."""
+    from pose3d.pipeline import detect_project
+
+    data, _ = _take(n=2)
+    detector = _ReusedBuffer(data.frames[0].kp2d[CAM_LEFT])
+    detect_project(data, detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    detector._head_xy[0] = (999.0, 999.0)      # the next image's answer
+    detector._head_scores[0] = 0.99
+    for f in data.frames:
+        assert f.head2d[CAM_LEFT][0].tolist() == [0.0, 0.0]
+        assert f.head_scores[CAM_LEFT][0] == 0.5
+    assert data.frames[0].head2d[CAM_LEFT] is not data.frames[1].head2d[CAM_LEFT]
+
+
 def test_a_detection_that_finishes_commits_everything_at_once():
     from pose3d.pipeline import detect_project
 

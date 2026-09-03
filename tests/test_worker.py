@@ -129,6 +129,70 @@ def test_a_cancelled_job_is_not_an_error(qapp, recorded_errors):
     assert recorded_errors == []
 
 
+def test_the_progress_dialogs_cancel_reaches_the_job(qapp, monkeypatch,
+                                                     recorded_errors):
+    """The wiring the Cancel button rides on: the dialog's `canceled` signal
+    is the only thing that ever calls `Job.cancel`, and until this test
+    nothing exercised it — every cancel in the suite called `job.cancel()`
+    directly, so a dropped connection would have gone unnoticed."""
+    from PySide6.QtCore import QTimer
+
+    from pose3d.ui import worker
+
+    dialogs = []
+    real = worker.QProgressDialog
+    monkeypatch.setattr(worker, "QProgressDialog",
+                        lambda *a, **kw: dialogs.append(real(*a, **kw))
+                        or dialogs[-1])
+
+    def until_cancelled(report, cancelled):
+        deadline = time.monotonic() + 10
+        while not cancelled() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not cancelled():
+            return "nobody pressed Cancel"
+        raise worker.Cancelled()
+
+    def press():
+        if dialogs:
+            dialogs[0].canceled.emit()
+        else:
+            QTimer.singleShot(10, press)
+
+    QTimer.singleShot(0, press)
+    res = worker.run_job(None, "Detection", until_cancelled)
+
+    assert isinstance(res, worker.Cancelled)
+    assert recorded_errors == []
+
+
+def test_a_finished_job_leaves_neither_a_dialog_nor_a_thread_behind(
+        qapp, monkeypatch):
+    """`run_job` is called once per detection, re-detect, recompute, export
+    and import phase. A QProgressDialog and a QThread kept alive per call is a
+    leak the user pays for over a long session."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from shiboken6 import Shiboken
+
+    from pose3d.ui import worker
+
+    made = []
+    real_dialog, real_job = worker.QProgressDialog, worker.Job
+    monkeypatch.setattr(worker, "QProgressDialog",
+                        lambda *a, **kw: made.append(real_dialog(*a, **kw))
+                        or made[-1])
+    monkeypatch.setattr(worker, "Job",
+                        lambda *a, **kw: made.append(real_job(*a, **kw))
+                        or made[-1])
+
+    assert worker.run_job(None, "Detection",
+                          lambda report, cancelled: "done") == "done"
+
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert len(made) == 2
+    assert [Shiboken.isValid(obj) for obj in made] == [False, False]
+
+
 def test_a_job_that_cannot_be_cancelled_still_runs(qapp):
     """Some phases cannot honour a Cancel — a whole-take recompute is one
     answer, not n. Those are shown without the button rather than with a dead

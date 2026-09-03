@@ -62,6 +62,16 @@ def restart_with_software_gl(widget=None) -> bool:
     args = ["--software-gl"] if IS_FROZEN else ["-m", "pose3d.app",
                                                 "--software-gl"]
     if not QProcess.startDetached(sys.executable, args):
+        # The one control on the placeholder whose whole purpose is to offer a
+        # way out; failing it silently leaves a button that does nothing on
+        # the screen a user only reaches because something is already wrong.
+        from pose3d.ui import guard
+        guard.report_error(
+            widget, "Could not restart Pose3D",
+            "Pose3D could not start a new copy of itself, so the software 3D "
+            "setting has not been applied.\n\nIt has been remembered: close "
+            "Pose3D and start it again, or start it once with the "
+            "--software-gl option.")
         return False
     if widget is not None:
         widget.window().close()

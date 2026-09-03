@@ -421,8 +421,10 @@ class MainWindow(QMainWindow):
         """
         self._apply_view_orientation()   # poses changed: re-fit the character
         if self.model.project.frames:
+            # the ONLY part that needs a frame: `frame()` would raise on a
+            # take with no frames. Everything below is refreshed either way.
             self.model.set_frame(self.model.current)
-            self._refresh_timeline_status()
+        self._refresh_timeline_status()
         self._refresh_quality()
         self._refresh_history()
 
@@ -512,11 +514,12 @@ class MainWindow(QMainWindow):
     def _on_recalibrate(self):
         # No Cancel: the triangulation and the bone fit are ONE answer about
         # the whole take, and a button that could only abort before the work
-        # started would be the same dead control the export used to have.
+        # started would be the same dead control the export used to have. So
+        # `cancelled` is not passed on either — with no button behind it, it
+        # is a flag that can never become True.
         with self.model.quiet():
             res = run_job(self, "Recompute 3D", lambda report, cancelled:
-                          self.model.recompute_all(on_progress=report,
-                                                   cancelled=cancelled),
+                          self.model.recompute_all(on_progress=report),
                           cancellable=False)
         if self._job_stopped(res, "The recompute"):
             return

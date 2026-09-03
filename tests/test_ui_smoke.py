@@ -828,11 +828,65 @@ def test_the_import_copy_loop_reports_every_pair(tmp_path):
         lp = src / f"left_{i}.jpg"; lp.write_bytes(b"x"); left.append(lp)
         rp = src / f"right_{i}.jpg"; rp.write_bytes(b"x"); right.append(rp)
 
+    images = tmp_path / "proj" / "images"
     seen = []
+
+    def report(done, total, label):
+        # how many pairs are already on disk when this pair is announced: the
+        # report has to come BEFORE the copy it names, or the label says
+        # "pair 2" while the copy that is stuck is pair 3's
+        copied = len(list(images.iterdir())) // 2 if images.is_dir() else 0
+        seen.append((done, total, label, copied))
+
     project = build_project(left, right, name="p", copy_into=tmp_path / "proj",
-                            on_progress=lambda d, t, label: seen.append((d, t)))
+                            on_progress=report)
     assert len(project.frames) == 3
-    assert seen == [(1, 3), (2, 3), (3, 3)]
+    assert [(d, t, c) for d, t, _, c in seen] == [(0, 3, 0), (1, 3, 1),
+                                                  (2, 3, 2)]
+    assert [label for *_, label, _ in seen] == [
+        f"Copying image pair {i} of 3" for i in (1, 2, 3)]
+
+
+def test_a_job_on_a_project_with_no_frames_still_refreshes_the_window(qapp):
+    """`frame()` would raise on a take with no frames, so the frame replay is
+    guarded — but everything else the tail refreshes has to run anyway, or a
+    recompute on an empty project leaves the sidebar and the timeline showing
+    what they showed before it."""
+    from pose3d.core.project import ProjectData
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    win = MainWindow(ProjectModel(ProjectData(name="Empty"), None))
+    seen = []
+    win._refresh_timeline_status = lambda: seen.append("timeline")
+    win._refresh_quality = lambda: seen.append("quality")
+    win._refresh_history = lambda: seen.append("history")
+
+    win._refresh_after_job()
+
+    assert seen == ["timeline", "quality", "history"]
+
+
+def test_a_recompute_with_no_cancel_button_does_not_claim_one(qapp):
+    """`cancellable=False` means the dialog has no Cancel, so the flag handed
+    to the job can never become True. Passing it anyway tells `recompute_all`
+    to poll a promise nothing can keep."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    model = ProjectModel(data, rig)
+    win = MainWindow(model)
+    seen = {}
+
+    def recompute_all(on_progress=None, cancelled=None):
+        seen["on_progress"] = on_progress is not None
+        seen["cancelled"] = cancelled
+
+    model.recompute_all = recompute_all
+    win._on_recalibrate()
+
+    assert seen == {"on_progress": True, "cancelled": None}
 
 
 def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
@@ -1095,6 +1149,25 @@ def test_the_restart_control_writes_the_marker_and_relaunches(
 
     assert (tmp_path / SOFTWARE_GL_MARKER).exists()
     assert "--software-gl" in started["args"]
+
+
+def test_a_restart_that_never_starts_says_so(qapp, monkeypatch, tmp_path,
+                                             recorded_errors):
+    """The one control on that placeholder whose whole purpose is to offer a
+    way out. `startDetached` answering False left it doing nothing at all."""
+    from PySide6.QtCore import QProcess
+
+    from pose3d.ui.view3d import restart_with_software_gl
+
+    monkeypatch.setattr("pose3d.runtime.app_dir", lambda: tmp_path)
+    monkeypatch.setattr(QProcess, "startDetached",
+                        staticmethod(lambda prog, args: False))
+
+    assert restart_with_software_gl() is False
+    assert len(recorded_errors) == 1
+    title, text = recorded_errors[0]
+    assert "software" in text.lower()
+    assert "--software-gl" in text, "no way to do it by hand either"
 
 
 def test_a_healthy_gl_view_shows_no_placeholder(qapp, monkeypatch):

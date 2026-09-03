@@ -59,10 +59,12 @@ def build_project(
     If ``copy_into`` is given, images are copied into ``<copy_into>/images``
     and referenced by that path (so the project folder is self-contained).
 
-    ``on_progress(done, total, label)`` is called per PAIR, because that is
-    the granularity at which this stalls: a virus scanner or a OneDrive
-    placeholder holds up one `copy2` at a time, and the import used to sit
-    behind a modal dialog that could say nothing about which one.
+    ``on_progress(done, total, label)`` is called BEFORE each pair is copied,
+    because that is the granularity at which this stalls: a virus scanner or a
+    OneDrive placeholder holds up one `copy2` at a time, and the import used
+    to sit behind a modal dialog that could say nothing about which one. The
+    label therefore names the pair being copied and ``done`` is how many are
+    already there.
     """
     pairs = match_frames(left, right)
     project = ProjectData(name=name, fps=fps, calibration_ref="calibration")
@@ -76,6 +78,12 @@ def build_project(
         num = _num_key(lp)
         fid = f"{num:04d}" if num is not None else f"{i:04d}"
         lpath, rpath = Path(lp), Path(rp)
+        # BEFORE the copy, not after it: the point of reporting per pair is to
+        # name the pair the copy is stuck on, and a report that follows the
+        # copy names the last one that finished.
+        if on_progress is not None:
+            on_progress(i, len(pairs),
+                        f"Copying image pair {i + 1} of {len(pairs)}")
         if img_dir is not None:
             ldst = img_dir / f"left_{fid}{lpath.suffix.lower()}"
             rdst = img_dir / f"right_{fid}{rpath.suffix.lower()}"
@@ -85,7 +93,4 @@ def build_project(
         project.frames.append(Frame(
             frame_id=fid,
             images={CAM_LEFT: str(lpath), CAM_RIGHT: str(rpath)}))
-        if on_progress is not None:
-            on_progress(i + 1, len(pairs),
-                        f"Copying image pair {i + 1} of {len(pairs)}")
     return project
