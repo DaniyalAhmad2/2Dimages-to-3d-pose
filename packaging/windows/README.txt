@@ -30,12 +30,13 @@ Running it
 What is in this folder
 ----------------------
 
-  Pose3D.exe        the application
-  _internal\        its libraries — do not move or delete
-  blender\          Blender 5.1, used to write the BVH/FBX/MP4 exports
-  models\           the pose detection models
-  workspace\        where your projects and exports go by default
-  README.txt        this file
+  Pose3D.exe            the application
+  Pose3D-diagnose.exe   run this if something goes wrong (see below)
+  _internal\            its libraries — do not move or delete
+  blender\              Blender, used to write the BVH/FBX/MP4 exports
+  models\               the pose detection models
+  workspace\            where your projects and exports go by default
+  README.txt            this file
 
 
 Using it
@@ -57,9 +58,26 @@ accuracy on the right and a frame timeline along the bottom.
 If something goes wrong
 -----------------------
 
-If the app closes unexpectedly or an export fails, a file called
-pose3d-log.txt is written next to Pose3D.exe. Send that file over and it will
-usually say exactly what happened.
+Double-click Pose3D-diagnose.exe.
+
+It runs the same checks this build was verified with before it shipped — the
+libraries, Blender, the character rig, the pose models, OpenGL — and says
+which one is wrong. It writes everything it found to
+
+  pose3d-diagnostics.txt
+
+next to the .exe. Send that one file over: it names which files the bundle
+found, where it looked and what your machine reported, which is almost always
+enough to answer the question without a round of "what happens if you...".
+
+(It prints into a console window, which Windows may close again as soon as it
+finishes. That is fine — the file is what matters.)
+
+If the app got as far as opening, one more file is worth sending with it:
+
+  pose3d-log.txt         written next to Pose3D.exe whenever the app runs.
+                         Crashes and library errors go here, because a
+                         windowed application has no console to print to.
 
 Three things worth checking first:
 

@@ -84,3 +84,47 @@ never sees a tag (F42).
   and PyOpenGL) is out of scope this round. Cost if wrong: on a machine with no driver at all the restart
   changes nothing and the placeholder stays — which is why the placeholder names Help ▸ Diagnostics
   rather than promising a fix.
+- **The delivery stays an unsigned .zip this round: no installer, no code signing.** A certificate is a
+  purchase, an identity check and a renewal the client would inherit, and an MSI/Inno installer is a
+  second packaging path to keep working — neither buys anything the zip does not, because SmartScreen's
+  warning is about the signature, not the container. What is bought instead is that the warning is
+  *expected*: `README.txt` and README.md name the "Windows protected your PC" screen, say it is not a
+  virus warning, and say which two buttons dismiss it. Cost if wrong: every first launch on a new machine
+  costs the client two clicks, and an antivirus with an aggressive reputation heuristic can still
+  quarantine a file out of `_internal\` — which is why the DLL audit, the layout manifest and
+  `Pose3D-diagnose.exe` exist.
+- **onefile is still rejected.** A onefile build unpacks ~500 MB into `%TEMP%` on every launch, which is
+  slow, breaks whenever `%TEMP%` is small, redirected or scanned, and puts the bundled Blender and the
+  three checkpoints somewhere `app_dir()` cannot address. onedir plus a folder is what the client already
+  runs. Cost if wrong: they extract a folder instead of a single file, which the README's first
+  instruction covers.
+- **Nothing is hashed at startup.** `pose3d/integrity.py` checks names and sizes only; the sha256s in
+  `packaging/windows/inputs.json` are verified by the build and by the release gate, where a mismatch can
+  be fixed. Hashing ~1.3 GB on the client's machine would add seconds to every launch, on the one file
+  set most likely to be sitting on a network drive or a OneDrive placeholder, to detect a corruption that
+  a missing-or-empty check already catches in its usual forms (an interrupted extraction, a quarantined
+  file, a placeholder stub). Cost if wrong: a file that is present, the right size and silently corrupt
+  is reported by whatever fails to load it rather than by name at startup.
+- **The window opens clamped to the screen it opens on.** The designed 1540x920 is larger than the
+  client's 1366x768 laptop, and at 150 % scaling the timeline opened below the bottom edge and the right
+  column past the side — with no way to drag a title bar above the top of the desktop to recover them.
+  `_initial_size()` clamps to `availableGeometry()` less a margin for the title bar, and the sidebar sets
+  a *minimum* width rather than a fixed one so the layout can still give way. Cost if wrong: on a very
+  small screen the window opens at the screen's size and the panels are tight, rather than opening
+  partly off-screen.
+- **One composite action builds the Windows bundle, and the gate is its own workflow.**
+  `.github/actions/windows-bundle` is used verbatim by `windows-bundle.yml` (the gate) and
+  `windows-release.yml` (the release), so the archive attached to a release is one that has already been
+  extracted into a client-shaped path and self-tested from there. It is a separate workflow rather than a
+  job in `windows-test.yml` because a `paths` filter decides whether a WORKFLOW runs, not whether one of
+  its jobs does: filtering there to spare the test job a ~40-minute bundle build would have stopped
+  running the test suite on most pull requests. Cost if wrong: a push to `main` that touches only
+  `pose3d.spec` or `tools/` spends 40 minutes of runner time.
+- **The release gate's OpenGL evidence is structural, not behavioural.** The runner has no GPU; Qt cannot
+  create a hardware context, and the software renderer the bundle ships (`opengl32sw.dll`) drives Qt but
+  not pyqtgraph, which draws through PyOpenGL and loads the machine's own `opengl32.dll`. So the gate
+  keeps `POSE3D_NO_GL=1` for that one check, with the reason written where it is set, and proves the 3D
+  view was PACKAGED instead: the manifest requires `opengl32sw.dll` and `qwindows.dll` in the EXTRACTED
+  copy, and `check_qt_opengl`'s ImportError path stays fatal. Cost if wrong: a GL fault that is neither a
+  missing file nor a failed import reaches the client, where `Pose3D.exe --selftest` is strict and
+  `Pose3D-diagnose.exe` prints the answer. See `docs/windows-release-gate.md`.
