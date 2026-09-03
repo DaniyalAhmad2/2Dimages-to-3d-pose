@@ -908,30 +908,24 @@ def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
 # them live on another. These are the seams where they meet.
 
 
-def _accented_image(tmp_path):
-    """A real JPEG under a folder name the machine's ANSI code page cannot
-    encode — the client's own `C:\\Users\\Müller`."""
+def test_the_window_reads_images_through_a_path_windows_can_encode(
+        qapp, tmp_path):
+    """`cv2.imread` hands the path to OpenCV's C++ file layer, which encodes it
+    in the machine's code page; a name that does not survive that comes back as
+    a silent None. The window's default reader must be the one that does not."""
     import cv2
 
+    from pose3d.imageio import read_image
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    # the client's own C:\Users\Müller, as a real JPEG
     folder = tmp_path / "Müller"
     folder.mkdir()
     path = folder / "left_0001.jpg"
     ok, buf = cv2.imencode(".jpg", np.full((4, 6, 3), 127, np.uint8))
     assert ok
     path.write_bytes(buf.tobytes())
-    return path
-
-
-def test_the_window_reads_images_through_a_path_windows_can_encode(
-        qapp, tmp_path):
-    """`cv2.imread` hands the path to OpenCV's C++ file layer, which encodes it
-    in the machine's code page; a name that does not survive that comes back as
-    a silent None. The window's default reader must be the one that does not."""
-    from pose3d.imageio import read_image
-    from pose3d.ui.main_window import MainWindow
-    from pose3d.ui.model import ProjectModel
-
-    path = _accented_image(tmp_path)
     data, rig, gt = _project_with_rig()
     for f in data.frames:
         f.images = {CAM_LEFT: str(path), CAM_RIGHT: str(path)}
@@ -1049,7 +1043,7 @@ def test_a_slot_that_raises_says_so_instead_of_appearing_to_do_nothing(
     win.btn_save.click()
 
     assert len(recorded_errors) == 1
-    title, text = recorded_errors[0]
+    text = recorded_errors[0][1]
     assert "_on_save" in text
     assert "the project folder went away" in text
 
@@ -1166,6 +1160,7 @@ def test_a_restart_that_never_starts_says_so(qapp, monkeypatch, tmp_path,
     assert restart_with_software_gl() is False
     assert len(recorded_errors) == 1
     title, text = recorded_errors[0]
+    assert title == "Could not restart Pose3D"
     assert "software" in text.lower()
     assert "--software-gl" in text, "no way to do it by hand either"
 

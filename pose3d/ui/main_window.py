@@ -42,7 +42,7 @@ from pose3d.ui.worker import Cancelled, run_job
 DESIGNED_SIZE = (1540, 920)
 
 
-def _initial_size(designed=DESIGNED_SIZE) -> tuple[int, int]:
+def _initial_size() -> tuple[int, int]:
     """The size to open at: the designed one, clamped to this screen.
 
     1540x920 is larger than the client's 1366x768 laptop, so the window opened
@@ -55,10 +55,10 @@ def _initial_size(designed=DESIGNED_SIZE) -> tuple[int, int]:
 
     screen = QGuiApplication.primaryScreen()
     if screen is None:                   # no display at all: nothing to clamp
-        return designed
+        return DESIGNED_SIZE
     avail = screen.availableGeometry()
-    return (min(designed[0], avail.width() - 40),
-            min(designed[1], avail.height() - 80))
+    return (min(DESIGNED_SIZE[0], avail.width() - 40),
+            min(DESIGNED_SIZE[1], avail.height() - 80))
 
 
 def _export_status(line: str) -> str:

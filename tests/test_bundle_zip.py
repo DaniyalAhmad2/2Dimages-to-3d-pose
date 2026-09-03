@@ -11,6 +11,7 @@ That gate existed only as PowerShell pasted into the release workflow, which is
 Windows-only and therefore never ran here. This is the same rule as a pure
 function, tested on synthetic names on any platform.
 """
+import os
 import subprocess
 import sys
 import zipfile
@@ -147,8 +148,6 @@ def test_a_7z_that_fails_is_one_line_and_not_a_traceback(tmp_path, monkeypatch,
     """A full disk or a locked output file is an ordinary way for the release
     step to end. It used to end in a CalledProcessError traceback out of a
     build script, which says nothing the person reading the log can act on."""
-    import os
-
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     fake = bin_dir / "7z"
