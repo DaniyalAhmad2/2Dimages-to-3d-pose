@@ -171,9 +171,9 @@ try {
     New-Item -ItemType Directory -Force -Path (Join-Path $Out "workspace") | Out-Null
     Copy-Item -Force "packaging/windows/README.txt" (Join-Path $Out "README.txt")
     # The fallback for a diagnose exe that will not run: a double-clickable
-    # script that runs the self-test and shows the log. It costs 1 KB and it
-    # is the only route to a diagnosis that needs neither the GUI nor the
-    # second executable.
+    # script that runs the self-test and shows the log. Two kilobytes, and
+    # the only route to a diagnosis that needs neither the GUI nor the second
+    # executable.
     Copy-Item -Force "packaging/windows/Diagnose.cmd" (Join-Path $Out "Diagnose.cmd")
 
     $mb = [math]::Round(

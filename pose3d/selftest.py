@@ -284,10 +284,13 @@ def diagnose_exe() -> Path:
 def _software_gl_child() -> tuple[bool | None, str]:
     """Re-run JUST the GL check in one child process forced onto software GL.
 
-    (True | False | None, detail). None means the child could not be run at
-    all, which is "software path untested" and never "software GL also
-    failed" — the second is a diagnosis we would not have made, and it is the
-    one that sends the client shopping for a graphics card.
+    (True | False | None, detail). None means the child did not answer the
+    question — it would not start, or it skipped, or it died before saying
+    anything — which is "software path untested" and never "software GL also
+    failed": the second is a diagnosis we would not have made, and it is the
+    one that sends the client shopping for a graphics card. Only the child's
+    own PASS line is taken as "it rendered"; a returncode is not enough,
+    because a skipped or degraded check also exits 0.
 
     A child, not a retry in this process, and that is not a preference: Qt
     reads AA_UseSoftwareOpenGL when the QApplication is constructed and
@@ -309,8 +312,12 @@ def _software_gl_child() -> tuple[bool | None, str]:
     except (OSError, subprocess.SubprocessError) as e:
         return None, f"could not run {cmd[0]}: {type(e).__name__}: {e}"
     out = ((res.stdout or "") + (res.stderr or "")).strip()
-    return res.returncode == 0, (out.splitlines()[-1] if out
-                                 else f"rc={res.returncode}")
+    verdict = next((line.strip() for line in out.splitlines()
+                    if line.strip()[:4] in ("PASS", "FAIL", "SKIP", "WARN")), "")
+    if not verdict or verdict.startswith("SKIP"):
+        return None, (verdict or f"{Path(cmd[0]).name} said nothing about "
+                      f"OpenGL (rc={res.returncode})")
+    return verdict.startswith("PASS"), verdict
 
 
 def _gl_failure(exc: Exception) -> Exception:

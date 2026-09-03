@@ -556,9 +556,9 @@ def test_the_software_retry_runs_this_module_from_a_checkout(monkeypatch):
     seen = {}
 
     class Res:
-        returncode = 1
-        stdout = ""
-        stderr = "no display"
+        returncode = 0
+        stdout = "  PASS  Qt + OpenGL 3D view — a frame\n"
+        stderr = ""
 
     def run(cmd, **kw):
         seen["cmd"] = cmd
@@ -568,10 +568,32 @@ def test_the_software_retry_runs_this_module_from_a_checkout(monkeypatch):
     monkeypatch.setattr(selftest, "IS_FROZEN", False)
     for var in ("QT_OPENGL", "POSE3D_GL"):
         monkeypatch.delenv(var, raising=False)
-    ok, detail = selftest._software_gl_child()
-    assert ok is False
+    assert selftest._software_gl_child()[0] is True
     assert seen["cmd"][1:] == ["-m", "pose3d.selftest", "--gl-only"]
-    assert "no display" in detail
+
+
+@pytest.mark.parametrize("printed, verdict", [
+    ("  PASS  Qt + OpenGL 3D view — rendered 320x240\n", True),
+    ("  FAIL  Qt + OpenGL 3D view — no context\nFAILED: Qt + OpenGL\n", False),
+    ("  WARN  Qt + OpenGL 3D view — no usable OpenGL\n", False),
+    ("  SKIP  Qt + OpenGL 3D view — no DISPLAY\n", None),
+    ("Traceback (most recent call last):\n", None),
+])
+def test_the_child_is_believed_only_when_it_says_PASS(monkeypatch, printed,
+                                                      verdict):
+    """Its exit status is not the answer: a check that SKIPs and one that
+    degrades to a WARN both exit 0, and reading that as "software OpenGL
+    works" would send the client to a --software-gl that renders nothing."""
+    class Res:
+        returncode = 0
+        stdout = printed
+        stderr = ""
+
+    monkeypatch.setattr(selftest.subprocess, "run", lambda *a, **k: Res())
+    monkeypatch.setattr(selftest, "IS_FROZEN", False)
+    for var in ("QT_OPENGL", "POSE3D_GL"):
+        monkeypatch.delenv(var, raising=False)
+    assert selftest._software_gl_child()[0] is verdict
 
 
 def test_the_child_does_not_spawn_a_child_of_its_own(monkeypatch):

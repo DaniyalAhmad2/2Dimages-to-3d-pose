@@ -19,10 +19,11 @@ have. Every fact is gathered behind `_safe`, so a missing Qt, an absent
 Blender, a drive that will not answer or a locale API that is not there costs
 its own line and nothing else.
 
-**It is ASCII, deliberately.** It gets printed to a console whose code page is
-cp1252 in Europe and cp932 in Japan, where one em dash is a
-UnicodeEncodeError; `_print` re-encodes anything the transcript drags in
-rather than lose the report to protect a character.
+**Its own wording is ASCII, deliberately.** It gets printed to a console
+whose code page is cp1252 in Europe and cp932 in Japan, where a single em dash
+is a UnicodeEncodeError. Not everything it quotes is ours — the self-test
+transcript and Blender's own output are not — so `_print` re-encodes rather
+than lose the whole report to protect one character.
 """
 from __future__ import annotations
 
@@ -76,8 +77,8 @@ def _app_folder() -> str:
 def _log_file() -> str:
     log = runtime.log_path()
     if log is None:
-        return ("none — nothing could be written anywhere, so the log went to "
-                "the null device")
+        return ("none: nothing could be written anywhere, so the log went "
+                "to the null device")
     return f"{log}" + ("" if log.exists() else "   (nothing written to it yet)")
 
 
@@ -312,12 +313,12 @@ def _print(text: str) -> None:
 def _show(text: str, path) -> None:
     """The dialog, from the command line. A failure here costs the dialog and
     not the report: the console output is the deliverable."""
+    global _QAPP
     import traceback
     try:
         from PySide6.QtWidgets import QApplication
 
         from pose3d.app import apply_dark_theme
-        global _QAPP
         app = QApplication.instance()
         if app is None:
             _QAPP = app = QApplication(sys.argv)

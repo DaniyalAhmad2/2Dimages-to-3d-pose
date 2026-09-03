@@ -184,8 +184,8 @@ class MainWindow(QMainWindow):
                        "every hand correction exactly as they are")
         act.triggered.connect(self._on_redetect_head)
 
-        helpm = self.menuBar().addMenu("&Help")
-        act = helpm.addAction("Diagnostics")
+        help_menu = self.menuBar().addMenu("&Help")
+        act = help_menu.addAction("Diagnostics")
         act.setToolTip("Write a report about this machine and this install — "
                        "Windows, graphics, Blender, the models, the self-test "
                        "— that you can copy or attach to an email")
