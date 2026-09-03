@@ -58,7 +58,7 @@ def apply_dark_theme(app: QApplication) -> None:
 
     qss = Path(__file__).parent / "ui" / "dark.qss"
     if qss.exists():
-        app.setStyleSheet(qss.read_text())
+        app.setStyleSheet(qss.read_text(encoding="utf-8"))
 
 
 # kept: older call sites (and tests) refer to this name
@@ -115,7 +115,8 @@ def load_rig_with_reason(calib_dir: Path):
     try:
         il = Intrinsics.load(calib_dir / "left_intrinsics.json")
         ir = Intrinsics.load(calib_dir / "right_intrinsics.json")
-        ext = json.loads((calib_dir / "extrinsics.json").read_text())
+        ext = json.loads(
+            (calib_dir / "extrinsics.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None, ""                  # genuinely uncalibrated: stay quiet
     except json.JSONDecodeError as e:

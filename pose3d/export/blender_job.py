@@ -729,7 +729,7 @@ def _write_frame_map(outdir, name, schedule):
     import json as _json
     import os
     path = os.path.join(outdir, name + "_frames.json")
-    with open(path, "w") as fh:
+    with open(path, "w", encoding="utf-8") as fh:
         _json.dump({str(i): [f[0], f[-1]] for i, f in enumerate(schedule)}, fh)
     print(f"wrote {path}")
 
@@ -862,7 +862,7 @@ def _render_videos(arm, meshes, data, args, scene, n, have_bones,
 
 def main():
     args = parse_args()
-    with open(args.infile) as f:
+    with open(args.infile, encoding="utf-8") as f:
         data = json.load(f)
 
     scene = bpy.context.scene

@@ -186,3 +186,42 @@ def test_a_missing_camera_leaves_its_arc_empty_rather_than_zero(light_host):
     _render(g)
     assert np.isnan(g._pct["right"])
     assert g._worst() == 90.0
+
+
+def test_the_stylesheet_is_read_as_utf8_whatever_the_code_page_is(light_host):
+    """dark.qss holds an em dash, so the file is not ASCII and the encoding
+    the app reads it with is a real decision, not a formality.
+
+    Read with the machine's locale encoding — which is what `read_text()` with
+    no argument does — the same bytes give three different answers: UTF-8 on
+    the developer's Linux box, silent mojibake on a cp1252 Windows machine
+    (`â€"` inside a CSS comment, which is harmless right up until the next
+    non-ASCII character lands in a selector), and `UnicodeDecodeError` before
+    any window on a Japanese, Chinese or Korean one.
+    """
+    from pathlib import Path
+
+    from pose3d.app import apply_dark_theme
+
+    qss = Path(__file__).resolve().parent.parent / "pose3d" / "ui" / "dark.qss"
+    raw = qss.read_bytes()
+    assert not raw.isascii(), (
+        "dark.qss is pure ASCII, so this test proves nothing any more — put "
+        "the em dash back or delete the test")
+
+    apply_dark_theme(light_host)
+    sheet = light_host.styleSheet()
+    assert "—" in sheet, "the em dash did not survive the read"
+    assert not sheet.isascii()
+    assert "â€" not in sheet, "cp1252 mojibake: read without encoding="
+
+
+def test_a_cjk_code_page_would_refuse_the_stylesheet_outright():
+    """The Linux companion to the test above: proof that the locale default is
+    load-bearing, not merely untidy. On a cp932 machine this is the exception
+    that kills the app before it shows a window."""
+    from pathlib import Path
+
+    qss = Path(__file__).resolve().parent.parent / "pose3d" / "ui" / "dark.qss"
+    with pytest.raises(UnicodeDecodeError):
+        qss.read_text(encoding="cp932")
