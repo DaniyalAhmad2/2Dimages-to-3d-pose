@@ -68,3 +68,9 @@ never sees a tag (F42).
 - The Windows `python312.dll` failure is not a missing runtime in the build (build-12 ships the VC runtime);
   it is a file missing from the client's extracted copy. The build now audits every DLL import; the README
   tells the client to extract to a short local path and check antivirus quarantine.
+- The Windows toolchain is pinned to Python **3.12** (`.python-version`), not the 3.13 the dev venv
+  runs: every doc, README troubleshooting string and Windows test names `python312.dll`, and `uv.lock`
+  only says `>=3.12`, so an unpinned runner would silently freeze the exe against whatever interpreter
+  it had newest. Cost if wrong: the build forgoes 3.13's speedups until the docs and the pin are moved
+  together. Blender and the ONNX checkpoints are pinned the same way — one version, one URL and one
+  sha256 each, in `packaging/windows/inputs.json`, which nothing else may restate.
