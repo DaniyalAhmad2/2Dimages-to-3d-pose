@@ -102,15 +102,16 @@ def save_rig(rig: CalibratedRig, calib_dir, report: dict | None = None) -> None:
         doc["world_up_source"] = report.get("world_up_source")
         doc["world_up_spread_deg"] = _to_jsonable(
             report.get("world_up_spread_deg"))
-    (calib_dir / "extrinsics.json").write_text(json.dumps(doc, indent=2))
+    (calib_dir / "extrinsics.json").write_text(json.dumps(doc, indent=2),
+                                               encoding="utf-8")
     if report is not None:
         (calib_dir / "report.json").write_text(
-            json.dumps(_to_jsonable(report), indent=2))
+            json.dumps(_to_jsonable(report), indent=2), encoding="utf-8")
 
 
 def load_extrinsics_json(path):
     """Load an uploaded extrinsics file: {'left':{R,t},'right':{R,t}}."""
-    d = json.loads(Path(path).read_text())
+    d = json.loads(Path(path).read_text(encoding="utf-8"))
     return (Extrinsics(R=np.array(d["left"]["R"], float), t=np.array(d["left"]["t"], float)),
             Extrinsics(R=np.array(d["right"]["R"], float), t=np.array(d["right"]["t"], float)))
 
@@ -129,7 +130,8 @@ def load_world_up(calib_dir):
     extrinsics.json cannot smuggle in a vertical nothing validated.
     """
     try:
-        d = json.loads((Path(calib_dir) / "extrinsics.json").read_text())
+        d = json.loads(
+            (Path(calib_dir) / "extrinsics.json").read_text(encoding="utf-8"))
         up = d["world_up"]
     except Exception:
         return None
@@ -181,7 +183,7 @@ def finalize_world_up(project, calib_dir) -> tuple | None:
     calib_dir = Path(calib_dir)
     ext_path = calib_dir / "extrinsics.json"
     try:
-        doc = json.loads(ext_path.read_text())
+        doc = json.loads(ext_path.read_text(encoding="utf-8"))
         raw_up = doc["world_up"]
     except Exception:
         return None
@@ -208,7 +210,7 @@ def finalize_world_up(project, calib_dir) -> tuple | None:
 
     rep_path = calib_dir / "report.json"
     try:
-        report = json.loads(rep_path.read_text())
+        report = json.loads(rep_path.read_text(encoding="utf-8"))
     except Exception:
         report = None
     if report is not None:
@@ -221,9 +223,10 @@ def finalize_world_up(project, calib_dir) -> tuple | None:
             report["world_up_sign_source"] = SIGN_FROM_POSES
             changed = True
         if changed:
-            rep_path.write_text(json.dumps(_to_jsonable(report), indent=2))
+            rep_path.write_text(json.dumps(_to_jsonable(report), indent=2),
+                                encoding="utf-8")
     if flipped:
-        ext_path.write_text(json.dumps(doc, indent=2))
+        ext_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
     return load_world_up(calib_dir)
 
 

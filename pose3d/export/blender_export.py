@@ -406,7 +406,7 @@ def export_animation(
             fallback_note = f"{reason[0]}: {reason[1]}"
             print(f"POSE3D_EXPORT_FALLBACK: {fallback_note}")
     json_path = out_dir / f"{name}_poses.json"
-    json_path.write_text(json.dumps(doc))
+    json_path.write_text(json.dumps(doc), encoding="utf-8")
 
     blender = blender or blender_binary()
     # if a rigged character .blend is given, open it as the base file so the job

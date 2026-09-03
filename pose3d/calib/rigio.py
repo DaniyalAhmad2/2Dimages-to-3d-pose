@@ -67,7 +67,8 @@ def load_rig(calib_dir):
     calib_dir = Path(calib_dir)
     il = Intrinsics.load(calib_dir / "left_intrinsics.json")
     ir = Intrinsics.load(calib_dir / "right_intrinsics.json")
-    ext = json.loads((calib_dir / "extrinsics.json").read_text())
+    ext = json.loads(
+        (calib_dir / "extrinsics.json").read_text(encoding="utf-8"))
     left = check_extrinsics("left", ext["left"])
     right = check_extrinsics("right", ext["right"])
     return CalibratedRig(il, ir, Extrinsics(R=left[0], t=left[1]),

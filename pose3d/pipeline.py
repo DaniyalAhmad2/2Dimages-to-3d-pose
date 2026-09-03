@@ -106,6 +106,16 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
     for i, frame in enumerate(project.frames):
         for cam in (CAM_LEFT, CAM_RIGHT):
             img = load_image(frame.images[cam])
+            if img is None:
+                # `cv2.imread` answers None instead of raising — on a path it
+                # cannot encode in the machine's ANSI code page, or on a
+                # 0-byte OneDrive placeholder. Passed on, it reached the
+                # detector as `'NoneType' object has no attribute 'shape'`,
+                # naming nothing. See pose3d.imageio.read_image.
+                from pose3d.imageio import ImageReadError
+                raise ImageReadError(
+                    f"The image for frame {frame.frame_id} camera {cam} could "
+                    f"not be read: {frame.images[cam]}")
             det = detector.detect(img)
             if fields == "all":
                 keep = frame.corrected[cam] if respect_corrections \

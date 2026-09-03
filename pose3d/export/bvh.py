@@ -124,9 +124,9 @@ class Bvh:
 
 def _read_text(path: Path) -> str:
     if str(path).endswith(".gz"):
-        with gzip.open(path, "rt") as fh:
+        with gzip.open(path, "rt", encoding="utf-8") as fh:
             return fh.read()
-    return Path(path).read_text()
+    return Path(path).read_text(encoding="utf-8")
 
 
 def parse(path: Path | str) -> Bvh:

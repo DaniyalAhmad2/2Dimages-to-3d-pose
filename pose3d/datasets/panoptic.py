@@ -46,7 +46,7 @@ class PanopticCamera:
 
 def load_camera(calib_path: str | Path, cam_name: str) -> PanopticCamera:
     """Load one camera (e.g. '00_00') as Intrinsics + Extrinsics."""
-    data = json.loads(Path(calib_path).read_text())
+    data = json.loads(Path(calib_path).read_text(encoding="utf-8"))
     for c in data["cameras"]:
         if c["name"] == cam_name:
             K = np.array(c["K"], dtype=float)
@@ -63,7 +63,7 @@ def load_camera(calib_path: str | Path, cam_name: str) -> PanopticCamera:
 
 def load_pose3d(json_path: str | Path, body_index: int = 0) -> np.ndarray:
     """Return canonical (NUM_JOINTS, 3) GT in cm, NaN where a joint is absent."""
-    data = json.loads(Path(json_path).read_text())
+    data = json.loads(Path(json_path).read_text(encoding="utf-8"))
     out = np.full((NUM_JOINTS, 3), np.nan, dtype=float)
     if not data.get("bodies"):
         return out

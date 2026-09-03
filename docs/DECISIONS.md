@@ -74,3 +74,13 @@ never sees a tag (F42).
   it had newest. Cost if wrong: the build forgoes 3.13's speedups until the docs and the pin are moved
   together. Blender and the ONNX checkpoints are pinned the same way — one version, one URL and one
   sha256 each, in `packaging/windows/inputs.json`, which nothing else may restate.
+- Software OpenGL, and what it can and cannot rescue. `--software-gl` / `POSE3D_GL=software` / a
+  `use-software-gl` marker file next to the exe set `QT_OPENGL=software` + `AA_UseSoftwareOpenGL` before
+  the QApplication exists (the only moment Qt still listens), and the 3D card offers "Restart with
+  software 3D" when its context is dead. Honest limit: that makes **Qt** run on the bundled
+  `opengl32sw.dll`; pyqtgraph draws through PyOpenGL, which loads the machine's own `opengl32.dll` and is
+  not redirected by it, so the 3D card still depends on the driver being there. A renderer that truly
+  works with no GPU driver (Mesa llvmpipe shipped as `opengl32.dll` and loaded by absolute path before Qt
+  and PyOpenGL) is out of scope this round. Cost if wrong: on a machine with no driver at all the restart
+  changes nothing and the placeholder stays — which is why the placeholder names Help ▸ Diagnostics
+  rather than promising a fix.

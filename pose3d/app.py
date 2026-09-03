@@ -58,7 +58,7 @@ def apply_dark_theme(app: QApplication) -> None:
 
     qss = Path(__file__).parent / "ui" / "dark.qss"
     if qss.exists():
-        app.setStyleSheet(qss.read_text())
+        app.setStyleSheet(qss.read_text(encoding="utf-8"))
 
 
 # kept: older call sites (and tests) refer to this name
@@ -115,7 +115,8 @@ def load_rig_with_reason(calib_dir: Path):
     try:
         il = Intrinsics.load(calib_dir / "left_intrinsics.json")
         ir = Intrinsics.load(calib_dir / "right_intrinsics.json")
-        ext = json.loads((calib_dir / "extrinsics.json").read_text())
+        ext = json.loads(
+            (calib_dir / "extrinsics.json").read_text(encoding="utf-8"))
     except FileNotFoundError:
         return None, ""                  # genuinely uncalibrated: stay quiet
     except json.JSONDecodeError as e:
@@ -171,8 +172,6 @@ def install_crash_handler() -> None:
     """
     import traceback
 
-    from pose3d.runtime import log_path
-
     def hook(exc_type, exc, tb):
         if issubclass(exc_type, KeyboardInterrupt):
             sys.__excepthook__(exc_type, exc, tb)
@@ -180,16 +179,86 @@ def install_crash_handler() -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
         print(text, file=sys.stderr, flush=True)
         try:
-            from PySide6.QtWidgets import QApplication, QMessageBox
+            from PySide6.QtWidgets import QApplication
+
+            from pose3d.ui.guard import log_hint, report_error
             if QApplication.instance() is not None:
-                QMessageBox.critical(
-                    None, "Pose3D stopped",
-                    f"{exc_type.__name__}: {exc}\n\n"
-                    f"Details were written to:\n{log_path()}")
+                # Through the sink, not QMessageBox: this is a modal like any
+                # other, and the suite's autouse fixture replaces exactly one
+                # function to keep every one of them off a CI machine.
+                report_error(None, "Pose3D stopped",
+                             f"{exc_type.__name__}: {exc}\n\n{log_hint()}")
         except Exception:
             pass                        # a dialog must never mask the crash
 
     sys.excepthook = hook
+
+
+def install_qt_message_handler() -> None:
+    """Send Qt's own diagnostics to the same place as everything else.
+
+    Qt writes "Failed to create OpenGL context", "Could not load the Qt
+    platform plugin 'windows'" and every other diagnosis of the failures this
+    build is most likely to hit through its message handler, which defaults to
+    a console — and a windowed exe has none, so the client's most useful
+    error messages went nowhere at all.
+    """
+    from PySide6.QtCore import QtMsgType, qInstallMessageHandler
+
+    levels = {
+        QtMsgType.QtDebugMsg: "debug",
+        QtMsgType.QtInfoMsg: "info",
+        QtMsgType.QtWarningMsg: "warning",
+        QtMsgType.QtCriticalMsg: "critical",
+        QtMsgType.QtFatalMsg: "fatal",
+    }
+
+    def handler(mode, context, message):
+        print(f"[qt.{levels.get(mode, 'message')}] {message}",
+              file=sys.stderr, flush=True)
+
+    qInstallMessageHandler(handler)
+
+
+def _pre_qt_checks() -> None:
+    """Checks that must run before Qt exists, and may exit instead of starting.
+
+    Deliberately empty here: the bundle-integrity check that fills it
+    (`pose3d.integrity.run_startup_check`) has to run before Qt is asked to
+    load a plugin that may be missing from the bundle, and this is the point
+    in `main()` where "before" is guaranteed — after the crash handler, so a
+    failure inside it is still reported, and after `--selftest` has taken its
+    own exit, so the self-test's report is never pre-empted by a dialog.
+    """
+
+
+def _configure_gl(argv) -> str:
+    """Decide hardware or software OpenGL. MUST run before QApplication.
+
+    Qt reads QT_OPENGL and AA_UseSoftwareOpenGL when the application object is
+    constructed and ignores both afterwards, so this cannot be a reaction to a
+    3D view that turned out black — it has to be a decision taken from three
+    things known beforehand: the command line, the environment, and a marker
+    file the "Restart with software 3D" button leaves next to the exe so the
+    choice survives the restart that applies it.
+
+    Honest limit, recorded in DECISIONS: this makes *Qt* run on software
+    OpenGL. pyqtgraph draws through PyOpenGL, which loads the machine's own
+    opengl32.dll and is not redirected by Qt's opengl32sw.dll, so the 3D card
+    still depends on the driver being there.
+    """
+    from PySide6.QtCore import QCoreApplication, Qt
+
+    from pose3d.runtime import SOFTWARE_GL_MARKER, app_dir
+
+    if not ("--software-gl" in argv
+            or os.environ.get("POSE3D_GL", "").lower() == "software"
+            or (app_dir() / SOFTWARE_GL_MARKER).exists()):
+        return "hardware"
+    os.environ["QT_OPENGL"] = "software"
+    QCoreApplication.setAttribute(
+        Qt.ApplicationAttribute.AA_UseSoftwareOpenGL)
+    return "software"
 
 
 def main():
@@ -199,10 +268,18 @@ def main():
     from pose3d.runtime import ensure_std_streams
     ensure_std_streams()
     install_crash_handler()
+    install_qt_message_handler()
+    # Before the --selftest branch: the self-test builds its own QApplication,
+    # and `Pose3D.exe --selftest --software-gl` is how a 3D fault on the
+    # client's machine gets diagnosed, so it has to run under the same GL the
+    # app would have used.
+    _configure_gl(sys.argv[1:])
 
     if "--selftest" in sys.argv[1:]:
         from pose3d.selftest import main as selftest
         sys.exit(selftest([a for a in sys.argv[1:] if a != "--selftest"]))
+
+    _pre_qt_checks()
 
     folder = next((a for a in sys.argv[1:] if not a.startswith("-")), None)
     # Share one GL context across windows so pyqtgraph's cached shader programs

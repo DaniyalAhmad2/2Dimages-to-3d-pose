@@ -16,14 +16,86 @@ Unit-agnostic (metres or centimetres).
 """
 from __future__ import annotations
 
+import sys
+import traceback
+
 import numpy as np
 import pyqtgraph.opengl as gl
 from pyqtgraph import Vector
-from PySide6.QtCore import Signal
+from PySide6.QtCore import QTimer, Signal
+from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
 from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
 from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import detect_vertical, upright_matrix
+
+GL_UNAVAILABLE_TEXT = (
+    "The 3D preview could not start: this machine's graphics driver did not "
+    "give Pose3D a usable 3D (OpenGL) view.\n\n"
+    "Everything else works normally — the photographs, the 2D keypoints, "
+    "corrections and the export are all unaffected.\n\n"
+    "Restarting with software 3D makes Qt draw without the graphics card and "
+    "is worth trying. For the full picture, see Help ▸ Diagnostics.")
+
+
+def software_gl_marker():
+    """The file whose presence pins software OpenGL for the next start."""
+    from pose3d.runtime import SOFTWARE_GL_MARKER, app_dir
+    return app_dir() / SOFTWARE_GL_MARKER
+
+
+def restart_with_software_gl(widget=None) -> bool:
+    """Write the marker, start a fresh copy with --software-gl, close this one.
+
+    Qt reads its OpenGL setting when the QApplication is constructed and
+    ignores it afterwards, so applying the choice means starting again. The
+    marker is what carries it across the restart — the flag on the command
+    line only covers the copy we launch here, not the next double-click.
+    """
+    from PySide6.QtCore import QProcess
+
+    from pose3d.runtime import IS_FROZEN
+    try:
+        software_gl_marker().write_text("", encoding="utf-8")
+    except OSError:
+        pass                      # read-only install: the flag still applies
+    args = ["--software-gl"] if IS_FROZEN else ["-m", "pose3d.app",
+                                                "--software-gl"]
+    if not QProcess.startDetached(sys.executable, args):
+        return False
+    if widget is not None:
+        widget.window().close()
+    return True
+
+
+class GLUnavailable(QWidget):
+    """What the 3D card shows when there is no usable OpenGL.
+
+    A plain message, a way out, and a pointer to the diagnostics report — not
+    a black rectangle. Deliberately NOT routed through `characterError`: that
+    signal reports a character that could not be posed INSIDE a working 3D
+    view, and it is emitted by the widget that has just failed.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setObjectName("glUnavailable")
+        self.setAutoFillBackground(True)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        self._label = QLabel(GL_UNAVAILABLE_TEXT)
+        self._label.setWordWrap(True)
+        lay.addWidget(self._label)
+        self._restart = QPushButton("Restart with software 3D")
+        self._restart.clicked.connect(lambda: restart_with_software_gl(self))
+        lay.addWidget(self._restart)
+        lay.addStretch(1)
+
+    def message(self) -> str:
+        return self._label.text()
+
+    def restart_button(self) -> QPushButton:
+        return self._restart
 
 
 def ground_datum(verts, joints, drop):
@@ -116,6 +188,88 @@ class View3D(gl.GLViewWidget):
         self._R = None                  # world->view rotation (sequence de-tilt)
         self._char_error = ""           # last message sent to characterError
         self._char_error_source = ""    # which stage put it there
+        self._gl_error = ""             # why OpenGL is unusable, if it is
+        self._gl_checked = False
+        self._placeholder = None
+
+    # --- OpenGL that is not there ---
+    #
+    # Constructing a GLViewWidget proves nothing: Qt reports "Failed to create
+    # OpenGL context" on stderr and carries on, so a machine with no driver
+    # gets all the way through the window build looking healthy and then shows
+    # a black rectangle with no explanation anywhere in the app.
+    #
+    # These are Qt virtuals. An exception raised inside one does not propagate
+    # to anything that could report it — it aborts the process — so pyqtgraph's
+    # `RuntimeError: Requires >= OpenGL 2.1` has to be caught HERE, at the
+    # boundary, or the app dies with no message at all.
+
+    def initializeGL(self):
+        try:
+            super().initializeGL()
+        except Exception as e:
+            self._gl_error = f"{type(e).__name__}: {e}"
+            traceback.print_exc()
+
+    def paintGL(self, *args, **kwargs):
+        if self._gl_error:
+            return
+        try:
+            super().paintGL(*args, **kwargs)
+        except Exception as e:
+            self._gl_error = f"{type(e).__name__}: {e}"
+            traceback.print_exc()
+
+    def gl_ok(self) -> bool:
+        """Is there a working 3D view? The self-test's own predicate.
+
+        A valid context and a frame that can actually be read back — because
+        `isValid()` alone has been true on machines that then rendered
+        nothing.
+        """
+        if self._gl_error:
+            return False
+        try:
+            if not self.isValid() or self.context() is None:
+                return False
+            img = self.grabFramebuffer()
+        except Exception as e:
+            self._gl_error = f"{type(e).__name__}: {e}"
+            return False
+        return not img.isNull() and img.width() >= 1 and img.height() >= 1
+
+    def check_gl(self) -> bool:
+        """Evaluate the predicate and put up the placeholder if it fails."""
+        self._gl_checked = True
+        if self.gl_ok():
+            return True
+        if self._placeholder is None:
+            self._placeholder = GLUnavailable(self)
+        self._placeholder.setGeometry(self.rect())
+        self._placeholder.show()
+        self._placeholder.raise_()
+        return False
+
+    def placeholder(self):
+        """The 'no 3D on this machine' panel, or None while 3D works."""
+        return self._placeholder
+
+    def showEvent(self, ev):
+        super().showEvent(ev)
+        # One event pass later: a context that is going to be created has not
+        # been by the time showEvent runs, and asking too early would condemn
+        # a perfectly good machine to the placeholder.
+        if not self._gl_checked:
+            self._gl_checked = True
+            # `self` as the context object: if the view is destroyed
+            # first, Qt drops the call instead of invoking a method on a
+            # deleted widget.
+            QTimer.singleShot(0, self, self.check_gl)
+
+    def resizeEvent(self, ev):
+        super().resizeEvent(ev)
+        if self._placeholder is not None:
+            self._placeholder.setGeometry(self.rect())
 
     # --- orientation / framing ---
     def _detect_vertical(self, pose3d, valid):

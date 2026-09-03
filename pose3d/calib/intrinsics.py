@@ -43,11 +43,11 @@ class Intrinsics:
             "image_size": list(self.image_size),
             "rms": float(self.rms),
             "source": self.source,
-        }, indent=2))
+        }, indent=2), encoding="utf-8")
 
     @staticmethod
     def load(path: str | Path) -> "Intrinsics":
-        d = json.loads(Path(path).read_text())
+        d = json.loads(Path(path).read_text(encoding="utf-8"))
         return Intrinsics(
             K=np.array(d["K"], dtype=float),
             dist=np.array(d["dist"], dtype=float),

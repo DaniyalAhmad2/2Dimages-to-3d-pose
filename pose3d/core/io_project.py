@@ -160,14 +160,15 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             "head3d": _arr_to_json(f.head3d),
         })
 
-    (folder / PROJECT_JSON).write_text(json.dumps(doc, indent=2))
+    (folder / PROJECT_JSON).write_text(json.dumps(doc, indent=2),
+                                       encoding="utf-8")
     _write_corrections(folder, project.corrections)
     return folder
 
 
 def load_project(folder: str | Path) -> ProjectData:
     folder = Path(folder)
-    doc = json.loads((folder / PROJECT_JSON).read_text())
+    doc = json.loads((folder / PROJECT_JSON).read_text(encoding="utf-8"))
 
     frames: list[Frame] = []
     for fd in doc["frames"]:
