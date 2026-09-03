@@ -1,0 +1,47 @@
+name: Windows bundle
+
+# The release gate, run on the way in rather than on the way out: the same
+# composite action windows-release.yml uses, so the zip that ships is the zip
+# that was gated. It builds the bundle, zips it, extracts the zip into a nested
+# path with a space in it, and self-tests THAT copy — the client's two failures
+# (a file missing from _internal\, and "path too long") both lived in the gap
+# between the folder PyInstaller wrote and the folder they extracted.
+#
+# Its own workflow, not a job in windows-test.yml, because a `paths` filter
+# decides whether a WORKFLOW runs, not whether one of its jobs does: filtering
+# there would have stopped running the test suite on most pull requests.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    # ~40 minutes for a ~1 GB bundle, so only for changes that can break one.
+    # Everything else is covered by windows-test.yml, which has no filter.
+    paths:
+      - pose3d.spec
+      - tools/**
+      - packaging/**
+      - .github/workflows/windows-bundle.yml
+      - .github/actions/windows-bundle/**
+      - pyproject.toml
+      - uv.lock
+      - .python-version
+      - pose3d/runtime.py
+      - pose3d/selftest.py
+      - pose3d/integrity.py
+      - pose3d/diagnostics.py
+      - pose3d/app.py
+  workflow_dispatch:
+
+jobs:
+  bundle:
+    runs-on: windows-latest
+    # A 414 MB Blender download, PyInstaller over a ~1 GB dependency tree, a
+    # 1.6 GB zip and two hashing passes over the checkpoints.
+    timeout-minutes: 90
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: ./.github/actions/windows-bundle
+        with:
+          python-version-file: .python-version

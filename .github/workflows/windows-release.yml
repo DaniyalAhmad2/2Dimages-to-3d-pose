@@ -1,9 +1,10 @@
 name: Windows release
 
-# Builds the .zip the client downloads, and proves it works before publishing:
-# the self-test runs against the ASSEMBLED BUNDLE, not against the source tree,
-# so a missing asset or an unfindable Blender fails here rather than on their
-# machine.
+# Publishes the .zip the client downloads. Everything that BUILDS and PROVES
+# that zip lives in .github/actions/windows-bundle, shared verbatim with
+# windows-bundle.yml — so the archive attached to a release is one that has
+# already been extracted into a client-shaped path and self-tested from there,
+# by the same steps that gate every pull request.
 on:
   push:
     tags: ["v*"]
@@ -25,118 +26,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: astral-sh/setup-uv@v5
+      - id: bundle
+        uses: ./.github/actions/windows-bundle
         with:
-          enable-cache: true
-
-      - name: Install dependencies from the lockfile
-        run: uv sync --frozen --all-groups
-
-      - name: Cache Blender
-        id: blender-cache
-        uses: actions/cache@v4
-        with:
-          path: .cache/blender-5.1.1-windows-x64.zip
-          key: blender-5.1.1-windows-x64
-
-      - name: Download Blender
-        if: steps.blender-cache.outputs.cache-hit != 'true'
-        run: |
-          New-Item -ItemType Directory -Force -Path .cache | Out-Null
-          $ProgressPreference = 'SilentlyContinue'
-          Invoke-WebRequest -UseBasicParsing `
-            -Uri "https://download.blender.org/release/Blender5.1/blender-5.1.1-windows-x64.zip" `
-            -OutFile ".cache/blender-5.1.1-windows-x64.zip"
-
-      - name: Cache pose weights
-        uses: actions/cache@v4
-        with:
-          path: .cache/models
-          key: rtmlib-weights-balanced-halpe-v2
-
-      - name: Build the executable
-        run: uv run pyinstaller pose3d.spec --noconfirm --clean
-
-      - name: Assemble the bundle
-        run: |
-          uv run pwsh tools/make_windows_bundle.ps1 `
-            -Dist dist/Pose3D -Out build/Pose3D-Windows
-
-      - name: Audit the bundle's DLL dependencies
-        # The release gate for the fault the self-test structurally cannot see.
-        # This runner has the Visual C++ runtime and much of what Qt links
-        # against installed system-wide, so a DLL missing from _internal\ still
-        # loads here and only fails on a clean machine — as "Failed to load
-        # Python DLL ... The specified module could not be found." did on the
-        # client's. Checks the bundle against itself, never against the runner.
-        run: uv run python tools/check_bundle_deps.py build/Pose3D-Windows
-
-      - name: Self-test the assembled bundle
-        # The whole point of this job. Runs the exe the client will run, with
-        # PATH-visible Blender and the rtmlib cache deliberately NOT available,
-        # so it can only pass by finding what the bundle itself ships.
-        env:
-          POSE3D_BLENDER: ""
-          POSE3D_MODELS: ""
-          XDG_CACHE_HOME: ${{ github.workspace }}\.empty-cache
-          # This runner has no GPU: Blender dies in WGL and Qt's context
-          # returns GL_INVALID_OPERATION on the first draw call. That is a
-          # property of the machine, not the build, so GL problems are reported
-          # as degraded HERE only. Packaging faults — the 3D view missing from
-          # the bundle at all — still fail, and on the client's machine
-          # `Pose3D.exe --selftest` stays strict, which is the point of it.
-          POSE3D_NO_GL: "1"
-        run: |
-          New-Item -ItemType Directory -Force -Path .empty-cache | Out-Null
-          # Start-Process -Wait, not `&`: Pose3D.exe is built for the GUI
-          # subsystem (console=False), and PowerShell does not wait for those —
-          # `&` returns immediately and $LASTEXITCODE describes the launch, not
-          # the self-test, so this gate would pass without proving anything.
-          $p = Start-Process -FilePath build/Pose3D-Windows/Pose3D.exe `
-                 -ArgumentList "--selftest" -Wait -PassThru -NoNewWindow `
-                 -RedirectStandardOutput selftest-out.txt `
-                 -RedirectStandardError selftest-err.txt
-          # Where the output lands depends on whether a console got attached:
-          # with none, ensure_std_streams() sends it to pose3d-log.txt beside
-          # the exe. Print whichever exist, so a PASSING run still shows which
-          # Blender and which weights the bundle actually found.
-          foreach ($f in @("selftest-out.txt", "selftest-err.txt",
-                           "build/Pose3D-Windows/pose3d-log.txt")) {
-            if ((Test-Path $f) -and (Get-Item $f).Length -gt 0) {
-              Write-Host "--- $f ---"
-              Get-Content $f
-            }
-          }
-          if ($p.ExitCode -ne 0) { throw "bundle self-test failed ($($p.ExitCode))" }
-
-      - name: Zip
-        # 7z, not Compress-Archive: 1.6 GB is slow through .NET's ZipArchive and
-        # close enough to its 2 GB ceiling to be worth avoiding.
-        #
-        # Zipped from INSIDE build/ so entries begin at Pose3D-Windows\ rather
-        # than build\Pose3D-Windows\. Six characters sounds trivial; it is not.
-        # Windows' MAX_PATH is 260 and this bundle's deepest entry — Blender's
-        # USD/MaterialX tree — is already ~148, so every wasted prefix
-        # character comes off the user's extraction path. Extracting the first
-        # build failed with "path too long".
-        run: |
-          Push-Location build
-          7z a -tzip -mx=5 -bso0 -bsp0 ../Pose3D-Windows.zip Pose3D-Windows
-          $rc = $LASTEXITCODE
-          Pop-Location
-          if ($rc -ne 0) { throw "7z failed ($rc)" }
-          "{0:N0} MB" -f ((Get-Item Pose3D-Windows.zip).Length / 1MB)
-          # Fail here rather than let a deep path surface on the client's
-          # machine: leave room for a realistic extraction root.
-          $deepest = 7z l -ba -slt Pose3D-Windows.zip |
-            Select-String '^Path = ' |
-            ForEach-Object { $_.Line.Substring(7).Length } |
-            Measure-Object -Maximum
-          Write-Host "deepest path in archive: $($deepest.Maximum) chars"
-          if ($deepest.Maximum -gt 180) {
-            throw "deepest archive path is $($deepest.Maximum) chars; " +
-                  "that leaves under 80 for the extraction root on a 260-char limit"
-          }
+          python-version-file: .python-version
 
       - uses: actions/upload-artifact@v4
         # Convenience only — the run page download. NOT the delivery path:
@@ -147,7 +40,7 @@ jobs:
         continue-on-error: true
         with:
           name: Pose3D-Windows
-          path: Pose3D-Windows.zip
+          path: ${{ steps.bundle.outputs.zip }}
           # quota is the binding constraint, not time
           retention-days: 5
           compression-level: 0
@@ -156,7 +49,7 @@ jobs:
         if: startsWith(github.ref, 'refs/tags/') || inputs.publish
         uses: softprops/action-gh-release@v2
         with:
-          files: Pose3D-Windows.zip
+          files: ${{ steps.bundle.outputs.zip }}
           generate_release_notes: true
           # A manual dispatch publishes a DRAFT under a synthetic tag name:
           # visible to repo collaborators for testing, no public release and
@@ -164,14 +57,3 @@ jobs:
           # (v*) publish for real.
           draft: ${{ !startsWith(github.ref, 'refs/tags/') }}
           tag_name: ${{ startsWith(github.ref, 'refs/tags/') && github.ref_name || format('build-{0}', github.run_number) }}
-
-      - name: Upload logs on failure
-        if: failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-release-logs
-          path: |
-            build/Pose3D-Windows/pose3d-log.txt
-            build/*.toc
-            build/*/warn*.txt
-          if-no-files-found: ignore
