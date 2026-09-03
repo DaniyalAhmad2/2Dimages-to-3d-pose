@@ -68,3 +68,13 @@ never sees a tag (F42).
 - The Windows `python312.dll` failure is not a missing runtime in the build (build-12 ships the VC runtime);
   it is a file missing from the client's extracted copy. The build now audits every DLL import; the README
   tells the client to extract to a short local path and check antivirus quarantine.
+- Software OpenGL, and what it can and cannot rescue. `--software-gl` / `POSE3D_GL=software` / a
+  `use-software-gl` marker file next to the exe set `QT_OPENGL=software` + `AA_UseSoftwareOpenGL` before
+  the QApplication exists (the only moment Qt still listens), and the 3D card offers "Restart with
+  software 3D" when its context is dead. Honest limit: that makes **Qt** run on the bundled
+  `opengl32sw.dll`; pyqtgraph draws through PyOpenGL, which loads the machine's own `opengl32.dll` and is
+  not redirected by it, so the 3D card still depends on the driver being there. A renderer that truly
+  works with no GPU driver (Mesa llvmpipe shipped as `opengl32.dll` and loaded by absolute path before Qt
+  and PyOpenGL) is out of scope this round. Cost if wrong: on a machine with no driver at all the restart
+  changes nothing and the placeholder stays — which is why the placeholder names Help ▸ Diagnostics
+  rather than promising a fix.
