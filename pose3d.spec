@@ -15,8 +15,6 @@ import os
 import sys
 from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files
-
 IS_WINDOWS = sys.platform.startswith("win")
 
 datas = [
@@ -30,18 +28,15 @@ datas = [
     ("pose3d/assets/character.npz", "pose3d/assets"),
 ]
 
-# Weights staged into the source tree by tools/fetch_weights.py get bundled;
-# otherwise they are shipped beside the exe and found at run time. Either way
-# the app must not have to download them. See pose3d/detect/models.py.
-# The globs deliberately take EVERY staged checkpoint: BOTH pose models
-# (the Halpe-26 one the app detects with today and the COCO-17 one) plus the
-# shared YOLOX detector. Both are bundled whichever way detect.rtmpose's
-# USE_HALPE26 stands, so flipping that constant needs no build change and can
-# never produce a bundle that downloads a model on the client's machine.
-# fetch_weights.py decides what the set is, and pose3d.selftest fails the
-# build if either model is missing.
-datas += collect_data_files("pose3d.detect", includes=["models/*.onnx"])
-datas += collect_data_files("pose3d", includes=["assets/models/*.onnx"])
+# The ONNX weights are NOT here. They ship beside the executable, in models\,
+# where pose3d.runtime.app_dir() looks for them and where a 150 MB copy is not
+# also carried inside _internal\. Two collect_data_files globs used to try
+# both: they pointed at package directories a clean checkout does not have, so
+# they matched nothing, silently, in every build ever made. A glob that
+# quietly collects nothing looks exactly like one that quietly collects
+# 150 MB. tools/fetch_weights.py stages them beside the exe and verifies them
+# against packaging/windows/inputs.json; pose3d.selftest fails the build if
+# they did not arrive.
 
 for src, _ in datas:
     if not Path(src).exists():
@@ -123,6 +118,12 @@ hiddenimports = [
     "pyqtgraph.opengl.items.GLLinePlotItem",
     "pyqtgraph.opengl.items.GLMeshItem",
     "pyqtgraph.opengl.items.GLGridItem",
+    # detection imports these inside functions. PyInstaller does follow
+    # function-level imports, so naming them is insurance rather than the
+    # gate — but what it insures against is "detection does nothing", found
+    # after delivery. The gate is the self-test's inference check.
+    "onnxruntime",
+    "rtmlib",
 ]
 if not IS_WINDOWS:
     # PyInstaller's bundled hook-OpenGL.py already collects OpenGL.platform.win32

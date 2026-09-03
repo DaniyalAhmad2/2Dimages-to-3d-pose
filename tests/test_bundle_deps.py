@@ -185,7 +185,8 @@ def _eval_spec(hook_datas=()):
             reclassified = _is_pe(entry) and sys.platform.startswith("win")
             (binaries if reclassified else datas).append(entry)
         return types.SimpleNamespace(scripts=scripts, pure=[],
-                                     datas=datas, binaries=binaries)
+                                     datas=datas, binaries=binaries,
+                                     hiddenimports=list(kw["hiddenimports"]))
 
     def stub(*args, **kw):
         return types.SimpleNamespace()
@@ -198,11 +199,6 @@ def _eval_spec(hook_datas=()):
 
 
 def _as_windows(monkeypatch, interpreter_dir):
-    # PyInstaller collects data files through a subprocess started from
-    # sys.executable, which the fake interpreter directory below would break.
-    # Which .onnx files get bundled is not what these tests are about.
-    monkeypatch.setattr("PyInstaller.utils.hooks.collect_data_files",
-                        lambda *a, **kw: [])
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "executable", str(interpreter_dir / "python.exe"))
     monkeypatch.setattr(sys, "base_prefix", str(interpreter_dir / "base"))
@@ -218,6 +214,36 @@ def test_the_linux_build_adds_nothing_windows_only():
     """The Linux dev build has to keep working: no VC runtime search, no
     OpenGL/DLLS filtering, nothing that assumes a Windows layout."""
     assert _eval_spec().binaries == []
+
+
+@pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
+                    reason="PyInstaller is a dev dependency")
+def test_no_onnx_weight_is_bundled_inside_the_exe():
+    """The weights ship BESIDE the exe, in models\\, where app_dir() looks for
+    them — a 150 MB copy inside _internal\\ as well would be dead weight.
+
+    The spec used to try both: two collect_data_files globs over a package
+    directory that does not exist in a clean checkout. They matched nothing,
+    silently, in every build ever made. A glob that quietly collects nothing is
+    indistinguishable from one that quietly collects 150 MB, so the source of
+    the possibility goes, and the layout is enforced by the bundle manifest
+    instead."""
+    spec = (ROOT / "pose3d.spec").read_text(encoding="utf-8")
+    assert "import collect_data_files" not in spec, "a glob could come back"
+    a = _eval_spec()
+    assert not [entry for entry in a.datas + a.binaries
+                if entry[0].lower().endswith(".onnx")]
+
+
+@pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
+                    reason="PyInstaller is a dev dependency")
+def test_the_inference_stack_is_named_as_a_hidden_import():
+    """pose3d.detect imports rtmlib and onnxruntime inside functions.
+    PyInstaller does follow function-level imports, so this is insurance
+    rather than the gate — but the failure it insures against is "detection
+    does nothing" on the client's machine, discovered after delivery."""
+    for name in ("onnxruntime", "rtmlib"):
+        assert name in _eval_spec().hiddenimports
 
 
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
