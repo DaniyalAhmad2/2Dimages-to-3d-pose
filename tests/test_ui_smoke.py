@@ -708,67 +708,6 @@ def test_the_fixed_camera_is_silent_for_a_project_with_no_folder(qapp, capsys):
     assert capsys.readouterr().out == ""
 
 
-# --- a machine with no usable OpenGL ---------------------------------------
-#
-# The 3D card is a pyqtgraph GLViewWidget. Constructing one proves nothing:
-# Qt prints "Failed to create OpenGL context" on stderr and carries on, so a
-# machine with no driver reaches the end of MainWindow.__init__ looking
-# healthy and then shows a black rectangle with no explanation anywhere.
-#
-# Worse, pyqtgraph raises `RuntimeError: Requires >= OpenGL 2.1` from inside
-# initializeGL — a Qt virtual — and an exception there aborts the process
-# rather than propagating to anything that could report it.
-
-
-@pytest.fixture
-def dead_gl(monkeypatch):
-    """A machine whose OpenGL driver gives Qt nothing."""
-    import pyqtgraph.opengl as gl
-
-    from pose3d.ui.view3d import View3D
-
-    def boom(self):
-        raise RuntimeError(
-            "pyqtgraph.opengl: Requires >= OpenGL 2.1; Found None")
-
-    monkeypatch.setattr(gl.GLViewWidget, "initializeGL", boom)
-    monkeypatch.setattr(View3D, "isValid", lambda self: False)
-
-
-def test_a_dead_gl_context_does_not_escape_initialize_gl(dead_gl, qapp):
-    from pose3d.ui.view3d import View3D
-
-    v = View3D()
-    v.initializeGL()                      # Qt calls this; it must not raise
-    assert not v.gl_ok()
-
-
-def test_the_3d_card_shows_a_placeholder_instead_of_a_black_rectangle(
-        dead_gl, qapp):
-    from PySide6.QtWidgets import QApplication, QPushButton
-
-    from pose3d.ui.view3d import View3D
-
-    v = View3D()
-    v.resize(320, 240)
-    v.show()
-    QApplication.processEvents()
-
-    assert v.check_gl() is False
-    ph = v.placeholder()
-    assert ph is not None and ph.isVisible()
-    assert "3D" in ph.message()
-    assert "Diagnostics" in ph.message(), "no route to the diagnostics report"
-    buttons = ph.findChildren(QPushButton)
-    assert [b for b in buttons if "software 3D" in b.text()], \
-        [b.text() for b in buttons]
-
-
-def test_the_window_still_builds_when_the_3d_view_cannot(dead_gl, qapp):
-    """Everything else — photos, keypoints, corrections, export — works on a
-    machine with no 3D, so nothing here may bring the window down with it."""
-    from PySide6.QtWidgets import QApplication
-
 # --- Phase G: the long jobs leave the GUI thread ---------------------------
 #
 # Detection, the face re-detect and the recompute used to run in the slot that
@@ -791,51 +730,6 @@ def test_a_detection_refreshes_once_and_keeps_talking(qapp, tmp_path):
     from pose3d.ui.model import ProjectModel
 
     data, rig, gt = _project_with_rig()
-    win = MainWindow(ProjectModel(data, rig))
-    win.show()
-    QApplication.processEvents()
-    assert win.view3d.placeholder() is not None
-
-
-def test_the_restart_control_writes_the_marker_and_relaunches(
-        dead_gl, qapp, monkeypatch, tmp_path):
-    """Qt only honours software OpenGL before its QApplication exists, so the
-    only way to apply the choice is to start again — and the marker is what
-    carries it across the restart."""
-    from PySide6.QtCore import QProcess
-
-    from pose3d.runtime import SOFTWARE_GL_MARKER
-    from pose3d.ui.view3d import View3D
-
-    monkeypatch.setattr("pose3d.runtime.app_dir", lambda: tmp_path)
-    started = {}
-    monkeypatch.setattr(
-        QProcess, "startDetached",
-        staticmethod(lambda prog, args: started.update(prog=prog, args=args)
-                     or True))
-
-    v = View3D()
-    v.show()
-    v.check_gl()
-    v.placeholder().restart_button().click()
-
-    assert (tmp_path / SOFTWARE_GL_MARKER).exists()
-    assert "--software-gl" in started["args"]
-
-
-def test_a_healthy_gl_view_shows_no_placeholder(qapp, monkeypatch):
-    """Not a placebo: when the predicate passes, nothing is put in the way.
-
-    (The offscreen platform this suite runs under has no OpenGL at all, so the
-    working machine is the one that has to be stubbed here.)
-    """
-    from pose3d.ui.view3d import View3D
-
-    monkeypatch.setattr(View3D, "gl_ok", lambda self: True)
-    v = View3D()
-    v.show()
-    assert v.check_gl() is True
-    assert v.placeholder() is None
     model = ProjectModel(data, rig, project_dir=str(tmp_path))
     win = MainWindow(model)
     win.detector = _NoseDetector()
@@ -953,3 +847,114 @@ def test_the_import_dialog_no_longer_pumps_the_event_loop_by_hand():
     src = inspect.getsource(import_dialog)
     assert "processEvents" not in src
     assert "run_job(" in src
+
+# --- a machine with no usable OpenGL ---------------------------------------
+#
+# The 3D card is a pyqtgraph GLViewWidget. Constructing one proves nothing:
+# Qt prints "Failed to create OpenGL context" on stderr and carries on, so a
+# machine with no driver reaches the end of MainWindow.__init__ looking
+# healthy and then shows a black rectangle with no explanation anywhere.
+#
+# Worse, pyqtgraph raises `RuntimeError: Requires >= OpenGL 2.1` from inside
+# initializeGL — a Qt virtual — and an exception there aborts the process
+# rather than propagating to anything that could report it.
+
+
+@pytest.fixture
+def dead_gl(monkeypatch):
+    """A machine whose OpenGL driver gives Qt nothing."""
+    import pyqtgraph.opengl as gl
+
+    from pose3d.ui.view3d import View3D
+
+    def boom(self):
+        raise RuntimeError(
+            "pyqtgraph.opengl: Requires >= OpenGL 2.1; Found None")
+
+    monkeypatch.setattr(gl.GLViewWidget, "initializeGL", boom)
+    monkeypatch.setattr(View3D, "isValid", lambda self: False)
+
+
+def test_a_dead_gl_context_does_not_escape_initialize_gl(dead_gl, qapp):
+    from pose3d.ui.view3d import View3D
+
+    v = View3D()
+    v.initializeGL()                      # Qt calls this; it must not raise
+    assert not v.gl_ok()
+
+
+def test_the_3d_card_shows_a_placeholder_instead_of_a_black_rectangle(
+        dead_gl, qapp):
+    from PySide6.QtWidgets import QApplication, QPushButton
+
+    from pose3d.ui.view3d import View3D
+
+    v = View3D()
+    v.resize(320, 240)
+    v.show()
+    QApplication.processEvents()
+
+    assert v.check_gl() is False
+    ph = v.placeholder()
+    assert ph is not None and ph.isVisible()
+    assert "3D" in ph.message()
+    assert "Diagnostics" in ph.message(), "no route to the diagnostics report"
+    buttons = ph.findChildren(QPushButton)
+    assert [b for b in buttons if "software 3D" in b.text()], \
+        [b.text() for b in buttons]
+
+
+def test_the_window_still_builds_when_the_3d_view_cannot(dead_gl, qapp):
+    """Everything else — photos, keypoints, corrections, export — works on a
+    machine with no 3D, so nothing here may bring the window down with it."""
+    from PySide6.QtWidgets import QApplication
+
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    win.show()
+    QApplication.processEvents()
+    assert win.view3d.placeholder() is not None
+
+
+def test_the_restart_control_writes_the_marker_and_relaunches(
+        dead_gl, qapp, monkeypatch, tmp_path):
+    """Qt only honours software OpenGL before its QApplication exists, so the
+    only way to apply the choice is to start again — and the marker is what
+    carries it across the restart."""
+    from PySide6.QtCore import QProcess
+
+    from pose3d.runtime import SOFTWARE_GL_MARKER
+    from pose3d.ui.view3d import View3D
+
+    monkeypatch.setattr("pose3d.runtime.app_dir", lambda: tmp_path)
+    started = {}
+    monkeypatch.setattr(
+        QProcess, "startDetached",
+        staticmethod(lambda prog, args: started.update(prog=prog, args=args)
+                     or True))
+
+    v = View3D()
+    v.show()
+    v.check_gl()
+    v.placeholder().restart_button().click()
+
+    assert (tmp_path / SOFTWARE_GL_MARKER).exists()
+    assert "--software-gl" in started["args"]
+
+
+def test_a_healthy_gl_view_shows_no_placeholder(qapp, monkeypatch):
+    """Not a placebo: when the predicate passes, nothing is put in the way.
+
+    (The offscreen platform this suite runs under has no OpenGL at all, so the
+    working machine is the one that has to be stubbed here.)
+    """
+    from pose3d.ui.view3d import View3D
+
+    monkeypatch.setattr(View3D, "gl_ok", lambda self: True)
+    v = View3D()
+    v.show()
+    assert v.check_gl() is True
+    assert v.placeholder() is None
