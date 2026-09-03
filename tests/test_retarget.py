@@ -380,13 +380,19 @@ def _head_dirs(ch, pose, head_pts):
     return Rz.T @ (R @ ch._rest_ref[ch.role["neck"]])
 
 
+def _bone_weights(ch, *roles):
+    """Per-vertex weight carried by the named bones, summed."""
+    w = np.zeros(len(ch.verts0))
+    for role in roles:
+        b = ch.role[role]
+        for k in range(ch.w_idx.shape[1]):
+            w += np.where(ch.w_idx[:, k] == b, ch.w_val[:, k], 0.0)
+    return w
+
+
 def _head_weights(ch):
     """Per-vertex weight of the HEAD bone."""
-    w = np.zeros(len(ch.verts0))
-    hb = ch.role["head"]
-    for k in range(ch.w_idx.shape[1]):
-        w += np.where(ch.w_idx[:, k] == hb, ch.w_val[:, k], 0.0)
-    return w
+    return _bone_weights(ch, "head")
 
 
 def _rig_verts(ch, pose, head_pts=None):
@@ -842,6 +848,28 @@ def test_a_coco17_nose_yaws_the_neck_in_its_own_plane():
     assert np.array_equal(ch._skin_matrices(flat, valid, _nose_only(flat))[0],
                           ch._skin_matrices(flat, valid)[0])
 
+    # ...and EXACTLY on it, `_head_aim_target` has no nod plane at all and
+    # falls back to the torso line itself. There is no spin to read about an
+    # aim that was never measured, so that branch counts as lever 0 even for a
+    # face point that does have a lever of its own — the one case the lever
+    # arithmetic above does not already cover, because it assumes the nose and
+    # the captured HEAD are the same point.
+    on = at_pitch(0.0)
+    valid = ~np.isnan(on).any(1)
+
+    def J(i):
+        return on[int(i)] if valid[int(i)] else None
+
+    assert ch._aim_is_collinear(J, on[int(Joint.PELVIS)])
+    off_axis = _nose_only(on)
+    off_axis[0] = on[int(Joint.NECK)] + _rot_about(right, 30.0) @ (
+        on[int(Joint.HEAD)] - on[int(Joint.NECK)])
+    assert _nose_lever(ch, on, off_axis) > 0.24        # a lever, and no roll
+    assert ch._nose_roll_target(J, on[int(Joint.PELVIS)], off_axis,
+                                np.eye(3)) is None
+    assert np.array_equal(ch._skin_matrices(on, valid, off_axis)[0],
+                          ch._skin_matrices(on, valid)[0])
+
 
 @pytest.mark.parametrize("mode", _MODES)
 def test_the_skull_does_not_shear(mode):
@@ -857,43 +885,58 @@ def test_the_skull_does_not_shear(mode):
     What is left, and is NOT what this guards (Decision 4: "not in scope, the
     normal blend stretch at bending joints"), is the ordinary throat blend: a
     handful of these same >=0.4-head vertices carry a few percent of CHEST
-    weight too (`w_idx`/`w_val` show it directly), so a large enough turn
-    still stretches THAT seam a little, same as an elbow or a knee does. 12
-    deg turn + 6 deg nod is comfortably past the fixture's actual head motion
-    (the "Nose mode" simulation table's own 1.045x max was measured over the
-    real take) while staying inside that ordinary throat margin; the 40+20
-    deg combination once tried here after the fix landed cleared 1.05x on
-    exactly those chest-blended vertices, in BOTH modes — a real but
-    out-of-scope defect this test must not chase.
+    weight too (vertex 972 is head 0.43 / neck 0.50 / chest 0.06), so a large
+    enough turn still stretches THAT seam, same as an elbow or a knee does.
+    So this measures twice:
+
+      * the 1.05x gate itself, on every >=0.4-head edge, at the largest turn
+        the ordinary throat blend leaves room for (12 deg + 6 deg — 20 + 10
+        already reads 1.056x, all of it on the chest-blended vertices);
+      * the head/neck split alone, at the full 40 deg turn + 20 deg nod, over
+        the 678 of those edges whose ends are >=99.9 % head+neck: those must
+        be RIGID, not merely within a gate, because the two bones now carry
+        the identical matrix. That is the invariant the fix restored, and it
+        holds at any angle — which is why the reduced angles above cannot
+        hide a regression in it.
     """
     ch = _ch(head_mode=mode)
     sub = _subject_from_rig(ch)
     ch.fit_to_subject(sub[None])
     torso = sub[int(Joint.NECK)] - sub[int(Joint.PELVIS)]
     up = torso / np.linalg.norm(torso)
-    right = _rot_about(up, 12.0) @ (
-        sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)])
-    fwd = _rot_about(right, 6.0) @ np.cross(up, right)      # 12 turn + 6 nod
-    pts = _head_pts(ch, sub, right=right, fwd=fwd)
-    if mode == "nose":
-        _assert_the_nose_acts(ch, sub, pts)
 
     w = _head_weights(ch)
+    chain = _bone_weights(ch, "head", "neck")
     f = ch.faces.reshape(-1, 3)
     edges = np.unique(np.sort(np.concatenate(
         [f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0)
     edges = edges[(w[edges[:, 0]] >= 0.4) & (w[edges[:, 1]] >= 0.4)]
     assert len(edges) > 100, "no skull edges found: the weight lookup is wrong"
 
-    rest = np.linalg.norm(
-        ch.verts0[edges[:, 1]] - ch.verts0[edges[:, 0]], axis=1)
-    posed_v = _rig_verts(ch, sub, pts)
-    posed = np.linalg.norm(
-        posed_v[edges[:, 1]] - posed_v[edges[:, 0]], axis=1)
-    keep = rest > 1e-9
-    ratio = posed[keep] / rest[keep]
+    def ratios(turn, nod, e):
+        right = _rot_about(up, turn) @ (
+            sub[int(Joint.RIGHT_SHOULDER)] - sub[int(Joint.LEFT_SHOULDER)])
+        pts = _head_pts(ch, sub, right=right,
+                        fwd=_rot_about(right, nod) @ np.cross(up, right))
+        if mode == "nose":
+            _assert_the_nose_acts(ch, sub, pts)
+        rest = np.linalg.norm(ch.verts0[e[:, 1]] - ch.verts0[e[:, 0]], axis=1)
+        posed_v = _rig_verts(ch, sub, pts)
+        posed = np.linalg.norm(posed_v[e[:, 1]] - posed_v[e[:, 0]], axis=1)
+        keep = rest > 1e-9
+        return posed[keep] / rest[keep]
+
+    ratio = ratios(12.0, 6.0, edges)
     assert ratio.max() <= 1.05, f"skull edge stretched {ratio.max():.3f}x"
     assert ratio.min() >= 0.90, f"skull edge squashed to {ratio.min():.3f}x"
+
+    pure = edges[(chain[edges[:, 0]] >= 0.999) & (chain[edges[:, 1]] >= 0.999)]
+    assert len(pure) > 100, "no head+neck-only edges: the weight lookup is wrong"
+    ratio = ratios(40.0, 20.0, pure)
+    # 1e-4, not 0: the weights are float32 and do not sum to exactly 1.
+    assert abs(ratio - 1.0).max() < 1e-4, (
+        f"the head/neck split sheared the skull {ratio.max():.6f}x / "
+        f"{ratio.min():.6f}x — the chain is not rigid")
 
 
 def test_knee_dragged_to_the_hip_folds_the_thigh():

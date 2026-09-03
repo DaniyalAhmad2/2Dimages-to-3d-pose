@@ -855,6 +855,24 @@ class Character:
         dir_c = np.cos(want) * t_hat + np.sin(want) * (perp / pn)
         return n + dn * dir_c
 
+    def _aim_is_collinear(self, J, pelvis):
+        """True when `_head_aim_target` took its exactly-collinear branch.
+
+        That branch (`pn < 1e-9`, NOSE head_source only) fires when the
+        captured HEAD sits ON the torso line, where the plane the nod happens
+        in — and so the spin about the aim — is undefined. `_nose_roll_target`
+        reads it as lever 0. The same `pn < 1e-9` test as the branch itself.
+        """
+        h, n = J(Joint.HEAD), J(Joint.NECK)
+        if h is None or n is None or pelvis is None:
+            return False
+        d, t = h - n, n - np.asarray(pelvis, float)
+        dn, tn = float(np.linalg.norm(d)), float(np.linalg.norm(t))
+        if dn < 1e-9 or tn < 1e-9:
+            return False
+        d, t = d / dn, t / tn
+        return bool(np.linalg.norm(d - float(np.dot(d, t)) * t) < 1e-9)
+
     def _nose_roll_target(self, J, pelvis, head_pts, Rz) -> tuple[np.ndarray, float] | None:
         """Captured roll reference for the neck in Nose mode, or None.
 
@@ -869,12 +887,15 @@ class Character:
         rolling is switched off (`_ROLL_WEIGHT <= 0`), there are no face
         points, the nose is missing or non-finite (a NaN nose — Task 2's
         cross-view gate rejecting it — is the same as no nose), NECK is
-        missing, `_head_aim_target` has nothing to aim at, or the lever is
-        under the gate. `_head_aim_target`'s own exactly-collinear branch
-        (`pn < 1e-9`) needs no special case here: with a NOSE head_source the
-        HEAD point IS the nose, so the same `d` and the same torso-line
-        reference make this lever proportional to that branch's own `pn` —
-        collinear there is collinear (lever ~0) here.
+        missing, `_head_aim_target` has nothing to aim at, its exactly-
+        collinear branch fired (`_aim_is_collinear` — that branch has no nod
+        plane, so it counts as lever 0), or the lever is under the gate.
+
+        The collinear check is belt and braces where the nose IS the captured
+        HEAD (every COCO-17 project, the only shape a NOSE head_source has in
+        the app): there the same `d` and the same torso-line reference make
+        the lever below reduce to exactly that branch's own `pn`. It is what
+        states the rule when the two points are ever decoupled.
 
         Directions only, so only `Rz`'s yaw alignment applies — no scale, no
         translation.
@@ -892,6 +913,8 @@ class Character:
             return None
         target = self._head_aim_target(J, pelvis)
         if target is None:
+            return None
+        if self.head_source != "skull" and self._aim_is_collinear(J, pelvis):
             return None
         a = target - neck
         n_a = float(np.linalg.norm(a))
@@ -1210,15 +1233,14 @@ class Character:
         # nose+ears(+eyes) basis that orients the chain when a lateral pair
         # is present.
         head_rig = None
-        if head_pts is not None:
+        if self.head_mode == "face" and head_pts is not None:
             hp = np.asarray(head_pts, float).reshape(-1, 3)
             if len(hp) >= NUM_HEAD_KP:
                 head_rig = np.array([to_rig(q) if not np.isnan(q).any()
                                      else q for q in hp])
 
         R_face = None
-        if self.head_mode == "face" and head_rig is not None \
-                and self._rest_head is not None:
+        if head_rig is not None and self._rest_head is not None:
             target = self._head_basis(head_rig)
             if target is not None:
                 R_face = target @ self._rest_head.T
