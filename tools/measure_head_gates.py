@@ -230,10 +230,9 @@ def _detect(project_dir: Path, feet: bool, npz: Path,
     is how the naive whole-model swap (everything native) is measured without
     shipping it.
     """
-    import cv2
-
     from pose3d.core.io_project import load_project
     from pose3d.detect.rtmpose import RTMPoseDetector
+    from pose3d.imageio import read_image
     from pose3d.pipeline import run_full
     from pose3d.quality import load_rig
 
@@ -248,7 +247,7 @@ def _detect(project_dir: Path, feet: bool, npz: Path,
     # inside run_full, from the detector itself
     t0 = time.time()
     report = run_full(project, det, load_rig(project_dir / "calibration"),
-                      lambda p: cv2.imread(str(p)))
+                      read_image)
     print(f"  {len(project.frames)} frames in {time.time() - t0:.0f} s  "
           f"layout={project.keypoint_model} head={project.head_source}  "
           f"{report.note() or 'fit clean'}", flush=True)
