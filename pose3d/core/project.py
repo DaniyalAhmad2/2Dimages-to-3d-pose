@@ -162,6 +162,14 @@ class ProjectData:
     # data, not a preference. Absent in a file written before the key existed
     # -> "nose", which is what those files hold.
     head_source: str = "nose"
+    # what ORIENTS the rigid neck+head chain in this project: "nose" (the
+    # chain aims at the canonical HEAD and is turned about that axis by the
+    # nose) or "face" (the full nose+ears face basis). Unlike head_source this
+    # is a PREFERENCE about the subject, not a fact about the data: a
+    # mannequin's ears are moulded scenery whose detections are noise, a
+    # person's are real features. Absent -> "nose", the mannequin-safe mode
+    # every take was posed under before the choice existed.
+    head_mode: str = "nose"
     # A project built in memory is by definition current; load_project
     # overrides this with what the file says (0 for files predating the key).
     pipeline_version: int = PIPELINE_VERSION

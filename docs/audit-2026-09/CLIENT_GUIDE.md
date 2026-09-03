@@ -53,8 +53,8 @@ figure's height rather than looking steeply down.
 
 ## 4. Capture habits that pay off
 
-- Keep the **face (nose and both ears) visible** to both cameras; the head orientation
-  comes from them.
+- Keep the **nose visible** to both cameras; that is what turns the character's head. In
+  **Face mode** (the "Head:" box in the 3D PREVIEW header) also keep **both ears** visible.
 - Keep the gooseneck clamp from crossing the arms or legs in either view.
 - **Photograph one pose twice** at some point in a take (two shots, no change). That gives
   us the noise floor of the detector on your rig, which is the one number the audit could

@@ -24,6 +24,14 @@ from tests.synth import sample_skeleton_3d
 _IMPORTED_DEFAULT = __import__(
     "pose3d.geometry.character", fromlist=["x"]).default_head_source()
 
+#: The process-wide head MODE as the module ships it, read the same way and
+#: for the same reason. It has to be restored as carefully as the convention
+#: above: a "face" default left behind by a UI test reaches
+#: `measure_gate_table_on_fixture()` later in this very file and re-poses
+#: every frame the gate table is measured on.
+_IMPORTED_DEFAULT_MODE = __import__(
+    "pose3d.geometry.character", fromlist=["x"]).default_head_mode()
+
 
 def _pitch_head(pose, deg):
     """Pitch the HEAD point forward about the NECK by `deg`."""
@@ -56,23 +64,25 @@ def _aim_error(character, pose):
 
 @pytest.fixture(autouse=True)
 def _no_leaked_head_default():
-    """The process-wide default is module state, and every test here that
-    touches it restores it in a `finally`. This is the belt as well: no test
-    in this file may inherit a convention from another one (or from the order
-    pytest happened to run them in), and none may leave one behind for the
-    rest of the suite.
+    """BOTH process-wide head defaults are module state, and every test here
+    that touches either restores it in a `finally`. This is the belt as well:
+    no test in this file may inherit a convention or a mode from another one
+    (or from the order pytest happened to run them in), and none may leave one
+    behind for the rest of the suite.
 
-    It restores the value the module was IMPORTED with, so
+    It restores the values the module was IMPORTED with, so
     `test_the_default_head_source_is_the_legacy_convention` still measures the
     real default rather than one this fixture chose.
     """
     from pose3d.geometry import character as ch
 
     ch.set_default_head_source(_IMPORTED_DEFAULT)
+    ch.set_default_head_mode(_IMPORTED_DEFAULT_MODE)
     try:
         yield
     finally:
         ch.set_default_head_source(_IMPORTED_DEFAULT)
+        ch.set_default_head_mode(_IMPORTED_DEFAULT_MODE)
 
 
 def test_the_default_head_source_is_the_legacy_convention():
@@ -333,6 +343,7 @@ def test_the_window_publishes_the_open_projects_head_convention(qapp):
         assert ch.default_head_source() == "skull"
     finally:
         ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
 
 
 def test_re_detecting_moves_the_head_convention_with_the_2d(qapp):
@@ -360,6 +371,7 @@ def test_re_detecting_moves_the_head_convention_with_the_2d(qapp):
         assert ch.default_head_source() == "skull"
     finally:
         ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
 
 
 def test_every_detector_declares_what_its_head_point_is():
@@ -461,6 +473,7 @@ def test_re_detecting_drops_the_views_cached_character(qapp):
         assert win.view3d._character is kept      # unchanged: no churn
     finally:
         ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
 
 
 def test_the_convention_moves_before_anything_is_re_posed(qapp, monkeypatch):
@@ -496,6 +509,149 @@ def test_the_convention_moves_before_anything_is_re_posed(qapp, monkeypatch):
                         "cached": None}
     finally:
         ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
+
+
+# --- the head MODE the user picks, per project -----------------------------
+#
+# `head_source` is a fact about the stored 2D and the app adopts it; the MODE
+# is a choice the user makes about THIS figure — a mannequin's ears are noise
+# and must not steer its head, a person's are real features. So it lives in
+# the project file, is published process-wide the same way, and is switched
+# from one combo in the 3D PREVIEW header.
+
+def _mode_window(**kw):
+    """A window on a one-frame project, plus the project it was built on."""
+    from pose3d.core.project import Frame, ProjectData
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data = ProjectData(name="modes", **kw)
+    data.frames.append(Frame(frame_id="0000"))     # the window draws one
+    model = ProjectModel(data, None)
+    return MainWindow(model), data
+
+
+def test_the_head_mode_combo_publishes_the_mode_and_rebuilds_the_character(qapp):
+    """The 3D view and the Blender export each build their own Character and
+    never see a ProjectData, so switching the mode has to reach them the way
+    the convention does: through the process-wide default, with the view's
+    cached Character dropped so it is rebuilt under the new one. A kept cache
+    would leave the preview posing the head one way and the export the other."""
+    from pose3d.geometry import character as ch
+
+    try:
+        win, data = _mode_window()
+        assert data.head_mode == "nose"
+        assert ch.default_head_mode() == "nose"
+        assert win.head_combo.count() == 2
+        assert [win.head_combo.itemText(i) for i in range(2)] == [
+            "Head: nose", "Head: face (nose + ears)"]
+
+        win.view3d._character = _FakeCharacter("nose")
+        win.head_combo.setCurrentIndex(1)
+
+        assert data.head_mode == "face"
+        assert ch.default_head_mode() == "face"
+        assert win.view3d._character is None      # mode moved: rebuild
+
+        win.view3d._character = _FakeCharacter("nose")
+        win.head_combo.setCurrentIndex(0)
+        assert data.head_mode == "nose"
+        assert ch.default_head_mode() == "nose"
+        assert win.view3d._character is None
+    finally:
+        ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
+
+
+def test_re_selecting_the_current_head_mode_changes_nothing(qapp):
+    """Re-selecting the mode already in force must not churn: dropping the
+    view's Character would rebuild and re-fit the whole rig for no reason, and
+    marking the project unsaved would invent an edit the user never made."""
+    from pose3d.geometry import character as ch
+
+    try:
+        win, data = _mode_window()
+        kept = _FakeCharacter("nose")
+        win.view3d._character = kept
+
+        win.head_combo.setCurrentIndex(0)         # already "nose"
+
+        assert win.view3d._character is kept      # unchanged: no churn
+        assert win.saved_label.text() == "✓ Project Saved"
+        assert data.head_mode == "nose"
+    finally:
+        ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
+
+
+def test_switching_the_head_mode_is_an_unsaved_edit_that_is_saved(qapp, tmp_path):
+    """The mode is stored in the project file, so switching it is an edit like
+    any other: the header says so, and "Save Corrections" writes it. Reopening
+    the folder and getting the old mode back would silently re-pose the head on
+    every frame of the take."""
+    from pose3d.core.io_project import load_project
+    from pose3d.geometry import character as ch
+
+    try:
+        win, _ = _mode_window()
+        win.model.project_dir = str(tmp_path)
+        assert win.saved_label.text() == "✓ Project Saved"
+
+        win.head_combo.setCurrentIndex(1)
+        assert win.saved_label.text() == "● Unsaved changes"
+
+        win.model.save()
+        assert load_project(tmp_path).head_mode == "face"
+    finally:
+        ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
+
+
+def test_opening_a_face_mode_project_publishes_it_without_an_edit(qapp):
+    """Opening a project set to Face mode has to publish that mode before
+    anything is drawn — and must not fire the combo's handler doing it, which
+    would mark a freshly opened, unmodified project as having unsaved
+    changes."""
+    from pose3d.geometry import character as ch
+
+    try:
+        win, data = _mode_window(head_mode="face")
+
+        assert ch.default_head_mode() == "face"
+        assert win.head_combo.currentIndex() == 1
+        assert win.saved_label.text() == "✓ Project Saved"
+        assert data.head_mode == "face"
+    finally:
+        ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
+
+
+def test_the_camera_views_are_told_both_head_conventions(qapp):
+    """Which face dots are draggable depends on both: the nose dot only under
+    the skull convention (under "nose" the HEAD dot IS the nose), the eyes and
+    ears only in Face mode. `_refresh_overlays` is the one place that draws
+    them, so it is the one place that has to pass both."""
+    from pose3d.geometry import character as ch
+
+    try:
+        win, _ = _mode_window(keypoint_model="halpe26",
+                              head_source="skull", head_mode="face")
+        seen = {}
+
+        def fake_set_pose(*a, **kw):
+            seen.update(kw)
+
+        win.cam_left.view.set_pose = fake_set_pose
+        win.cam_right.view.set_pose = fake_set_pose
+        win._refresh_overlays()
+
+        assert seen["head_source"] == "skull"
+        assert seen["head_mode"] == "face"
+    finally:
+        ch.set_default_head_source("nose")
+        ch.set_default_head_mode("nose")
 
 
 # --- the gate table that decided the switch --------------------------------
