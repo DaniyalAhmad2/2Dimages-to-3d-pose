@@ -30,6 +30,15 @@ from pose3d.geometry.triangulate import (
 )
 
 
+class Cancelled(Exception):
+    """The user stopped a long job before it finished.
+
+    Defined here, in the Qt-free half, and re-exported by `ui.worker`, so the
+    GUI and the pipeline raise and catch ONE class. It is not a failure: what
+    it guarantees is that whatever raised it committed nothing.
+    """
+
+
 class CalibratedRig:
     """Intrinsics + extrinsics for the two-camera rig."""
 
@@ -61,12 +70,22 @@ def _detector_keypoint_model(detector: KeypointDetector) -> str:
 
 def detect_project(project: ProjectData, detector: KeypointDetector,
                    load_image, on_frame=None, respect_corrections: bool = True,
-                   fields: str = "all") -> int:
+                   fields: str = "all", on_progress=None, cancelled=None) -> int:
     """Populate each frame's 2D keypoints/scores via the detector.
 
     load_image(path) -> BGR ndarray. Mutates project in place.
 
     on_frame(i, n) is called after each frame, for a progress dialog.
+
+    on_progress(done, total, label) is the same fact in the shape
+    `ui.worker.run_job` hands a job, so a UI call site passes its `report`
+    straight through.
+
+    cancelled() is polled between frames; when it turns True the detection
+    raises `Cancelled` and NOTHING is written. That is why the loop stages its
+    answers and commits them, together with the provenance triple, in one
+    post-loop step: a take half-detected under a new layout, still carrying
+    the old `head_source`, is a project that lies about its own 2D.
 
     respect_corrections keeps hand-placed points: a correction is a human
     saying the detector was wrong there, and re-running detection used to
@@ -96,17 +115,16 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
     """
     if fields not in ("all", "head"):
         raise ValueError(f"fields must be 'all' or 'head', not {fields!r}")
-    if fields == "all":
-        project.keypoint_model = _detector_keypoint_model(detector)
-        project.head_source = getattr(detector, "head_source", None) or "nose"
-        project.detector = (getattr(detector, "provenance", None)
-                            or type(detector).__name__)
     heads = 0
     n = len(project.frames)
+    staged: list[tuple] = []          # (frame, cam, what to write)
     for i, frame in enumerate(project.frames):
+        if cancelled is not None and cancelled():
+            raise Cancelled()
         for cam in (CAM_LEFT, CAM_RIGHT):
             img = load_image(frame.images[cam])
             det = detector.detect(img)
+            body = None
             if fields == "all":
                 keep = frame.corrected[cam] if respect_corrections \
                     else np.zeros(NUM_JOINTS, bool)
@@ -114,18 +132,32 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
                 # working arrays below merge it with the user's corrections,
                 # and this is the only record of what the detector said. It is
                 # written once per detection and never again.
-                frame.kp2d_raw[cam] = np.asarray(det.xy, float).copy()
-                frame.scores_raw[cam] = np.asarray(det.scores, float).copy()
-                frame.kp2d[cam] = np.where(keep[:, None], frame.kp2d[cam],
-                                           det.xy)
-                frame.scores[cam] = np.where(keep, frame.scores[cam],
-                                             det.scores)
+                body = (np.asarray(det.xy, float).copy(),
+                        np.asarray(det.scores, float).copy(),
+                        np.where(keep[:, None], frame.kp2d[cam], det.xy),
+                        np.where(keep, frame.scores[cam], det.scores))
+            head = None
             if det.head_xy is not None:
-                frame.head2d[cam] = det.head_xy
-                frame.head_scores[cam] = det.head_scores
+                head = (det.head_xy, det.head_scores)
                 heads += 1
+            staged.append((frame, cam, body, head))
         if on_frame is not None:
             on_frame(i + 1, n)
+        if on_progress is not None:
+            on_progress(i + 1, n, f"Detecting keypoints — frame {i + 1} of {n}")
+
+    # committed only now: every frame, or none of them
+    if fields == "all":
+        project.keypoint_model = _detector_keypoint_model(detector)
+        project.head_source = getattr(detector, "head_source", None) or "nose"
+        project.detector = (getattr(detector, "provenance", None)
+                            or type(detector).__name__)
+    for frame, cam, body, head in staged:
+        if body is not None:
+            (frame.kp2d_raw[cam], frame.scores_raw[cam],
+             frame.kp2d[cam], frame.scores[cam]) = body
+        if head is not None:
+            frame.head2d[cam], frame.head_scores[cam] = head
     return heads
 
 

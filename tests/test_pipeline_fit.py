@@ -331,6 +331,78 @@ def test_detect_project_reports_progress():
     assert seen == [(1, 3), (2, 3), (3, 3)]
 
 
+def test_detect_project_reports_progress_the_worker_can_show():
+    """`on_progress(done, total, label)` is the shape `worker.run_job` hands
+    a job, so a call site passes `report` straight through."""
+    from pose3d.pipeline import detect_project
+
+    data, _ = _take(n=3)
+    seen = []
+    detect_project(data, _ShiftedDetector(data.frames[0].kp2d[CAM_LEFT]),
+                   lambda p: np.zeros((4, 4, 3), np.uint8),
+                   on_progress=lambda done, total, label:
+                       seen.append((done, total, label)))
+    assert [(d, t) for d, t, _ in seen] == [(1, 3), (2, 3), (3, 3)]
+    assert all("3" in label for _, _, label in seen), seen
+
+
+class _Skull(KeypointDetector):
+    """A detector under the OTHER head convention, so adopting its answer is
+    visible in the project's provenance."""
+    head_source = "skull"
+    keypoint_model = "halpe26"
+    provenance = "skull-test"
+
+    def __init__(self, base_xy):
+        self._xy = np.asarray(base_xy, float) + 40.0
+
+    def detect(self, image_bgr):
+        return Detection(xy=self._xy.copy(),
+                         scores=np.full(NUM_JOINTS, 0.5))
+
+
+def test_a_cancelled_detection_changes_nothing():
+    """A detection that does not finish leaves the project exactly as it was.
+
+    Half a take detected under a new layout, with the old provenance still on
+    the project, is a project that lies about its own 2D — the retarget would
+    then correct a skull HEAD for the nose's forward offset on the frames that
+    got through. So the frames and the provenance triple are committed in one
+    post-loop step, and a cancel commits neither.
+    """
+    from pose3d.pipeline import Cancelled, detect_project
+
+    data, _ = _take(n=3)
+    before = [f.kp2d[CAM_LEFT].copy() for f in data.frames]
+    provenance = (data.keypoint_model, data.head_source, data.detector)
+    seen = []
+
+    with pytest.raises(Cancelled):
+        detect_project(data, _Skull(data.frames[0].kp2d[CAM_LEFT]),
+                       lambda p: np.zeros((4, 4, 3), np.uint8),
+                       on_frame=lambda i, n: seen.append(i),
+                       cancelled=lambda: len(seen) >= 1)   # stop after frame 1
+
+    assert seen == [1], "the cancel was not seen between two frames"
+    for f, was in zip(data.frames, before):
+        assert np.array_equal(f.kp2d[CAM_LEFT], was)
+    assert (data.keypoint_model, data.head_source, data.detector) == provenance
+
+
+def test_a_detection_that_finishes_commits_everything_at_once():
+    from pose3d.pipeline import detect_project
+
+    data, _ = _take(n=3)
+    detector = _Skull(data.frames[0].kp2d[CAM_LEFT])
+    detect_project(data, detector, lambda p: np.zeros((4, 4, 3), np.uint8),
+                   cancelled=lambda: False)
+
+    for f in data.frames:
+        assert np.allclose(f.kp2d[CAM_LEFT], detector._xy)
+    assert (data.keypoint_model, data.head_source, data.detector) == (
+        "halpe26", "skull", "skull-test")
+
+
 # --- Phase 1b: the fix reaches an existing take, once, and says so --------
 
 def test_a_legacy_project_is_recomputed_on_open_and_says_what_moved():
