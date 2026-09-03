@@ -68,8 +68,8 @@ def _block(text: str, header: str) -> str:
 def _steps(text: str) -> dict[str, str]:
     """Every `- name: …` step, mapped to the rest of its own block."""
     lines = text.splitlines()
-    marker = next((len(l) - len(l.lstrip()) for l in lines
-                   if re.match(r"\s*- name:", l)), None)
+    marker = next((len(raw) - len(raw.lstrip()) for raw in lines
+                   if re.match(r"\s*- name:", raw)), None)
     assert marker is not None, "no named steps in this file"
 
     steps: dict[str, list[str]] = {}

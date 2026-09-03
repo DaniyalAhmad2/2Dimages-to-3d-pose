@@ -34,7 +34,7 @@ these files, because there is no second Windows machine here to run them on.
 
 | # | check | the failure it buys |
 |---|---|---|
-| 1 | `setup-uv` with `python-version-file: .python-version` | `uv.lock` says only `>=3.12`, so an unpinned runner freezes the exe against whatever interpreter it has newest — while every doc, README string and test in this repo names `python312.dll`. |
+| 1 | read `.python-version`, then `setup-uv` with `python-version:` that value | `uv.lock` says only `>=3.12`, so an unpinned runner freezes the exe against whatever interpreter it has newest — while every doc, README string and test in this repo names `python312.dll`. Read in a step of its own because setup-uv has no `python-version-file` input (not on v5, not on `main`) and an unknown input is *silently ignored*: passing one would have pinned nothing and said nothing. A missing or empty `.python-version` fails the job. |
 | 2 | `uv sync --frozen --all-groups` | resolving here would ship the client versions nothing was tested against. |
 | 3 | cache `.cache`, keyed on `hashFiles('packaging/windows/inputs.json')` | `inputs.json` is the only place a Blender version, URL or checksum is written. Keying the cache on anything else means a corrected checksum keeps restoring the old bytes and every build fails on a file nobody can see. |
 | 4 | `pyinstaller pose3d.spec --noconfirm --clean` | — (the build itself) |
@@ -46,7 +46,7 @@ these files, because there is no second Windows machine here to run them on.
 | 10 | `check_bundle_layout.py` **on the extracted copy** | a file the archive or the extraction dropped. This is the copy that actually broke last time. |
 | 11 | `Pose3D.exe --selftest --no-video`, from the extracted copy, `Start-Process -Wait` | the app the client double-clicks, from where they run it, with `POSE3D_BLENDER=""`, `POSE3D_MODELS=""` and an empty `XDG_CACHE_HOME`: it can only pass by finding what the bundle itself ships. `Start-Process -Wait` and not `&`, because `Pose3D.exe` is built for the GUI subsystem and PowerShell does not wait for those — `&` returns immediately and `$LASTEXITCODE` would describe the launch, not the self-test. |
 | 12 | print `selftest-out.txt`, `selftest-err.txt` and the extracted copy's `pose3d-log.txt`, then fail on a non-zero exit | a windowed exe writes into `pose3d-log.txt` and nowhere else. Printed on a *passing* run too, so the log records which Blender and which weights the bundle actually found. |
-| 13 | `Pose3D-diagnose.exe --selftest`, same starved environment, `if: always()` | the console build of the same checks — the exe the client is told to run when something goes wrong. Running it here, pass or fail, means the report they would send is one this gate has already produced. Evidence, not a second gate: step 12 already failed the job on that exit code. |
+| 13 | `Pose3D-diagnose.exe --selftest`, same starved environment, whenever the extraction succeeded | the console build of the same checks — the exe the client is told to run when something goes wrong. Running it here, pass or fail, means the report they would send is one this gate has already produced. Evidence, not a second gate: step 12 already failed the job on that exit code, and this step is meant to run *after* that failure. |
 
 ## The one check this runner cannot make
 
