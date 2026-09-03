@@ -149,6 +149,10 @@ Roughly 1 GB zipped, 1.6 GB extracted — Blender alone is ~1 GB. Shipped
 unsigned; `packaging/windows/README.txt` tells the client how to click through
 SmartScreen.
 
+`-Zip` archives the assembled folder through `tools/bundle_zip.py`, which
+refuses any entry too deep for Windows to extract and writes
+`build/Pose3D-Windows.zip` (beside the `-Out` folder, named after it).
+
 `tools/fetch_weights.py` stages the ONNX weights for both the bundle and the
 Docker image, reading the expected filenames from rtmlib's own tables so a
 rtmlib upgrade cannot leave us shipping a checkpoint the app then ignores.
