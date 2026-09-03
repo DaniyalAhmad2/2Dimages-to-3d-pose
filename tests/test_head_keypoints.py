@@ -416,6 +416,46 @@ def test_a_face_point_without_a_detection_is_never_drawn():
     assert not any(vis.values()), "the joints toggle overrode Nose mode"
 
 
+def test_an_undetected_body_joint_is_never_drawn_either():
+    """The same rule for the canonical joints, which never had it.
+
+    `set_show_joints` gated a joint on `not np.isnan(it.pos().x())`, and that
+    is never False: `set_pose` skips `setPos` for a NaN joint, so the item
+    keeps the last FINITE position it was ever given and the guard passes
+    every time. Toggling joints off and back on therefore re-showed every
+    undetected joint as a draggable dot at a stale position — a point the
+    cameras never saw, sitting where it used to be, where a drag would write
+    a hand correction out of nothing.
+    """
+    p = _face_panel()
+    xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
+    scores = np.full(NUM_JOINTS, 0.9)
+    p.view.set_pose(xy, scores)                     # every joint detected...
+    assert all(it.isVisible() for it in p.view._joints)
+
+    gone = 3
+    xy = xy.copy()
+    xy[gone] = np.nan                               # ...and now one is not
+    p.view.set_pose(xy, scores)
+    assert not p.view._joints[gone].isVisible()
+    assert not np.isnan(p.view._joints[gone].pos().x()), \
+        "this test is pointless unless the item holds a stale finite position"
+
+    p.view.set_show_joints(False)
+    p.view.set_show_joints(True)
+    assert not p.view._joints[gone].isVisible(), \
+        "the joints toggle resurrected an undetected joint at a stale position"
+    assert all(p.view._joints[j].isVisible()
+               for j in range(NUM_JOINTS) if j != gone), \
+        "the toggle failed to bring the detected joints back"
+
+    # a later frame that DOES see it draws it again: the flag is per frame,
+    # not a latch that outlives the dropout
+    p.view.set_pose(np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None],
+                            (1, 2)) * 10 + 5, scores)
+    assert p.view._joints[gone].isVisible()
+
+
 def test_frame_change_delivers_head3d_to_the_3d_view():
     """Regression guard: _on_frame_changed called set_pose without head3d, so
     the character's head snapped back to riding the neck on frame change."""

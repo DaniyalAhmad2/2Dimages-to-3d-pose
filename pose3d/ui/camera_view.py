@@ -143,6 +143,15 @@ class CameraView(QGraphicsView):
         # may only hide dots and un-hide the ones that were shown, never
         # resurrect one this frame's mode (or a NaN) took away.
         self._face_shown = [False] * NUM_HEAD_KP
+        # the same flag for the canonical joints, and for the same reason. The
+        # toggle used to ask the ITEM where it was (`not isnan(pos().x())`),
+        # which can never be NaN: `set_pose` skips `setPos` for a joint the
+        # cameras did not see, so the item keeps its last finite position and
+        # the guard passed every time. Toggling joints off and on re-showed
+        # every undetected joint at a stale position, where a drag would write
+        # a hand correction out of nothing. True until the first `set_pose`,
+        # which is what the old guard said for a never-posed item too.
+        self._joint_shown = [True] * NUM_JOINTS
         self._bones: list[QGraphicsLineItem] = []
         self._show_joints = True
         self._show_bones = True
@@ -234,8 +243,10 @@ class CameraView(QGraphicsView):
         for j, item in enumerate(self._joints):
             p = xy[j]
             if np.isnan(p).any():
+                self._joint_shown[j] = False
                 item.setVisible(False)
                 continue
+            self._joint_shown[j] = True
             item.setVisible(self._show_joints)
             # suppress the move signal while we set position programmatically
             # (QGraphicsItem is not a QObject; the Signal lives on item.signals)
@@ -364,10 +375,11 @@ class CameraView(QGraphicsView):
 
     def set_show_joints(self, on: bool):
         self._show_joints = on
-        for it in self._joints:
-            it.setVisible(on and not np.isnan(it.pos().x()))
-        # face dots go by what the last `set_pose` decided: this toggle knows
-        # nothing about the head conventions and may not overrule them.
+        # Both sets go by what the last `set_pose` decided: this toggle knows
+        # nothing about a dropout or the head conventions and may not overrule
+        # either. It may only hide, and un-hide what `set_pose` showed.
+        for shown, it in zip(self._joint_shown, self._joints):
+            it.setVisible(on and shown)
         for shown, it in zip(self._face_shown, self._face):
             it.setVisible(on and shown)
         self._refresh_bones()
