@@ -223,13 +223,17 @@ def install_qt_message_handler() -> None:
 def _pre_qt_checks() -> None:
     """Checks that must run before Qt exists, and may exit instead of starting.
 
-    Deliberately empty here: the bundle-integrity check that fills it
-    (`pose3d.integrity.run_startup_check`) has to run before Qt is asked to
-    load a plugin that may be missing from the bundle, and this is the point
-    in `main()` where "before" is guaranteed — after the crash handler, so a
-    failure inside it is still reported, and after `--selftest` has taken its
-    own exit, so the self-test's report is never pre-empted by a dialog.
+    The bundle-integrity check has to run before Qt is asked to load a plugin
+    that may be missing from the bundle — a missing `platforms\\qwindows.dll`
+    aborts the QApplication constructor itself, so no Qt dialog could report
+    it — and this is the point in `main()` where "before" is guaranteed: after
+    the crash handler, so a failure inside it is still reported, and after
+    `--selftest` has taken its own exit, so the self-test's report is never
+    pre-empted by a dialog. Imported inside the function, like the rest of
+    what `main()` reaches for, so importing this module stays cheap.
     """
+    from pose3d import integrity
+    integrity.run_startup_check()
 
 
 def _configure_gl(argv) -> str:
