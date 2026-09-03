@@ -179,13 +179,15 @@ def install_crash_handler() -> None:
         text = "".join(traceback.format_exception(exc_type, exc, tb))
         print(text, file=sys.stderr, flush=True)
         try:
-            from PySide6.QtWidgets import QApplication, QMessageBox
+            from PySide6.QtWidgets import QApplication
 
-            from pose3d.ui.guard import log_hint
+            from pose3d.ui.guard import log_hint, report_error
             if QApplication.instance() is not None:
-                QMessageBox.critical(
-                    None, "Pose3D stopped",
-                    f"{exc_type.__name__}: {exc}\n\n{log_hint()}")
+                # Through the sink, not QMessageBox: this is a modal like any
+                # other, and the suite's autouse fixture replaces exactly one
+                # function to keep every one of them off a CI machine.
+                report_error(None, "Pose3D stopped",
+                             f"{exc_type.__name__}: {exc}\n\n{log_hint()}")
         except Exception:
             pass                        # a dialog must never mask the crash
 

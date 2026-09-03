@@ -92,17 +92,11 @@ def test_crash_handler_leaves_keyboard_interrupt_alone(monkeypatch):
         sys.excepthook = sys.__excepthook__
 
 
-def test_the_crash_dialog_says_when_no_log_could_be_written(monkeypatch):
-    """After the devnull fallback there is no file to send us, and a dialog
-    naming one is worse than a dialog admitting there is none."""
-    from PySide6.QtWidgets import QApplication, QMessageBox
+def _crash(monkeypatch):
+    """Fire the installed excepthook with a QApplication in the process."""
+    from PySide6.QtWidgets import QApplication
 
-    monkeypatch.setattr("pose3d.runtime.log_path", lambda: None)
     monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: object()))
-    seen = {}
-    monkeypatch.setattr(QMessageBox, "critical",
-                        staticmethod(lambda *a: seen.setdefault("args", a)))
-
     app.install_crash_handler()
     try:
         try:
@@ -112,7 +106,27 @@ def test_the_crash_dialog_says_when_no_log_could_be_written(monkeypatch):
     finally:
         sys.excepthook = sys.__excepthook__
 
-    text = seen["args"][2]
+
+def test_the_crash_dialog_goes_through_the_error_sink(monkeypatch,
+                                                      recorded_errors):
+    """The crash dialog is a modal like any other, so it has to be the same
+    replaceable function — otherwise a crash in any UI test parks a message box
+    in front of a CI job with nobody there to click it."""
+    _crash(monkeypatch)
+
+    assert [t for t, _ in recorded_errors] == ["Pose3D stopped"]
+    assert "ValueError: rig went missing" in recorded_errors[0][1]
+
+
+def test_the_crash_dialog_says_when_no_log_could_be_written(monkeypatch,
+                                                            recorded_errors):
+    """After the devnull fallback there is no file to send us, and a dialog
+    naming one is worse than a dialog admitting there is none."""
+    monkeypatch.setattr("pose3d.runtime.log_path", lambda: None)
+
+    _crash(monkeypatch)
+
+    text = recorded_errors[0][1]
     assert "None" not in text, f"the dialog points at a file called None: {text}"
     assert "no log" in text.lower()
 
@@ -191,37 +205,45 @@ def test_the_marker_file_selects_software_gl(monkeypatch, tmp_path):
     assert app._configure_gl([]) == "software"
 
 
-def test_the_gl_decision_is_taken_before_any_qapplication(monkeypatch, tmp_path):
-    """Qt ignores AA_UseSoftwareOpenGL once a QApplication exists, so this
-    ordering IS the feature."""
-    from PySide6.QtWidgets import QApplication
+def _record_main_order(monkeypatch, name):
+    """Run main() with the application object faked out, recording the order in
+    which `name` and the QApplication construction happen.
 
-    _clean_gl_env(monkeypatch, tmp_path)
-    monkeypatch.setattr(sys, "argv", ["pose3d", "--software-gl"])
-    monkeypatch.setattr(app, "open_project_window", lambda f: None)
-    monkeypatch.setattr(app, "apply_dark_theme", lambda a: None)
-    when = {}
+    Asking `QApplication.instance()` instead would prove nothing: the fake never
+    registers an instance, so that question answers None wherever the call sits.
+    """
+    order = []
+    real = getattr(app, name)
 
-    real = app._configure_gl
+    def spy(*args, **kwargs):
+        order.append(name)
+        return real(*args, **kwargs)
 
-    def spy(argv):
-        when["instance"] = QApplication.instance()
-        return real(argv)
-
-    monkeypatch.setattr(app, "_configure_gl", spy)
+    monkeypatch.setattr(app, name, spy)
 
     class FakeQApp:
         def __init__(self, argv):
-            pass
+            order.append("QApplication")
 
         def exec(self):
             return 0
 
     monkeypatch.setattr(app, "QApplication", FakeQApp)
+    monkeypatch.setattr(app, "open_project_window", lambda f: None)
+    monkeypatch.setattr(app, "apply_dark_theme", lambda a: None)
     with pytest.raises(SystemExit):
         app.main()
-    assert "instance" in when, "_configure_gl was never called"
-    assert when["instance"] is None, "a QApplication already existed"
+    return order
+
+
+def test_the_gl_decision_is_taken_before_any_qapplication(monkeypatch, tmp_path):
+    """Qt ignores AA_UseSoftwareOpenGL once a QApplication exists, so this
+    ordering IS the feature."""
+    _clean_gl_env(monkeypatch, tmp_path)
+    monkeypatch.setattr(sys, "argv", ["pose3d", "--software-gl"])
+
+    assert _record_main_order(monkeypatch, "_configure_gl") == [
+        "_configure_gl", "QApplication"]
 
 
 def test_the_selftest_inherits_the_gl_decision(monkeypatch, tmp_path):
@@ -244,28 +266,11 @@ def test_the_selftest_inherits_the_gl_decision(monkeypatch, tmp_path):
 def test_pre_qt_checks_runs_before_the_qapplication(monkeypatch, tmp_path):
     """The bundle-integrity check has to be able to say "files are missing"
     and exit before Qt is asked to load a plugin that is not there."""
-    from PySide6.QtWidgets import QApplication
-
     _clean_gl_env(monkeypatch, tmp_path)
     monkeypatch.setattr(sys, "argv", ["pose3d"])
-    monkeypatch.setattr(app, "open_project_window", lambda f: None)
-    monkeypatch.setattr(app, "apply_dark_theme", lambda a: None)
-    when = {}
-    monkeypatch.setattr(app, "_pre_qt_checks",
-                        lambda: when.setdefault("instance", QApplication.instance()))
 
-    class FakeQApp:
-        def __init__(self, argv):
-            pass
-
-        def exec(self):
-            return 0
-
-    monkeypatch.setattr(app, "QApplication", FakeQApp)
-    with pytest.raises(SystemExit):
-        app.main()
-    assert "instance" in when, "_pre_qt_checks was never called"
-    assert when["instance"] is None
+    assert _record_main_order(monkeypatch, "_pre_qt_checks") == [
+        "_pre_qt_checks", "QApplication"]
 
 
 def test_pre_qt_checks_is_not_reached_by_the_selftest(monkeypatch):
