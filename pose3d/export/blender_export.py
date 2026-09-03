@@ -6,7 +6,11 @@ binary headless to produce BVH + FBX + mp4. Blender runs blender_job.py.
 from __future__ import annotations
 
 import json
+import queue
 import subprocess
+import sys
+import threading
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,17 +56,137 @@ FAILURE_MESSAGES = {
         "This normally means the 3D reconstruction is empty; the 3D preview "
         "will be empty too.",
     "blender_timeout": "{detail}",
+    "blender_cancelled": "{detail}",
     "blender_missing": "{detail}",
     "blender_not_runnable": "{detail}",
     "blender_failed": "{detail}",
 }
 
 
+# How often the pump wakes to look at the clock and the cancel flag while
+# Blender is saying nothing. Small enough that Cancel feels immediate, large
+# enough that a 10-minute render costs a few thousand wakeups.
+_POLL_S = 0.25
+# How long each escalation of _stop is given before the next one.
+_STOP_GRACE_S = 5
+
+
+def _stop(proc) -> None:
+    """End `proc` and reap it: terminate, then kill, then (Windows) taskkill.
+
+    Reaping matters as much as killing. A zombie holds the pipe open, and
+    "and was stopped" in the message the user reads is only true once the
+    process object has a returncode.
+    """
+    for end_it in (proc.terminate, proc.kill):
+        try:
+            end_it()
+        except OSError:
+            pass                      # already gone
+        try:
+            proc.wait(timeout=_STOP_GRACE_S)
+            return
+        except subprocess.TimeoutExpired:
+            continue
+    if sys.platform.startswith("win"):
+        # Blender spawns children of its own; /T takes the tree with it
+        try:
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)],
+                           capture_output=True, timeout=_STOP_GRACE_S)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        proc.wait(timeout=_STOP_GRACE_S)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _pump(proc, chunks: list, on_line, timeout, idle_timeout, cancelled) -> str:
+    """Read `proc`'s merged output until it ends, or until we stop it.
+
+    Returns "" when Blender finished on its own, else the reason it was
+    stopped. A daemon thread does the blocking read — Windows has no `select`
+    on a pipe, so a reader that could be interrupted does not exist — and this
+    loop watches three clocks: the overall deadline, an IDLE deadline (nothing
+    said for `idle_timeout`, which is what a hung render looks like), and the
+    caller's cancel.
+    """
+    lines: queue.Queue = queue.Queue()
+
+    def read():
+        try:
+            for line in proc.stdout:
+                lines.put(line)
+        finally:
+            lines.put(None)           # EOF, whatever happened
+
+    reader = threading.Thread(target=read, daemon=True)
+    reader.start()
+
+    started = last = time.monotonic()
+    stopped = ""
+    while True:
+        now = time.monotonic()
+        if cancelled is not None and cancelled():
+            stopped = "cancelled"
+        elif timeout is not None and now - started > timeout:
+            stopped = "timeout"
+        elif idle_timeout is not None and now - last > idle_timeout:
+            stopped = "timeout"
+        if stopped:
+            _stop(proc)
+            break
+        try:
+            line = lines.get(timeout=_POLL_S)
+        except queue.Empty:
+            continue
+        if line is None:
+            break
+        last = time.monotonic()
+        chunks.append(line)
+        if on_line is not None:
+            try:
+                on_line(line.rstrip())
+            except Exception:
+                pass                  # a broken progress display is not a
+                                      # reason to lose the export
+
+    # Whatever the child managed to say before it was stopped is still the
+    # best diagnostic there is, so let the reader finish (the child is dead by
+    # now, so its pipe is at EOF) and take everything it left behind.
+    reader.join(timeout=_STOP_GRACE_S)
+    while True:
+        try:
+            line = lines.get_nowait()
+        except queue.Empty:
+            break
+        if line is None:
+            continue
+        chunks.append(line)
+    if not reader.is_alive():
+        try:
+            proc.stdout.close()       # not while the reader still holds it
+        except OSError:
+            pass
+
+    if not stopped:
+        left = None if timeout is None else max(
+            1.0, timeout - (time.monotonic() - started))
+        try:
+            proc.wait(timeout=left)   # reap; EOF is not quite exit
+        except subprocess.TimeoutExpired:
+            _stop(proc)
+            stopped = "timeout"
+    return stopped
+
+
 def _failure(reason: str, detail: str, returncode: int,
-             note: str = "") -> "ExportResult":
+             note: str = "", stdout: str = "") -> "ExportResult":
+    """The failure as a value. `stdout` is whatever the child did manage to
+    say, which is the only diagnostic a killed Blender leaves behind."""
     msg = FAILURE_MESSAGES.get(reason, "{detail}").format(detail=detail)
     return ExportResult(bvh=None, fbx=None, mp4=None, returncode=returncode,
-                        stdout="", stderr=msg, reason=reason, message=msg,
+                        stdout=stdout, stderr=msg, reason=reason, message=msg,
                         fallback_note=note)
 
 
@@ -346,6 +470,8 @@ def export_animation(
     schedule: str = "one_per_pose",
     camera=None,
     allow_fallback: bool = False,
+    idle_timeout: float = 300.0,
+    cancelled=None,
 ) -> ExportResult:
     """Write BVH + FBX (+ mp4) for a take, by posing the bundled character.
 
@@ -367,6 +493,12 @@ def export_animation(
     character. Without it a missing asset or a failed retarget returns
     `ok is False` with a `reason`, instead of silently shipping a different
     animation under the same name (F31).
+
+    `timeout` is the overall deadline, `idle_timeout` the one that catches a
+    hung render (no output at all for that long), and `cancelled()` is polled
+    while Blender runs so the user can stop it. Any of the three kills the
+    child and reaps it before returning `blender_timeout` / `blender_cancelled`
+    — the export used to promise "and was stopped" while nothing had been.
     """
     requested_bundled = character == "__bundled__"
     if requested_bundled:
@@ -427,29 +559,15 @@ def export_animation(
     # UTF-8 whatever the machine's code page says, and on Windows a console
     # child flashes a black window over the UI. See pose3d.runtime.
     kw = subprocess_kwargs()
+    # ONE launch path. There used to be two — a streaming one for the GUI and
+    # a `subprocess.run` one for everything else — and only the second
+    # honoured `timeout`, so on the path the client actually took a hung
+    # Blender blocked in `for line in p.stdout` for ever with nothing to kill
+    # it. stderr is merged into stdout because a single stream is a single
+    # reader, and a second pipe nobody drains is another way to deadlock.
     try:
-        if on_line is None:
-            proc = subprocess.run(cmd, capture_output=True, timeout=timeout, **kw)
-            stdout, stderr, rc = proc.stdout, proc.stderr, proc.returncode
-        else:
-            # stream Blender's output so the caller can show live progress
-            p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
-                                 stderr=subprocess.STDOUT, bufsize=1, **kw)
-            chunks = []
-            for line in p.stdout:
-                chunks.append(line)
-                try:
-                    on_line(line.rstrip())
-                except Exception:
-                    pass
-            p.wait(timeout=timeout)
-            stdout, stderr, rc = "".join(chunks), "", p.returncode
-    except subprocess.TimeoutExpired:
-        return _failure("blender_timeout",
-                        f"Blender did not finish within {timeout} s and was "
-                        "stopped.\n\nA long take can legitimately take a while "
-                        "to render; try exporting without the video, or a "
-                        "shorter selection.", 124, note=fallback_note)
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                                stderr=subprocess.STDOUT, bufsize=1, **kw)
     except FileNotFoundError:
         # must precede OSError, of which it is a subclass: say which binary is
         # missing and how to point at one, instead of a bare OSError
@@ -465,6 +583,21 @@ def export_animation(
                         f"{type(e).__name__}: {e}\n\nSet POSE3D_BLENDER to the "
                         "blender executable itself.", 126,
                         note=fallback_note)
+
+    chunks: list[str] = []
+    stopped = _pump(proc, chunks, on_line, timeout, idle_timeout, cancelled)
+    stdout, stderr, rc = "".join(chunks), "", proc.returncode
+    if stopped == "timeout":
+        return _failure("blender_timeout",
+                        f"Blender produced nothing for {idle_timeout:g} s (or "
+                        f"ran past {timeout} s) and was stopped.\n\nA long "
+                        "take can legitimately take a while to render; try "
+                        "exporting without the video, or a shorter selection.",
+                        124, note=fallback_note, stdout=stdout)
+    if stopped == "cancelled":
+        return _failure("blender_cancelled",
+                        "Export cancelled. Blender was stopped and nothing "
+                        "was written.", 125, note=fallback_note, stdout=stdout)
 
     def _exists(stem, ext):
         p = out_dir / f"{stem}.{ext}"
