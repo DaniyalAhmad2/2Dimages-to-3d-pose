@@ -21,6 +21,12 @@ The project folder is only ever READ.
 Cross-checks the harness itself, too: `--variants` also measures the naive
 whole-model swap (native NECK/PELVIS) and the head read-back point (head-bone
 mid vs tail), which are the two choices the gate table does not cover.
+
+A SECOND table is printed from the same run: `HEAD_CHAIN_GATES`, the gates the
+rigid neck+head chain ships under (the skull may not shear, the head bone
+carries the neck's own matrix, the nose turns the chain), measured in BOTH
+head modes. Its committed copy is docs/audit-2026-09/phase7_head_chain.json,
+re-derived from the fixture by tests/test_head_source.py.
 """
 from __future__ import annotations
 
@@ -103,6 +109,54 @@ SHIPS_ON_NOTE = (
     "re-measured on the committed fixture), and the app ships with "
     "pose3d.detect.rtmpose.USE_HALPE26 = True."
 )
+
+# --- Phase 7: the rigid neck+head chain ------------------------------------
+#
+# A SEPARATE table, because `GATES` above is pre-registered and its keys are
+# asserted against the Phase 5 evidence: the head chain is a later question
+# with later gates, and mixing the two would silently re-open a table that was
+# fixed in advance. These four are what Decision 4 (the user's dimensions
+# invariant) and the rigid chain ship under; `measure_head_chain` measures
+# them on a take and `head_chain_table` scores them, in both head modes.
+HEAD_CHAIN_GATES: dict[str, str] = {
+    "skull_shear_max_ratio": "<= 1.05x on every skull edge, in BOTH modes",
+    "head_neck_relative_rotation": ("== the rest offset: skin[head] and "
+                                    "skin[neck] the same matrix, every "
+                                    "frame, in BOTH modes"),
+    "head_turn_error_deg": "<= 2 deg on the frames where the nose is used",
+    "head_aim_with_face_deg": "< 5 deg median with the face points in play",
+}
+
+#: What the same four measurements read BEFORE the chain was made rigid — the
+#: neck aimed at the ear midpoint while the head bone took a full face basis,
+#: so the two bones carried different matrices and the blend between them
+#: sheared the skull. Measured on this same take by the audit (the head aim
+#: numbers are `fixture_run.head_aim_with_face` in phase5_gates.json, written
+#: before the fix); they are the baseline column of the table, not gates.
+HEAD_CHAIN_BEFORE: dict[str, dict] = {
+    "skull_shear_ratio": {"max": 1.428, "min": 0.222},
+    "head_vs_neck_relative_rotation_deg": {"min": 14.6, "max": 88.2},
+    "head_aim_with_face_deg": {"median": 3.78, "max": 22.95},
+}
+
+#: A vertex belongs to the skull for this measurement when the HEAD bone
+#: carries at least this much of it; an edge is a skull edge when both its
+#: ends do. The same 0.4 as
+#: tests/test_retarget.py::test_the_skull_does_not_shear.
+_SKULL_WEIGHT_MIN = 0.4
+
+#: ...and it belongs to the CHAIN — the part of the skull the gate is scored
+#: on — when the head and neck bones together carry all of it. Decision 4 puts
+#: "the normal blend stretch at bending joints (throat, elbows, knees)" out of
+#: scope, and on this rig that is a real subset of the head-weighted vertices:
+#: 313 of the 991 head-weighted edges have an end that also carries CHEST
+#: weight (vertex 972 is head 0.43 / neck 0.50 / chest 0.06), so the throat
+#: seam stretches when the chain turns, exactly as an elbow's does when it
+#: bends, and it did so before the face feature existed. Those are measured
+#: and reported (`with_the_throat_blend`) but not gated; the 678 edges the
+#: chain owns outright are the skull whose dimensions may not change. 0.999
+#: rather than 1.0 because the weights are float32 and do not sum to exactly 1.
+_CHAIN_WEIGHT_MIN = 0.999
 
 # HEAD is the change itself, so it cannot also be a no-regression gate. NECK
 # and PELVIS are NOT excluded even though the plan's wording ("any directly-
@@ -209,7 +263,7 @@ def _head_aim_error(character, up, head3d=None) -> dict:
 
 
 def face_to_mesh(npz: Path, project_dir: Path, head_source: str,
-                 readback: str) -> dict:
+                 readback: str, head_mode: str = "nose") -> dict:
     """How far the reconstructed NOSE and EAR land from the posed mesh.
 
     The head read-back point may NOT be chosen on the head-position metric
@@ -217,6 +271,12 @@ def face_to_mesh(npz: Path, project_dir: Path, head_source: str,
     (1.56 -> 4.34 mm), which is the visible error — a head aimed or read back
     wrongly pushes the face away from where the capture says it is. So the
     ruling is taken on both.
+
+    The ear number is INFORMATIONAL under the shipped Nose mode: the ears no
+    longer orient anything (only the nose rolls the chain), so a mannequin's
+    bad ears can sit far from the mesh without the pose being wrong. It is
+    still measured, because it is what says the head is not aimed somewhere
+    the capture never put it, and it is a real gate in Face mode.
     """
     from pose3d import quality as Q
     from pose3d.geometry import character as chmod
@@ -232,7 +292,7 @@ def face_to_mesh(npz: Path, project_dir: Path, head_source: str,
     saved = dict(chmod._HEAD_FROM_RIG)
     chmod._HEAD_FROM_RIG[head_source] = (("head", readback),)
     try:
-        ch = Character(head_source=head_source)
+        ch = Character(head_source=head_source, head_mode=head_mode)
         ch.fit_to_subject(up)
         nose, ear = [], []
         for t, pose in enumerate(up):
@@ -250,12 +310,14 @@ def face_to_mesh(npz: Path, project_dir: Path, head_source: str,
 
     stat = lambda a: {"median_mm": float(np.median(a)) * 1000,
                       "max_mm": float(np.max(a)) * 1000, "n": len(a)}
-    return {"readback": readback, "height_m": float(height),
+    return {"readback": readback, "head_mode": head_mode,
+            "height_m": float(height),
             "nose_to_mesh": stat(nose), "ear_to_mesh": stat(ear)}
 
 
 def measure(label: str, npz: Path, project_dir: Path, head_source: str,
-            readback: str | None = None, neck: str | None = None) -> dict:
+            readback: str | None = None, neck: str | None = None,
+            head_mode: str = "nose") -> dict:
     """Every number the gate table needs, for one cached (model, policy) run.
 
     The npz loader around `measure_project`; the measuring itself is that
@@ -267,17 +329,22 @@ def measure(label: str, npz: Path, project_dir: Path, head_source: str,
 
     return measure_project(label, _project_from(npz, head_source),
                            Q.load_rig(project_dir / "calibration"),
-                           readback=readback, neck=neck)
+                           readback=readback, neck=neck, head_mode=head_mode)
 
 
 def measure_project(label: str, p, rig, readback: str | None = None,
-                    neck: str | None = None) -> dict:
+                    neck: str | None = None, head_mode: str = "nose") -> dict:
     """Every number the gate table needs, for one already-reconstructed take.
 
     `p` is a ProjectData whose `pose3d`/`fitted3d`/`head3d` are filled in —
     by the pipeline, from a cache, or by CI running the pipeline over the
     committed fixture — and `p.head_source` is the convention it was detected
     under, which decides how the character reads its HEAD.
+
+    `head_mode` is DECLARED, not inherited: this table is the shipping one and
+    it is Nose mode, so it is written down here rather than left to whatever
+    `character.default_head_mode()` the process happens to hold when the
+    numbers are taken.
     """
     from pose3d import quality as Q
     from pose3d.core.project import CAMERAS
@@ -298,7 +365,7 @@ def measure_project(label: str, p, rig, readback: str | None = None,
     if readback is not None:                    # a read-back variant, not the shipped one
         chmod._HEAD_FROM_RIG[head_source] = (("head", readback),)
     try:
-        ch = Character(head_source=head_source)
+        ch = Character(head_source=head_source, head_mode=head_mode)
         scale = ch.fit_to_subject(up)
         r_no = Q.retarget_error(ch, up, height, scale, None)
         r_face = Q.retarget_error(ch, up, height, scale, head3d)
@@ -312,7 +379,8 @@ def measure_project(label: str, p, rig, readback: str | None = None,
     bl = Q.bone_length_stats(measured)
     epi = Q.body_epipolar(kp2d, rig)
     return {
-        "label": label, "head_source": head_source, "readback": used_readback,
+        "label": label, "head_source": head_source, "head_mode": head_mode,
+        "readback": used_readback,
         "n_frames": len(p.frames),
         "neck_policy": neck or "derived",
         "height_m": float(height), "scale": float(scale),
@@ -374,6 +442,278 @@ def gate_table(base: dict, cand: dict) -> list[dict]:
              "baseline": float(b), "measured": float(m), "pass": bool(ok),
              "unit": unit}
             for name, key, b, m, ok, unit in rows]
+
+
+# --- the head chain ---------------------------------------------------------
+
+def _bone_weights(character, *roles) -> np.ndarray:
+    """Per-vertex skin weight carried by the named bones, summed."""
+    w = np.zeros(len(character.verts0))
+    for role in roles:
+        b = character.role[role]
+        for k in range(character.w_idx.shape[1]):
+            w += np.where(character.w_idx[:, k] == b,
+                          character.w_val[:, k], 0.0)
+    return w
+
+
+def _skull_edges(character) -> tuple[np.ndarray, np.ndarray]:
+    """The skull as the SKINNING sees it: (chain-only edges, all of them).
+
+    Both are (E, 2) vertex indices into mesh edges whose ends are at least
+    `_SKULL_WEIGHT_MIN` head bone — the skull the HEAD bone owns, not a
+    bounding box. The first drops the edges that also hang off the chest
+    (`_CHAIN_WEIGHT_MIN`): those are the throat seam, whose blend stretch
+    Decision 4 puts out of scope, and the gate is scored on the rest.
+    """
+    head = _bone_weights(character, "head")
+    chain = _bone_weights(character, "head", "neck")
+    f = character.faces.reshape(-1, 3)
+    e = np.unique(np.sort(np.concatenate(
+        [f[:, [0, 1]], f[:, [1, 2]], f[:, [2, 0]]]), axis=1), axis=0)
+    e = e[(head[e[:, 0]] >= _SKULL_WEIGHT_MIN)
+          & (head[e[:, 1]] >= _SKULL_WEIGHT_MIN)]
+    pure = e[(chain[e[:, 0]] >= _CHAIN_WEIGHT_MIN)
+             & (chain[e[:, 1]] >= _CHAIN_WEIGHT_MIN)]
+    return pure, e
+
+
+def _rig_verts(character, skin) -> np.ndarray:
+    """Skinned vertices in RIG space — `pose_and_joints`' einsum, unmapped.
+
+    Rig space on purpose: `_from_rig` would divide by the frame's scale and
+    undo `Rz`, and an edge-length RATIO must not go through either, or the
+    take's own scale would be measured instead of the shear.
+    """
+    out = np.zeros((len(character.verts0), 3))
+    for k in range(character.w_idx.shape[1]):
+        bi = character.w_idx[:, k]
+        out += character.w_val[:, k][:, None] * np.einsum(
+            "vij,vj->vi", skin[bi], character.vh)[:, :3]
+    return out
+
+
+def _neck_turn_error_deg(character, skin, aim_dir) -> float:
+    """How far the posed chain's FACE direction is turned from `aim_dir`.
+
+    Measured about the neck's own aim, with the pitch — which the aim already
+    fixes — projected out, so what is left is the spin the roll is there to
+    set. `aim_dir` is a rig-space direction, as `_nose_roll_target` returns.
+    """
+    from pose3d import quality as Q
+    from pose3d.geometry import character as chmod
+
+    b = character.role["neck"]
+    R = skin[b][:3, :3]
+    axis = chmod._unit(R @ (character.tail[b] - character.head[b]))
+    ref = character._rest_ref.get(b)
+    if axis is None or ref is None:
+        return float("nan")
+    cur = chmod._proj_perp(R @ ref, axis)
+    tgt = chmod._proj_perp(aim_dir, axis)
+    if cur is None or tgt is None:
+        return float("nan")
+    return Q._angle_deg(cur, tgt)
+
+
+def _nose_cross_view(p, rig) -> dict:
+    """How well the two views agree about the NOSE, and what the gate allows.
+
+    The nose is load-bearing now — in Nose mode it is what turns the whole
+    chain — so the take's own cross-view residual on that one point, against
+    the very threshold `triangulate_face` judges it by, is part of the
+    evidence: a frame the gate refuses has no nose in 3D and falls back to
+    the no-face path, which is exactly the coverage the
+    `head_turn_error_deg` gate is scored over.
+    """
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+    from pose3d.geometry.triangulate import epipolar_distance
+    from pose3d.pipeline import epipolar_threshold
+
+    thr = epipolar_threshold(rig, p)
+    d = [epipolar_distance(f.head2d[CAM_LEFT][0], f.head2d[CAM_RIGHT][0],
+                           rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
+                           rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
+         for f in p.frames]
+    d = [v for v in d if np.isfinite(v)]
+    refused = sum(bool(np.isnan(f.head3d[0]).any()) for f in p.frames)
+    return {"n": len(d),
+            "median_px": float(np.median(d)) if d else float("nan"),
+            "max_px": float(np.max(d)) if d else float("nan"),
+            "threshold_px": float(thr), "frames_refused": refused}
+
+
+def measure_head_chain(p, rig, head_mode: str) -> dict:
+    """The head-chain numbers for one already-reconstructed take, one mode.
+
+    `p` is a ProjectData whose `fitted3d`/`head3d` are filled in (the
+    pipeline, a cache, or CI over the committed fixture) and `head_mode` is
+    which of `character.HEAD_MODES` orients the chain — passed EXPLICITLY,
+    never taken from the process default, so what was measured is what the
+    file says was measured.
+
+    Four things, one pass over the take:
+
+    * `skull_shear` — every skull edge's posed length over its rest length.
+      The user's dimensions invariant: keypoints may orient the character,
+      never resize it.
+    * `head_vs_neck` — the head bone's skin matrix against the neck's. The
+      chain is rigid, so they are the SAME matrix and the relative rotation
+      is the rest offset exactly; the matrices are compared, not the angle,
+      because a zero angle can still hide a translation.
+    * `head_turn` — the angle between the posed chain's face direction and
+      the captured nose direction, on the frames where the nose has enough
+      lever to be used, and (as `without_the_nose`) the same angle when the
+      face points are withheld, which is what the nose is worth.
+    * `head_aim_no_face` / `head_aim_with_face` — the existing aim metric,
+      the one the Phase 5 table gates, with and without the face points.
+    """
+    from pose3d import quality as Q
+    from pose3d.core.skeleton import Joint
+    from pose3d.geometry.character import HEAD_MODES, Character
+
+    if head_mode not in HEAD_MODES:
+        raise ValueError(f"head_mode must be one of {HEAD_MODES}, "
+                         f"not {head_mode!r}")
+
+    delivered = np.stack([f.fitted3d for f in p.frames])
+    height = Q.subject_height(delivered)
+    R = Q.de_tilt_rotation(delivered)
+    up = delivered @ R.T
+    head3d = np.stack([f.head3d for f in p.frames]) @ R.T
+
+    ch = Character(head_source=p.head_source, head_mode=head_mode)
+    scale = ch.fit_to_subject(up)
+
+    chain_edges, all_edges = _skull_edges(ch)
+    edges, rest = {}, {}
+    for k, e in (("chain", chain_edges), ("all", all_edges)):
+        d = np.linalg.norm(ch.verts0[e[:, 1]] - ch.verts0[e[:, 0]], axis=1)
+        edges[k], rest[k] = e[d > 1e-9], d[d > 1e-9]   # drop degenerate edges
+    head_bone, neck_bone = ch.role["head"], ch.role["neck"]
+
+    ratios = {k: [] for k in edges}
+    mat_diff, rel_deg = [], []
+    turn, turn_no_nose, n_posed = [], [], 0
+    for t, pose in enumerate(up):
+        valid = ~np.isnan(pose).any(1)
+        h = head3d[t]
+        hp = None if np.isnan(h).all() else h
+        skin, _, _, Rz = ch._skin_matrices(pose, valid, hp)
+        if skin is None:
+            continue
+        n_posed += 1
+
+        v = _rig_verts(ch, skin)
+        for k, e in edges.items():
+            posed = np.linalg.norm(v[e[:, 1]] - v[e[:, 0]], axis=1)
+            ratios[k].append(posed / rest[k])
+
+        mat_diff.append(float(np.abs(skin[head_bone] - skin[neck_bone]).max()))
+        rel = skin[head_bone][:3, :3] @ skin[neck_bone][:3, :3].T
+        rel_deg.append(float(np.degrees(np.arccos(np.clip(
+            (np.trace(rel) - 1.0) / 2.0, -1.0, 1.0)))))
+
+        # the same closure and the same resolved pelvis `_skin_matrices`
+        # builds, so the nose is judged used or not used exactly as the pose
+        # itself judged it
+        def J(i, pose=pose, valid=valid):
+            return pose[int(i)] if valid[int(i)] else None
+
+        pelvis = J(Joint.PELVIS)
+        if pelvis is None:
+            hips = [x for x in (J(Joint.LEFT_HIP), J(Joint.RIGHT_HIP))
+                    if x is not None]
+            pelvis = np.mean(hips, axis=0) if hips else None
+        nose = ch._nose_roll_target(J, pelvis, hp, Rz)
+        if nose is not None:
+            turn.append(_neck_turn_error_deg(ch, skin, nose[0]))
+            bare = ch._skin_matrices(pose, valid, None)[0]
+            if bare is not None:
+                turn_no_nose.append(_neck_turn_error_deg(ch, bare, nose[0]))
+
+    shear = {k: (np.concatenate(v) if v else np.array([np.nan]))
+             for k, v in ratios.items()}
+
+    def stat(vals):
+        a = np.asarray([v for v in vals if np.isfinite(v)], float)
+        return {"n": int(len(a)),
+                "median_deg": float(np.median(a)) if len(a) else float("nan"),
+                "max_deg": float(np.max(a)) if len(a) else float("nan")}
+    return {
+        "label": f"{p.head_source} HEAD, {head_mode} mode",
+        "head_source": p.head_source, "head_mode": head_mode,
+        "n_frames": len(p.frames), "n_posed": n_posed,
+        "height_m": float(height), "scale": float(scale),
+        "skull_shear": {
+            "max_ratio": float(np.max(shear["chain"])),
+            "min_ratio": float(np.min(shear["chain"])),
+            "n_edges": int(len(rest["chain"])),
+            "head_weight_min": _SKULL_WEIGHT_MIN,
+            "chain_weight_min": _CHAIN_WEIGHT_MIN,
+            # the same edges plus the 313 that also hang off the chest: the
+            # throat seam, out of scope by Decision 4 and reported so that
+            # excluding it is a stated choice rather than a silent one
+            "with_the_throat_blend": {
+                "max_ratio": float(np.max(shear["all"])),
+                "min_ratio": float(np.min(shear["all"])),
+                "n_edges": int(len(rest["all"]))}},
+        "head_vs_neck": {"max_abs_matrix_diff": float(max(mat_diff or [np.nan])),
+                         "max_relative_rotation_deg":
+                             float(max(rel_deg or [np.nan]))},
+        "head_turn": dict(stat(turn), n_frames_nose_used=len(turn),
+                          without_the_nose=stat(turn_no_nose)),
+        "head_aim_no_face": _head_aim_error(ch, up, None),
+        "head_aim_with_face": _head_aim_error(ch, up, head3d),
+        "nose_cross_view": _nose_cross_view(p, rig),
+    }
+
+
+def head_chain_table(m: dict[str, dict]) -> list[dict]:
+    """Score `{head mode: measure_head_chain(...)}` against HEAD_CHAIN_GATES.
+
+    Every mode is required: two of the four gates are "in BOTH modes" and are
+    scored on the WORST of them, because the chain is rigid whatever orients
+    it — Face mode follows the mannequin's bad ears, which is why Nose is the
+    default, but it may not shear the skull either. The other two are Nose
+    mode's: they are about the nose driving the chain.
+    """
+    from pose3d.geometry.character import HEAD_MODES
+
+    missing = [mode for mode in HEAD_MODES if mode not in m]
+    if missing:
+        raise ValueError(f"no measurement for head mode(s) {missing}: the "
+                         "both-modes gates cannot be scored")
+
+    worst_shear = max(m[mode]["skull_shear"]["max_ratio"] for mode in m)
+    worst_rel = max(m[mode]["head_vs_neck"]["max_relative_rotation_deg"]
+                    for mode in m)
+    rigid = all(m[mode]["head_vs_neck"]["max_abs_matrix_diff"] == 0.0
+                for mode in m)
+    nose = m["nose"]
+    before = HEAD_CHAIN_BEFORE
+
+    rows = [
+        ("skull shear, worst edge over the take (both modes)",
+         "skull_shear_max_ratio", before["skull_shear_ratio"]["max"],
+         worst_shear, worst_shear <= 1.05, "x"),
+        ("head bone vs neck bone, worst frame (both modes)",
+         "head_neck_relative_rotation",
+         before["head_vs_neck_relative_rotation_deg"]["max"], worst_rel,
+         rigid, "deg"),
+        ("head turn error, frames where the nose is used (Nose mode)",
+         "head_turn_error_deg", nose["head_turn"]["without_the_nose"]["max_deg"],
+         nose["head_turn"]["max_deg"], nose["head_turn"]["max_deg"] <= 2.0,
+         "deg"),
+        ("head aim error, face points in play (Nose mode)",
+         "head_aim_with_face_deg", before["head_aim_with_face_deg"]["median"],
+         nose["head_aim_with_face"]["median_deg"],
+         nose["head_aim_with_face"]["median_deg"] < 5.0, "deg"),
+    ]
+    return [{"gate": name, "key": key, "rule": HEAD_CHAIN_GATES[key],
+             "baseline": float(b), "measured": float(v), "pass": bool(ok),
+             "unit": unit}
+            for name, key, b, v, ok, unit in rows]
 
 
 def main(argv=None) -> int:
@@ -440,6 +780,29 @@ def main(argv=None) -> int:
         "gates": rows, "passed": passed, "of": len(rows),
         "runs": {"coco": base, "halpe": cand},
     }
+
+    # The head chain (Phase 7): a separate table on the same cached run, in
+    # BOTH head modes, because the chain is rigid whatever orients it. The
+    # committed-fixture copy of this is docs/audit-2026-09/phase7_head_chain.json.
+    from pose3d import quality as Q
+    from pose3d.geometry.character import HEAD_MODES
+
+    chain_p = _project_from(args.cache / "halpe.npz", "skull")
+    chain_rig = Q.load_rig(args.project / "calibration")
+    chain = {mode: measure_head_chain(chain_p, chain_rig, mode)
+             for mode in HEAD_MODES}
+    chain_rows = head_chain_table(chain)
+    chain_passed = sum(r["pass"] for r in chain_rows)
+    width = max(len(r["gate"]) for r in chain_rows)
+    print()
+    for r in chain_rows:
+        print(f"  {r['gate']:<{width}}  {r['baseline']:7.2f} -> "
+              f"{r['measured']:7.4f} {r['unit']:<4} {r['rule']:<58} "
+              f"{'PASS' if r['pass'] else 'FAIL'}")
+    print(f"\n{chain_passed}/{len(chain_rows)} head-chain gates pass "
+          "(the rigid neck+head chain, both modes)")
+    out["head_chain"] = {"gates": chain_rows, "passed": chain_passed,
+                         "of": len(chain_rows), "modes": chain}
 
     if args.variants:
         # The two choices the gate table does not cover, measured on the same
