@@ -230,6 +230,92 @@ def test_dragging_the_nose_moves_the_face_nose_too():
     assert not np.allclose(f.head3d[0], nose3d_before)
 
 
+def _recompute(m):
+    """What the next Recompute press would do: the batch path, same rig."""
+    from pose3d.pipeline import triangulate_project
+    triangulate_project(m.project, m.rig)
+
+
+def test_a_hand_corrected_head_keeps_its_nose_under_the_nose_convention():
+    """Two gates, one observation — they must not disagree about it.
+
+    Under COCO-17 the canonical HEAD *is* face point 0. `cross_view_rejection`
+    keeps a body pair whose BOTH views were hand-placed (the user has overruled
+    the gate and the joint goes on to be fitted and exported), while the face
+    gate's `cross_view_verdict` had no such clause. So a HEAD corrected in both
+    views kept `pose3d[HEAD]` — the neck went on aiming at the user's point —
+    and NaN'd `head3d[0]`, switching the nose roll off for that one frame. The
+    head stopped following the nose on exactly the frame the user worked
+    hardest on, and under this convention no nose dot is drawn to say why.
+    """
+    from pose3d.core.project import CAM_LEFT as L, CAM_RIGHT as R
+    from pose3d.core.skeleton import Joint
+
+    m = _model_with_heads()
+    f = m.frame()
+    assert m.project.head_source == "nose", "this test is about that convention"
+    head = int(Joint.HEAD)
+
+    # ACROSS the epipolar lines (this rig's run near-horizontal) in one view:
+    # one corrected view is not an override, and BOTH gates say so together
+    xl, yl = f.kp2d[L][head]
+    m.set_joint_2d(L, head, xl, yl + 200.0)
+    assert np.isnan(f.pose3d[head]).all(), "one corrected view overruled the gate"
+    assert np.isnan(f.head3d[0]).all(), "...and the face gate must agree"
+
+    # now place it by hand in the other view too, still far off the line: the
+    # pair the joint gate keeps is the pair the face gate must keep
+    xr, yr = f.kp2d[R][head]
+    m.set_joint_2d(R, head, xr, yr + 2.0)
+    assert f.corrected[L][head] and f.corrected[R][head]
+    assert np.isfinite(f.pose3d[head]).all(), "the joint gate stopped overruling"
+
+    assert np.isfinite(f.head3d[0]).all(), \
+        "the face gate refused a pair the joint gate kept"
+    assert np.allclose(f.head3d[0], f.pose3d[head]), \
+        "one detection, triangulated twice, must land in one place"
+    assert np.isfinite(f.head3d[1:]).all(), "the untouched face points were gated"
+
+    # and the drag path's head3d is the recompute's head3d, as ever
+    before = f.head3d.copy()
+    _recompute(m)
+    assert np.allclose(f.head3d, before, equal_nan=True), \
+        "the recompute deleted the nose the drag path kept"
+    assert np.allclose(f.head3d[0], f.pose3d[head])
+
+
+def test_the_skull_convention_gives_the_nose_no_such_protection():
+    """`corrected` is a per-JOINT flag and under Halpe-26 the nose is not that
+    joint — it is a different detection ~86 px away. Hand-placing the skull
+    vertex must not smuggle a refused nose past the face gate, and face points
+    have no corrected flag of their own to do it with either.
+    """
+    from pose3d.core.project import CAM_LEFT as L, CAM_RIGHT as R
+    from pose3d.core.skeleton import Joint
+
+    m = _model_with_heads()
+    m.project.head_source = "skull"
+    f = m.frame()
+    head = int(Joint.HEAD)
+    for cam in (L, R):
+        x, y = f.kp2d[cam][head]
+        m.set_joint_2d(cam, head, x, y + 1.0)       # agreeing, and by hand
+    assert f.corrected[L][head] and f.corrected[R][head]
+    assert not np.allclose(f.head2d[L][0], f.kp2d[L][head]), \
+        "the skull convention synced the nose onto the HEAD vertex"
+
+    x, y = f.head2d[L][0]
+    m.set_joint_2d(L, NUM_JOINTS + 0, x, y + 200.0)          # across the lines
+    assert np.isnan(f.head3d[0]).all(), \
+        "the nose rode the HEAD joint's corrected flag past the face gate"
+    assert np.isfinite(f.head3d[1:]).all(), "the untouched face points were gated"
+
+    before = f.head3d.copy()
+    _recompute(m)
+    assert np.allclose(f.head3d, before, equal_nan=True), \
+        "the recompute revived a nose the drag path refused"
+
+
 def test_nose_sync_leaves_legacy_projects_alone():
     from pose3d.core.project import CAM_LEFT as L
     from pose3d.core.skeleton import Joint
@@ -328,6 +414,46 @@ def test_a_face_point_without_a_detection_is_never_drawn():
     p.view.set_show_joints(True)
     vis = {it.joint_id: it.isVisible() for it in p.view._face}
     assert not any(vis.values()), "the joints toggle overrode Nose mode"
+
+
+def test_an_undetected_body_joint_is_never_drawn_either():
+    """The same rule for the canonical joints, which never had it.
+
+    `set_show_joints` gated a joint on `not np.isnan(it.pos().x())`, and that
+    is never False: `set_pose` skips `setPos` for a NaN joint, so the item
+    keeps the last FINITE position it was ever given and the guard passes
+    every time. Toggling joints off and back on therefore re-showed every
+    undetected joint as a draggable dot at a stale position — a point the
+    cameras never saw, sitting where it used to be, where a drag would write
+    a hand correction out of nothing.
+    """
+    p = _face_panel()
+    xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
+    scores = np.full(NUM_JOINTS, 0.9)
+    p.view.set_pose(xy, scores)                     # every joint detected...
+    assert all(it.isVisible() for it in p.view._joints)
+
+    gone = 3
+    xy = xy.copy()
+    xy[gone] = np.nan                               # ...and now one is not
+    p.view.set_pose(xy, scores)
+    assert not p.view._joints[gone].isVisible()
+    assert not np.isnan(p.view._joints[gone].pos().x()), \
+        "this test is pointless unless the item holds a stale finite position"
+
+    p.view.set_show_joints(False)
+    p.view.set_show_joints(True)
+    assert not p.view._joints[gone].isVisible(), \
+        "the joints toggle resurrected an undetected joint at a stale position"
+    assert all(p.view._joints[j].isVisible()
+               for j in range(NUM_JOINTS) if j != gone), \
+        "the toggle failed to bring the detected joints back"
+
+    # a later frame that DOES see it draws it again: the flag is per frame,
+    # not a latch that outlives the dropout
+    p.view.set_pose(np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None],
+                            (1, 2)) * 10 + 5, scores)
+    assert p.view._joints[gone].isVisible()
 
 
 def test_frame_change_delivers_head3d_to_the_3d_view():

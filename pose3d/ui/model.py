@@ -20,9 +20,9 @@ from pose3d.core.skeleton import (
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
-    CalibratedRig, bone_length_targets, cross_view_rejection, fill_frame_gaps,
-    fit_frame, gated_kp2d, per_image_allowances, revalidate_joint,
-    triangulate_face,
+    CalibratedRig, bone_length_targets, cross_view_rejection, face_protect,
+    fill_frame_gaps, fit_frame, gated_kp2d, per_image_allowances,
+    revalidate_joint, triangulate_face,
 )
 
 HEAD_JOINT = int(Joint.HEAD)
@@ -418,7 +418,8 @@ class ProjectModel(QObject):
             self.rig.ext[CAM_LEFT], self.rig.ext[CAM_RIGHT])
         allow = per_image_allowances(self.rig)
         for f in self.project.frames:
-            triangulate_face(f, self.rig, epi_thr, F, allow)
+            triangulate_face(f, self.rig, epi_thr, F, allow,
+                             face_protect(f, self.project.head_source))
         self.set_frame(self.current)
         self.statusMessage.emit(
             f"Nose and face points re-detected on "
@@ -503,7 +504,8 @@ class ProjectModel(QObject):
             # The whole face is re-derived rather than the one point dragged —
             # five triangulations and five verdicts, and no branch that could
             # leave the other four judged by an older rig.
-            triangulate_face(f, self.rig, self.epipolar_gate())
+            triangulate_face(f, self.rig, self.epipolar_gate(),
+                             protect=face_protect(f, self.project.head_source))
             # face points have no bones and never change the character's
             # dimensions: no re-fit, just re-orient the rigid neck+head chain
             # (the nose turns it in both modes, the ears only in Face mode)
@@ -529,8 +531,13 @@ class ProjectModel(QObject):
                     f.head2d[c][0] = f.kp2d[c][joint]
             # and through the same gate as any other face edit: the synced
             # nose is a cross-view pair like the rest, and a drag that pulls
-            # it off its epipolar line must lose its 3D here too
-            triangulate_face(f, self.rig, self.epipolar_gate())
+            # it off its epipolar line must lose its 3D here too — unless the
+            # user has hand-placed HEAD in BOTH views, which is the override
+            # the joint gate already honours for the very same detection
+            # (`face_protect`); without it the two gates disagreed about one
+            # point and the head stopped following the nose on that frame.
+            triangulate_face(f, self.rig, self.epipolar_gate(),
+                             protect=face_protect(f, self.project.head_source))
         touched = [joint] + self._sync_derived(f, joint, cam)
         for j in touched:
             self._retriangulate(f, j)
