@@ -171,6 +171,10 @@ def check(root: Path, rules, hash_files: bool = False,
     client's machine cannot afford it: hashing 211 MB of checkpoints on every
     launch is seconds of nothing happening, for a fault that a build gate
     catches once.
+
+    Raises `Malformed` when a rule points into an inputs.json that cannot
+    answer it — that is an authoring mistake, not something wrong with the
+    bundle, and it must not be reported as one.
     """
     root = Path(root)
     if not root.is_dir():
@@ -195,13 +199,14 @@ def check(root: Path, rules, hash_files: bool = False,
 
         for path in found:
             if not path.is_file():
-                continue                       # a directory rule, e.g. workspace/
+                continue                 # a directory rule, e.g. workspace/
             size = path.stat().st_size
             if size < rule.min_size:
                 problems.append(
                     f"{_rel(root, path)}: {size} bytes, expected at least "
                     f"{rule.min_size}. {rule.why}")
-                continue                       # a truncated file's hash says nothing new
+                # a truncated file's hash would say nothing new
+                continue
             if not (hash_files and rule.sha256_from_inputs):
                 continue
             key = rule.sha256_from_inputs

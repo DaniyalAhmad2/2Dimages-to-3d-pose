@@ -141,7 +141,7 @@ def run_startup_check() -> None:
         message = explain(found)
         print(message, file=sys.stderr, flush=True)
         _message_box(message)
-    except Exception:                    # noqa: BLE001 - see the module docstring
+    except Exception:                # noqa: BLE001 - see the module docstring
         try:
             print("the bundle integrity check could not run; starting anyway:",
                   file=sys.stderr)

@@ -371,6 +371,21 @@ def test_the_cli_lists_every_problem_and_exits_1(bundle):
     assert "qwindows.dll" in got.stderr and "blender.exe" in got.stderr
 
 
+def test_the_cli_says_when_the_checksums_have_nowhere_to_come_from(bundle,
+                                                                   tmp_path):
+    """A rule pointing into an inputs.json that cannot answer is an authoring
+    mistake, not a broken bundle. It must not be reported as one — and it must
+    not arrive as a traceback either."""
+    root, _ = bundle
+    got = subprocess.run(
+        [sys.executable, "tools/check_bundle_layout.py", str(root),
+         "--inputs", str(tmp_path / "gone.json")],
+        cwd=ROOT, capture_output=True, text=True)
+    assert got.returncode == 1
+    assert "gone.json" in got.stderr
+    assert "Traceback" not in got.stderr
+
+
 def test_the_cli_can_skip_the_hashing(bundle):
     """`--no-hash` for the build step that has already verified the
     checkpoints; the release gate runs it without."""

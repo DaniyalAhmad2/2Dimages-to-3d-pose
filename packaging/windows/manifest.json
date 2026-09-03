@@ -180,24 +180,18 @@
     {
       "pattern": "**/OpenGL/DLLS/*vc9*",
       "kind": "forbidden",
-      "min_count": 1,
-      "min_size": 0,
       "stage": "later",
       "why": "PyOpenGL's vc9 freeglut/gle builds import msvcr90.dll, a runtime this bundle does not ship and Windows does not provide; PyOpenGL would never open them (it hardcodes vc14), so they are unloadable weight that makes the DLL audit unresolvable"
     },
     {
       "pattern": "**/OpenGL/DLLS/*vc10*",
       "kind": "forbidden",
-      "min_count": 1,
-      "min_size": 0,
       "stage": "later",
       "why": "the same, for msvcr100.dll; only the vc14 pair can ever be loaded"
     },
     {
       "pattern": "blender/*/datafiles/locale",
       "kind": "forbidden",
-      "min_count": 1,
-      "min_size": 0,
       "stage": "later",
       "why": "Blender's translations, hundreds of MB the app never asks for; the purge that removes them ran with -ErrorAction SilentlyContinue and so could fail without failing the build"
     }
