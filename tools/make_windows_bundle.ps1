@@ -48,6 +48,20 @@ param(
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
+# `(... | Measure-Object Length -Sum).Sum` is a null dereference waiting for an
+# empty pipeline: Measure-Object given a -Property reports per-property
+# statistics, and with no input there is no property to report, so it writes
+# nothing at all. `.Sum` then lands on $null, and Set-StrictMode turns that
+# into "The property 'Sum' cannot be found on this object" — which is how the
+# first Windows CI run died. Not on a missing file: on a message about a
+# property, several lines away from anything a build engineer could act on.
+# Every byte count in this script is measured here instead.
+function Measure-Bytes([object[]]$Items) {
+    $measured = $Items | Measure-Object -Property Length -Sum
+    if ($null -eq $measured -or $null -eq $measured.Sum) { return [double]0 }
+    return [double]$measured.Sum
+}
+
 $repo = Split-Path -Parent $PSScriptRoot
 Push-Location $repo
 try {
@@ -129,8 +143,19 @@ try {
         $stage = Join-Path $CacheDir "blender-stage"
         if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
         Expand-Archive -Path $archive -DestinationPath $stage -Force
+        # The same shape as the locale bug below, one step earlier: with no
+        # top-level folder in the archive $inner is $null, and `$inner.FullName`
+        # under Set-StrictMode fails with "The property 'FullName' cannot be
+        # found on this object" — a sentence that names neither Blender nor the
+        # zip. Say which archive, and say what was expected of it.
         $inner = Get-ChildItem $stage -Directory | Select-Object -First 1
-        Move-Item $inner.FullName (Join-Path $Out "blender")
+        if ($null -eq $inner) {
+            throw ("${zipName} did not unzip to a folder: ${stage} holds no " +
+                   "directory. The archive layout has changed, or the " +
+                   "download is not the Blender release it claims to be.")
+        }
+        Move-Item -LiteralPath $inner.FullName `
+                  -Destination (Join-Path $Out "blender")
         Remove-Item -Recurse -Force $stage
 
         # Translations are ~100 MB of a bundle nobody will read in Klingon.
@@ -139,15 +164,31 @@ try {
         # says nothing, and the bundle silently grows back by 100 MB.
         # Test-Path first: a wildcard that matches nothing makes Get-Item
         # raise its own error, and this failure deserves to say what it means.
-        $locale = Join-Path $Out "blender\*\datafiles\locale"
-        if (-not (Test-Path $locale)) {
-            throw ("no locale directory at ${locale}: a Blender release has " +
-                   "moved it, and the bundle would quietly grow 100 MB.")
+        $localeGlob = Join-Path $Out "blender\*\datafiles\locale"
+        if (-not (Test-Path $localeGlob -PathType Container)) {
+            throw ("no locale directory at ${localeGlob}: a Blender release " +
+                   "has moved it, and the bundle would quietly grow 100 MB.")
         }
-        $purged = @(Get-ChildItem $locale -Recurse -File)
-        $purgedMb = [math]::Round(
-            (($purged | Measure-Object Length -Sum).Sum / 1MB), 0)
-        Remove-Item -Recurse -Force $locale
+        # Resolve the wildcard to concrete directories BEFORE enumerating.
+        # `Get-ChildItem <a path with a * in it> -Recurse -File` returned
+        # NOTHING on the first Windows CI run, from a directory holding 48 .mo
+        # files and 76 MB — PowerShell does not walk into a wildcard match the
+        # way it walks into a literal path; with -Recurse the trailing element
+        # behaves like a name to match, and no FILE is called "locale". The
+        # rule worth keeping is the simple one: a path with a `*` in it is not
+        # something to hand an enumerator. Get-Item resolves it once, here, and
+        # every line below works on concrete paths.
+        $localeDirs = @(Get-Item -Path $localeGlob |
+                        Where-Object { $_.PSIsContainer })
+        $purged = @($localeDirs | ForEach-Object {
+            Get-ChildItem -LiteralPath $_.FullName -Recurse -File })
+        $purgedMb = [math]::Round((Measure-Bytes $purged) / 1MB, 0)
+        foreach ($dir in $localeDirs) {
+            Remove-Item -LiteralPath $dir.FullName -Recurse -Force
+        }
+        # A locale directory that is present and EMPTY is purged and reported
+        # as "0 files", not thrown on: what this block exists to catch is the
+        # directory moving, and the Test-Path above is what catches that.
         Write-Host "==> locale purged: $($purged.Count) files, $purgedMb MB"
 
         $exe = Join-Path $Out "blender\blender.exe"
@@ -177,7 +218,7 @@ try {
     Copy-Item -Force "packaging/windows/Diagnose.cmd" (Join-Path $Out "Diagnose.cmd")
 
     $mb = [math]::Round(
-        ((Get-ChildItem $Out -Recurse -File | Measure-Object Length -Sum).Sum / 1MB), 0)
+        (Measure-Bytes @(Get-ChildItem -LiteralPath $Out -Recurse -File)) / 1MB, 0)
     Write-Host "==> $Out assembled, $mb MB"
 
     if ($Zip) {

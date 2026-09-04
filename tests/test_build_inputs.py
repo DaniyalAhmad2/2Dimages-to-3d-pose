@@ -346,16 +346,80 @@ def test_the_bundle_script_is_told_which_python_to_use():
     assert not re.search(r"&\s*python\b", text)
 
 
+def _ps1_code(text):
+    """The bundle script with its comments stripped.
+
+    The assertions below are about what the script DOES. Run against the raw
+    text they also read the prose — and every comment in that file quotes the
+    bug it replaced, so a rule banning the old pattern would fire on the
+    sentence that explains why the old pattern is gone.
+    """
+    body = text.split("#>", 1)[-1]              # the comment-based help header
+    return "\n".join(line for line in body.splitlines()
+                     if not line.lstrip().startswith("#"))
+
+
+def _the_locale_purge(text):
+    """The block that deletes Blender's translations.
+
+    Anchored on the VARIABLE, not on the word: the prose above it mentions the
+    purge too, and a comment gaining the word "locale" would have moved this
+    window over a block that says nothing about deleting anything.
+    """
+    return text.split("$localeGlob", 1)[1].split("--- pose weights", 1)[0]
+
+
 def test_the_locale_purge_fails_instead_of_silently_doing_nothing():
     """-ErrorAction SilentlyContinue on a path that has moved deletes nothing
     and says nothing: the bundle just quietly grows 100 MB."""
-    text = PS1.read_text(encoding="utf-8")
-    # anchored on the VARIABLE, not on the word: the prose above it mentions
-    # the purge too, and a comment gaining the word "locale" would have moved
-    # this window over a block that says nothing about deleting anything.
-    purge = text.split("$locale", 1)[1].split("--- pose weights", 1)[0]
+    purge = _the_locale_purge(PS1.read_text(encoding="utf-8"))
     assert "SilentlyContinue" not in purge
     assert "throw" in purge
+
+
+def test_the_locale_purge_enumerates_a_resolved_directory():
+    """`Get-ChildItem <a path with a * in it> -Recurse -File` returned nothing
+    on the first Windows CI run, from a directory holding 48 .mo files: with
+    -Recurse the trailing element behaves like a name to match rather than a
+    directory to walk into, and no FILE is called "locale".
+
+    So: no enumeration may be handed the glob. Resolve it first, then walk each
+    concrete directory by -LiteralPath.
+    """
+    purge = _the_locale_purge(_ps1_code(PS1.read_text(encoding="utf-8")))
+    assert re.search(r"Get-Item\s+-Path\s+\$localeGlob", purge), (
+        "the glob has to be resolved to concrete directories before anything "
+        "enumerates or deletes through it")
+    for call in re.findall(r"Get-ChildItem[^\n]*", purge):
+        assert "-LiteralPath" in call, call
+        assert "$localeGlob" not in call, call
+
+
+def test_no_size_in_the_bundle_script_dereferences_measure_object():
+    """Measure-Object given a -Property writes NOTHING for an empty pipeline,
+    so `(... | Measure-Object Length -Sum).Sum` is a property lookup on $null —
+    which Set-StrictMode -Version Latest turns into "The property 'Sum' cannot
+    be found on this object". Both size lines in this script used to do it; the
+    locale one is what failed the first Windows CI run."""
+    code = _ps1_code(PS1.read_text(encoding="utf-8"))
+    # the guard lives in one helper, so the pattern must not come back
+    # anywhere; `[^)]*` spans newlines, which is how the locale one was written
+    assert not re.findall(r"Measure-Object[^)]*\)\s*\.\s*Sum", code)
+    assert "function Measure-Bytes" in code
+    # and every place that prints a size goes through it
+    assert len(re.findall(r"Measure-Bytes ", code)) >= 2
+
+
+def test_the_unzipped_blender_folder_is_checked_before_it_is_used():
+    """`Get-ChildItem $stage -Directory | Select-Object -First 1` is $null for
+    an archive with no top-level folder, and `$inner.FullName` on that fails
+    with "The property 'FullName' cannot be found on this object" — the same
+    unreadable message class that cost the first Windows CI run, three lines
+    before the line that actually produced it."""
+    code = _ps1_code(PS1.read_text(encoding="utf-8"))
+    guard = code.split("$inner =", 1)[1].split("$inner.FullName", 1)[0]
+    assert "throw" in guard, (
+        "$inner is used as an object before anything proves it is one")
 
 
 def test_the_bundle_script_zips_through_the_tested_tool():
