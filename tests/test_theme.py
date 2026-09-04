@@ -284,6 +284,38 @@ def test_the_fixed_parts_still_fit_a_1366x768_screen_at_150_percent(qapp):
     assert Sidebar().minimumWidth() * 2 < SMALL_SCREEN[0]
 
 
+def _minimums(window, wide: int = 180) -> str:
+    """The visible widgets whose minimum would hold a window open past a
+    laptop's edge: type, objectName, minimumSizeHint, explicit minimumSize —
+    indented by depth, widest branches only. A QSplitter counts a child's
+    explicit minimumSize when it has one and the child's hint otherwise, so
+    both columns matter."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtWidgets import QApplication, QWidget
+
+    font = QApplication.instance().font()
+    lines = [f"font {font.family()!r} {font.pointSize()}pt/{font.pixelSize()}px; "
+             f"window hint {window.minimumSizeHint().width()}x"
+             f"{window.minimumSizeHint().height()}"]
+
+    def walk(parent, depth):
+        for child in parent.findChildren(
+                QWidget, options=Qt.FindChildOption.FindDirectChildrenOnly):
+            if not child.isVisibleTo(window):
+                continue
+            hint, minimum = child.minimumSizeHint(), child.minimumSize()
+            if max(hint.width(), minimum.width()) >= wide:
+                lines.append(f"{'  ' * depth}{type(child).__name__} "
+                             f"{child.objectName() or '-'} hint "
+                             f"{hint.width()}x{hint.height()} min "
+                             f"{minimum.width()}x{minimum.height()}")
+            if depth < 6:
+                walk(child, depth + 1)
+
+    walk(window, 0)
+    return "\n".join(lines)
+
+
 def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     """`resize(1540, 920)` is bigger than the client's 1366x768 laptop, so the
     window opened with its timeline and its right column off the bottom and
@@ -317,8 +349,12 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     win.show()
     qapp.processEvents()
     hint = win.minimumSizeHint()
-    assert hint.width() <= CLIENT_SCREEN[0], hint
-    assert hint.height() <= CLIENT_SCREEN[1], hint
+    # The number alone cannot be acted on from a CI log: the first Windows run
+    # said 1385 against 1057 here, and nothing in it said which widget. Name
+    # them, every time, so a failure on a runner nobody can sit at is a fix.
+    tree = _minimums(win)
+    assert hint.width() <= CLIENT_SCREEN[0], f"{hint}\n{tree}"
+    assert hint.height() <= CLIENT_SCREEN[1], f"{hint}\n{tree}"
     assert win.size().width() <= CLIENT_SCREEN[0], win.size()
     assert win.size().height() <= CLIENT_SCREEN[1], win.size()
     # Take the window down here rather than leaving a shown one (with a live
