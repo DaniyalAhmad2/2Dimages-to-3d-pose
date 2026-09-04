@@ -254,8 +254,14 @@ def test_the_windows_suite_measures_text_with_real_fonts():
     way against 1057 with real fonts. That test skips itself where the fonts
     are fake, so without this line the Windows run would pass having measured
     nothing."""
-    job = _runs(_block(_text(TEST_WF), "  test:"))
-    assert re.search(r"QT_QPA_FONTDIR:\s*C:\\Windows\\Fonts", job), job
+    job = _block(_text(TEST_WF), "  test:")
+    # at the JOB level, where every step inherits it — a step's own env would
+    # satisfy a whole-job search and leave the suite step without it
+    env = _runs(_block(job, "    env:"))
+    assert re.search(r"QT_QPA_FONTDIR:\s*C:\\Windows\\Fonts", env), env
+    # and the suite step insists the fonts took: skip is not an option there
+    suite = _runs(_steps(job)["Run the test suite"])
+    assert re.search(r'POSE3D_REQUIRE_FONTS:\s*"1"', suite), suite
 
 
 # --- the composite action's own failure modes -------------------------------

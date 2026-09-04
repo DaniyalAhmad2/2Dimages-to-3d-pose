@@ -26,6 +26,19 @@ def _gate(available: bool, env: str, what: str):
         True, reason=f"{what} — set {env}=1 to make this a failure instead")
 
 
+def require_or_skip(available: bool, env: str, what: str) -> None:
+    """The runtime form of `_gate`, for facts only known once the test runs.
+
+    Whether a platform plugin draws text with real glyphs needs a QApplication
+    to ask, which no collection-time mark can have. Same contract: skip on a
+    developer machine, fail on a runner that set the variable."""
+    if available:
+        return
+    if os.environ.get(env) == "1":
+        pytest.fail(f"{what}, but {env}=1 requires it", pytrace=False)
+    pytest.skip(f"{what} — set {env}=1 to make this a failure instead")
+
+
 def _have_blender() -> bool:
     from pose3d.config import blender_binary
     exe = blender_binary()

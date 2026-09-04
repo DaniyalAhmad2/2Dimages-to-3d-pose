@@ -80,7 +80,11 @@ in the gate that is weakened. What stands in for it:
   for, so `--no-video`; `check_video` is Degraded here anyway.
 * **Nothing about accuracy.** That is `windows-test.yml`, which runs the whole
   test suite — including the Blender export path — with `POSE3D_REQUIRE_*` set
-  so the export tests cannot skip themselves into a green run. Every test there
+  so the export tests cannot skip themselves into a green run, `QT_QPA_FONTDIR`
+  pointed at `C:\Windows\Fonts` (Qt's offscreen plugin on Windows has no font
+  database of its own, and a suite measuring box glyphs measures nothing), and
+  `POSE3D_REQUIRE_FONTS=1` so the screen-fit test fails rather than skips if that
+  ever stops taking. Every test there
   is capped at 600 seconds (`timeout` in `pyproject.toml`, enforced by
   `pytest-timeout`): its first run blocked for 42 minutes inside one test until
   the 45-minute job cap cancelled the job, and a cancelled job names no test and

@@ -351,9 +351,12 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     from pose3d.ui.model import ProjectModel
 
     real, fonts = _text_metrics_are_real(qapp)
-    if not real:
-        pytest.skip("no real fonts on this platform plugin, so text-driven "
-                    f"minimums mean nothing here: {fonts}")
+    # Skip on a developer machine, FAIL on the Windows runner (which sets
+    # POSE3D_REQUIRE_FONTS): a suite that skipped this test because its fonts
+    # had silently become boxes again would be green having measured nothing.
+    from tests.gates import require_or_skip
+    require_or_skip(real, "POSE3D_REQUIRE_FONTS",
+                    f"this platform plugin draws text as boxes ({fonts})")
 
     monkeypatch.setattr(QScreen, "availableGeometry",
                         lambda self: QRect(0, 0, *CLIENT_SCREEN))
@@ -378,9 +381,11 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     # The number alone cannot be acted on from a CI log: the first Windows run
     # said 1385 against 1057 here, and nothing in it said which widget. Name
     # them, every time, so a failure on a runner nobody can sit at is a fix.
-    tree = f"{fonts}\n{_minimums(win)}"
-    assert hint.width() <= CLIENT_SCREEN[0], f"{hint}\n{tree}"
-    assert hint.height() <= CLIENT_SCREEN[1], f"{hint}\n{tree}"
+    if hint.width() > CLIENT_SCREEN[0] or hint.height() > CLIENT_SCREEN[1]:
+        # Built only on the way to a failure: the dump can only cost a green
+        # run, and its whole value is on a runner nobody can sit at.
+        pytest.fail(f"{hint} does not fit {CLIENT_SCREEN}\n{fonts}\n"
+                    f"{_minimums(win)}", pytrace=False)
     assert win.size().width() <= CLIENT_SCREEN[0], win.size()
     assert win.size().height() <= CLIENT_SCREEN[1], win.size()
     # Take the window down here rather than leaving a shown one (with a live

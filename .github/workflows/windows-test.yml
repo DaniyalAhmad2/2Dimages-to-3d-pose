@@ -17,8 +17,10 @@ jobs:
       # own: with no directory to load from, every glyph is a box as wide as
       # the font is tall, and every text-driven size in the suite is fiction
       # — the screen-fit test measured a 1385 px window minimum this way,
-      # against 1057 with real fonts. Segoe UI lives here, and it is what the
-      # client's copy of the app renders with.
+      # against 1057 with real fonts. A real measurement, not the client's
+      # exact one: offscreen installs no platform theme, so the app font is
+      # still Qt's default, resolved through this directory rather than to
+      # the Segoe UI the client's copy renders with.
       QT_QPA_FONTDIR: C:\Windows\Fonts
 
     steps:
@@ -135,6 +137,10 @@ jobs:
           POSE3D_REQUIRE_BLENDER: "1"
           POSE3D_REQUIRE_ASSETS: "1"
           POSE3D_REQUIRE_WEIGHTS: "1"
+          # ...and the screen-fit test measures text, so the fonts the job-level
+          # QT_QPA_FONTDIR provides must have taken: fail, never skip, if they
+          # are boxes again.
+          POSE3D_REQUIRE_FONTS: "1"
           # ...but the preview video genuinely cannot be produced here. This
           # runner has no GPU, and unlike Linux there is no software GL to fall
           # back on, so headless Blender fails to find WGL extensions and dies
