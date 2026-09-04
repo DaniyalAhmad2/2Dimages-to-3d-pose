@@ -43,7 +43,11 @@ def shown_message_boxes(monkeypatch):
     assert on what the client would have read.
     """
     shown: list[str] = []
-    from pose3d import integrity
+    try:
+        from pose3d import integrity
+    except ImportError:      # a build this module cannot be imported in has
+        yield shown          # no native dialog to suppress either; guarded
+        return               # like recorded_errors above, for the same reason
     monkeypatch.setattr(integrity, "_message_box", shown.append)
     yield shown
 
