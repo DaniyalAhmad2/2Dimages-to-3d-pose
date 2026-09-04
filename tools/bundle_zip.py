@@ -82,12 +82,26 @@ def zip_bundle(folder: Path, out: Path,
     # tree. Both are run from the bundle's parent, which is what keeps the
     # entries rooted at the leaf.
     if shutil.which("7z"):
+        # 7-Zip names the file itself just as make_archive does below: given a
+        # name with no extension it appends the archive type's, so `--out
+        # delivery-2026-09` produced delivery-2026-09.zip while this function
+        # returned — and main() printed, and the release step would publish —
+        # a path with nothing at it. So archive to the name 7-Zip will
+        # actually use, and move it onto `out` afterwards.
+        archive = (out if out.suffix.lower() == ".zip"
+                   else out.with_name(out.name + ".zip"))
+        # `7z a` ADDS: a stale archive of that name would be published with
+        # whatever an earlier run left in it. `out` is already gone above.
+        if archive.exists():
+            archive.unlink()
         # captured so that a failure carries 7z's own words into the
         # CalledProcessError; -bso0/-bsp0 mean there is nothing else to see.
         subprocess.run(["7z", "a", "-tzip", "-mx=5", "-bso0", "-bsp0",
-                        str(out.resolve()), folder.name],
+                        str(archive.resolve()), folder.name],
                        cwd=folder.parent, check=True,
                        capture_output=True, text=True)
+        if archive != out:
+            archive.replace(out)
     else:
         # make_archive names the file itself, appending .zip to the base it is
         # given; move it if that is not what was asked for, so the path this

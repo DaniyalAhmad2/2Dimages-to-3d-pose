@@ -106,11 +106,93 @@ def test_zipping_returns_the_archive_it_wrote(tmp_path):
 def test_the_archive_lands_where_it_was_asked_to(tmp_path):
     """shutil.make_archive names the file itself, from a base it appends .zip
     to. An --out that is not already called .zip would otherwise be reported
-    as written and not be there."""
+    as written and not be there.
+
+    Which branch this takes depends on whether the machine has 7-Zip; the two
+    tests below pin each one.
+    """
     folder = _bundle(tmp_path, "Pose3D.exe")
     out = tmp_path / "delivery-2026-09"
     assert bundle_zip.zip_bundle(folder, out) == out
     assert out.is_file() and zipfile.is_zipfile(out)
+
+
+def _fake_7z(monkeypatch):
+    """7-Zip, in the one respect these tests are about, on any machine.
+
+    `7z a -tzip <name>` where <name> has no extension writes `<name>.zip` —
+    7-Zip appends the extension for the archive type, exactly as
+    `shutil.make_archive` does. Returns the list the fake records what it
+    wrote in, so a test can prove the trap was actually sprung.
+
+    A fake rather than the real thing because the branch taken must not depend
+    on whether this machine happens to have 7-Zip: the Windows runner does and
+    this one does not, which is why the fault below was invisible here.
+    """
+    written = []
+
+    def run(cmd, cwd=None, **kw):
+        archive = Path(cmd[-2])
+        if not archive.suffix:
+            archive = archive.with_name(archive.name + ".zip")
+        root = Path(cwd)
+        with zipfile.ZipFile(archive, "w") as zf:
+            for path in sorted((root / cmd[-1]).rglob("*")):
+                zf.write(path, path.relative_to(root).as_posix())
+        written.append(archive)
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(bundle_zip.shutil, "which", lambda name: "7z")
+    monkeypatch.setattr(bundle_zip.subprocess, "run", run)
+    return written
+
+
+def test_the_7z_branch_also_lands_where_it_was_asked_to(tmp_path, monkeypatch):
+    """The branch the release runner actually takes, and the one that did not
+    move its result: `zip_bundle` returned `out` while 7-Zip had written
+    `out.zip`, so the caller was handed the path of a file that does not
+    exist. Harmless on today's gate only because its `--out` ends in `.zip`.
+    """
+    written = _fake_7z(monkeypatch)
+    folder = _bundle(tmp_path, "Pose3D.exe")
+    out = tmp_path / "delivery-2026-09"
+
+    assert bundle_zip.zip_bundle(folder, out) == out
+    assert out.is_file() and zipfile.is_zipfile(out)
+    assert zipfile.ZipFile(out).namelist() == ["Pose3D-Windows/Pose3D.exe"]
+    assert written == [out.with_name(out.name + ".zip")], \
+        "the fake has to append .zip, or this test proves nothing"
+
+
+def test_the_7z_branch_does_not_add_a_second_zip_suffix(tmp_path, monkeypatch):
+    """The usual case, and the one a blanket "+ .zip" would break:
+    `Pose3D-Windows.zip` is already the name 7-Zip will use, so it is asked
+    for directly and there is nothing to move afterwards."""
+    written = _fake_7z(monkeypatch)
+    folder = _bundle(tmp_path, "Pose3D.exe")
+    out = tmp_path / "Pose3D-Windows.zip"
+
+    assert bundle_zip.zip_bundle(folder, out) == out
+    assert written == [out], "no Pose3D-Windows.zip.zip"
+    assert out.is_file() and zipfile.is_zipfile(out)
+
+
+def test_a_stale_archive_is_not_added_to(tmp_path, monkeypatch):
+    """`7z a` ADDS to an archive that is already there. `out` itself is
+    unlinked first; the name 7-Zip will actually write has to be too, or a
+    re-run publishes whatever the previous one left in it."""
+    written = _fake_7z(monkeypatch)
+    folder = _bundle(tmp_path, "Pose3D.exe")
+    out = tmp_path / "delivery-2026-09"
+    stale = out.with_name(out.name + ".zip")
+    with zipfile.ZipFile(stale, "w") as zf:
+        zf.writestr("Pose3D-Windows/from-the-last-run.dll", b"x")
+
+    bundle_zip.zip_bundle(folder, out)
+
+    assert written == [stale]
+    assert "Pose3D-Windows/from-the-last-run.dll" not in \
+        zipfile.ZipFile(out).namelist()
 
 
 def test_a_bundle_that_is_too_deep_is_refused_before_it_is_zipped(tmp_path):
