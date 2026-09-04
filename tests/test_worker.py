@@ -166,15 +166,27 @@ def test_the_progress_dialogs_cancel_reaches_the_job(qapp, monkeypatch,
     assert recorded_errors == []
 
 
-def test_a_finished_job_leaves_neither_a_dialog_nor_a_thread_behind(
+def test_a_finished_job_is_retired_by_the_next_one_not_in_its_own_teardown(
         qapp, monkeypatch):
-    """`run_job` is called once per detection, re-detect, recompute, export
-    and import phase. A QProgressDialog and a QThread kept alive per call is a
-    leak the user pays for over a long session."""
+    """`run_job` is called once per detection, re-detect, recompute, export and
+    import phase, and a QProgressDialog and a QThread kept alive per call is a
+    leak the user pays for over a long session — so they are deleted.
+
+    But NOT inside their own `run_job`: deleting them there (Python GC on
+    return, or `deleteLater` racing that GC) frees the sink while a stale
+    cross-thread metacall from the worker may still be queued for it, which is
+    the segfault this whole module now parks around. Instead a finished job is
+    parked, and the NEXT `run_job` deletes the previous one — by which point
+    the application event loop has drained every stale call. So: one call
+    leaves its objects alive but parked; a second call retires the first."""
     from PySide6.QtCore import QCoreApplication, QEvent
     from shiboken6 import Shiboken
 
     from pose3d.ui import worker
+
+    # start from a clean parking lot regardless of test order
+    worker._drain_parked()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     made = []
     real_dialog, real_job = worker.QProgressDialog, worker.Job
@@ -188,9 +200,25 @@ def test_a_finished_job_leaves_neither_a_dialog_nor_a_thread_behind(
     assert worker.run_job(None, "Detection",
                           lambda report, cancelled: "done") == "done"
 
+    # after ONE call its objects are parked, not deleted: still alive.
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
-    assert len(made) == 2
-    assert [Shiboken.isValid(obj) for obj in made] == [False, False]
+    dialog1, job1 = made
+    assert [Shiboken.isValid(o) for o in (dialog1, job1)] == [True, True], \
+        "a job deleted in its own teardown is the use-after-free"
+
+    # a SECOND call retires the first, and parks itself.
+    assert worker.run_job(None, "Detection",
+                          lambda report, cancelled: "done") == "done"
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert [Shiboken.isValid(o) for o in (dialog1, job1)] == [False, False], \
+        "the previous job's objects must be gone once the next one has run"
+    dialog2, job2 = made[2:]
+    assert [Shiboken.isValid(o) for o in (dialog2, job2)] == [True, True]
+
+    # and draining explicitly clears the last parked set (no session-end leak).
+    worker._drain_parked()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert [Shiboken.isValid(o) for o in (dialog2, job2)] == [False, False]
 
 
 def test_a_job_that_cannot_be_cancelled_still_runs(qapp):

@@ -26,6 +26,45 @@ from PySide6.QtWidgets import QProgressDialog
 from pose3d.pipeline import Cancelled  # noqa: F401  (re-exported by contract)
 
 
+# Finished jobs and their dialogs, held by a Python reference until it is safe
+# to delete them. `deleteLater()` at the end of `run_job` is NOT safe on its
+# own: the moment `run_job` returns, Python drops the last reference to the
+# `job`/`sink` wrappers, and shiboken deletes the C++ objects immediately on
+# garbage collection. A cross-thread `QMetaCallEvent` from the worker (a
+# progress or finished signal, which PySide may route through a global receiver
+# that `removePostedEvents(sink)` never reaches) can still be sitting in the
+# queue; the top-level event loop then dispatches it into freed memory. That is
+# the segfault (and the "pure virtual method called" abort) seen in
+# `sendPostedEvents` right after an import ran detection.
+#
+# So a finished job is not deleted inside its own `run_job`. Its objects are
+# reparented off the window (so the window's own teardown never races their
+# deletion) and parked here, keeping the Python wrapper alive. They are deleted
+# at the START of the NEXT `run_job`, by which point the application event loop
+# has run and drained every stale metacall to the now-detached sink. A session
+# that never starts another job keeps one parked set until it exits — a few
+# small objects, freed by the OS at exit; the alternative is a crash.
+_PARKED: list[QObject] = []
+
+
+def _drain_parked() -> None:
+    for obj in _PARKED:
+        try:
+            obj.deleteLater()
+        except RuntimeError:
+            pass                        # already gone with its window
+    _PARKED.clear()
+
+
+def _park(*objects: QObject) -> None:
+    for obj in objects:
+        try:
+            obj.setParent(None)         # ours to delete now, not the window's
+        except RuntimeError:
+            continue
+        _PARKED.append(obj)
+
+
 class Job(QThread):
     """Runs `fn(report, cancelled)` on a worker thread."""
 
@@ -120,6 +159,10 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     """
     from pose3d.ui import guard
 
+    # delete the previous job's objects now that the event loop has drained
+    # every stale cross-thread call still queued for them (see _PARKED).
+    _drain_parked()
+
     dialog = QProgressDialog(title, "Cancel" if cancellable else None,
                              0, 0, parent)
     dialog.setWindowTitle(title)
@@ -171,6 +214,7 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     if cancellable:
         dialog.canceled.disconnect()
     QCoreApplication.removePostedEvents(sink)
+    QCoreApplication.removePostedEvents(job)
     QCoreApplication.removePostedEvents(loop)
     dialog.close()
 
@@ -180,11 +224,9 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     # across one is a deletion racing whatever that loop runs.
     if isinstance(res, Exception) and not isinstance(res, Cancelled):
         guard.report_error(parent, title, f"{type(res).__name__}: {res}")
-    # This runs once per detection, re-detect, recompute, export and import
-    # phase. Both objects are parented to the window, so without this the
-    # session accumulates a dead QProgressDialog and a finished QThread per
-    # job for as long as the window is open. (The sink is the job's child and
-    # goes with it.)
-    dialog.deleteLater()
-    job.deleteLater()
+    # Do NOT delete here — a stale cross-thread metacall may still be queued
+    # for `sink`, and deleting it now (Python GC on return, or deleteLater
+    # racing that GC) is the use-after-free this parks around. `job` owns
+    # `sink` as its child, so parking the two of them retires all three.
+    _park(dialog, job)
     return res
