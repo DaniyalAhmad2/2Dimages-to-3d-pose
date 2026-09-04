@@ -390,7 +390,12 @@ def test_the_locale_purge_enumerates_a_resolved_directory():
     assert re.search(r"Get-Item\s+-Path\s+\$localeGlob", purge), (
         "the glob has to be resolved to concrete directories before anything "
         "enumerates or deletes through it")
-    for call in re.findall(r"Get-ChildItem[^\n]*", purge):
+    # ...and nothing that walks OR deletes may be handed the glob either: a
+    # `Remove-Item -Recurse $localeGlob` would sail past a Get-ChildItem-only
+    # check, and the rule is about enumerators, not one cmdlet
+    calls = re.findall(r"(?:Get-ChildItem|Remove-Item)[^\n]*", purge)
+    assert len(calls) >= 2, purge
+    for call in calls:
         assert "-LiteralPath" in call, call
         assert "$localeGlob" not in call, call
 
@@ -418,8 +423,12 @@ def test_the_unzipped_blender_folder_is_checked_before_it_is_used():
     before the line that actually produced it."""
     code = _ps1_code(PS1.read_text(encoding="utf-8"))
     guard = code.split("$inner =", 1)[1].split("$inner.FullName", 1)[0]
-    assert "throw" in guard, (
+    # the guard has to test the thing that is actually $null; a throw behind
+    # some other condition between assignment and use would pass a bare
+    # "throw in guard" check
+    assert re.search(r"if\s*\(\s*\$null\s+-eq\s+\$inner\s*\)", guard), (
         "$inner is used as an object before anything proves it is one")
+    assert "throw" in guard, guard
 
 
 def test_the_bundle_script_zips_through_the_tested_tool():
