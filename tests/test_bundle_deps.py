@@ -241,10 +241,11 @@ def _as_linux(monkeypatch):
     Every question the spec answers differently per platform — the VC runtime
     search, the OpenGL/DLLS filter, the executables' names — it answers off
     `IS_WINDOWS`, which is `sys.platform`. A test that asserts a Linux answer
-    without saying so is asserting a property of the machine it runs on: on
-    the Windows runner all three of the ones below failed, and the two that
-    happened to pass did so only because that runner has the Visual C++
-    runtime installed (without it the spec exits before the assertion).
+    without saying so is asserting a property of the machine it runs on: of
+    the five callers below, three failed outright on the Windows runner, and
+    the other two passed only because that runner has the Visual C++ runtime
+    installed system-wide — without it `vc_runtime()` raises SystemExit and
+    the spec never reaches the assertion.
 
     Nothing but the platform: everything else here is Windows-only, and the
     Linux branch never looks at the interpreter or the environment.
