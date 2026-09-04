@@ -1,4 +1,6 @@
 """Tests for the image importer + calibration resolver (upload/ArUco/warning)."""
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
@@ -49,6 +51,66 @@ def test_build_project_copies_images(tmp_path):
     for f in proj.frames:
         assert (tmp_path / "proj" / "images").exists()
         assert f.images[CAM_LEFT].startswith(str(tmp_path / "proj"))
+
+
+def test_re_importing_a_project_from_its_own_images_folder(tmp_path):
+    """The user pointed the import at the project's OWN `images` folder and
+    typed the project's own name, so every `copy2` had the same file for
+    source and destination. `shutil` raises `SameFileError` for that, the copy
+    phase died on the first pair, and nothing said the images were already
+    where they needed to be. Re-importing a project from itself is a
+    reasonable thing to do — it is how you re-run detection on a take."""
+    proj = tmp_path / "Imported_Session"
+    img = proj / "images"
+    img.mkdir(parents=True)
+    left, right = [], []
+    for i in (1, 2):
+        lp = img / f"left_{i:04d}.png"
+        rp = img / f"right_{i:04d}.png"
+        cv2.imwrite(str(lp), np.full((8, 8, 3), i, np.uint8))
+        cv2.imwrite(str(rp), np.full((8, 8, 3), i, np.uint8))
+        left.append(lp); right.append(rp)
+    before = {p.name: p.read_bytes() for p in img.iterdir()}
+
+    reports = []
+    proj_data = build_project(left, right, name="Imported_Session",
+                              copy_into=proj,
+                              on_progress=lambda *a: reports.append(a))
+
+    assert len(proj_data.frames) == 2
+    assert {p.name: p.read_bytes() for p in img.iterdir()} == before
+    for f in proj_data.frames:
+        assert Path(f.images[CAM_LEFT]).parent == img
+        assert Path(f.images[CAM_LEFT]).exists()
+    # and it says so rather than pretending it copied anything
+    assert all("already in the project folder" in label
+               for _, _, label in reports), reports
+
+
+def test_importing_into_a_project_folder_that_already_has_images(tmp_path):
+    """The user's actual run: a different source folder, but a target project
+    that already existed, so every destination name was already taken. The
+    copy has to overwrite them — the new take is the one being imported."""
+    src = tmp_path / "Test motion"
+    src.mkdir()
+    proj = tmp_path / "Imported_Session"
+    img = proj / "images"
+    img.mkdir(parents=True)
+    cv2.imwrite(str(img / "left_0001.jpg"), np.zeros((8, 8, 3), np.uint8))
+    cv2.imwrite(str(img / "right_0001.jpg"), np.zeros((8, 8, 3), np.uint8))
+    # the camera numbering the client's phones write: 1_NN / 2_NN
+    lp = src / "1_01.jpg"; rp = src / "2_01.jpg"
+    cv2.imwrite(str(lp), np.full((8, 8, 3), 200, np.uint8))
+    cv2.imwrite(str(rp), np.full((8, 8, 3), 200, np.uint8))
+
+    reports = []
+    data = build_project([lp], [rp], name="Imported_Session", copy_into=proj,
+                         on_progress=lambda *a: reports.append(a))
+
+    assert len(data.frames) == 1
+    assert data.frames[0].images[CAM_LEFT] == str(img / "left_0001.jpg")
+    assert cv2.imread(str(img / "left_0001.jpg"))[0, 0, 0] == 200
+    assert reports and "Copying" in reports[0][2]
 
 
 # --- calibration resolver --------------------------------------------------
@@ -209,6 +271,6 @@ def test_import_dialog_calls_the_pipeline_detection_loop():
     its own copy of detection again."""
     import inspect
     from pose3d.ui import import_dialog
-    src = inspect.getsource(import_dialog.ImportDialog._process)
+    src = inspect.getsource(import_dialog.ImportDialog._run_phases)
     assert "detect_project(" in src
     assert "det.detect(" not in src

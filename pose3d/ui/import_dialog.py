@@ -73,6 +73,7 @@ class ImportDialog(QDialog):
         self._hint = filedialog.location_hint()
         self.result_folder: str | None = None
         self._detector = None
+        self._busy = False
         self._projects_root = Path(projects_root or (Path.home() / "pose3d_projects"))
 
         root = QVBoxLayout(self)
@@ -148,6 +149,27 @@ class ImportDialog(QDialog):
 
     # --- processing ---
     def _process(self):
+        """Run the import once, and refuse to start a second one on top.
+
+        A modal `QProgressDialog` pumps the event loop from inside
+        `setValue()`, and every message box below runs a nested loop of its
+        own, so a click on Process that was queued behind either of them
+        arrives while the import is still running. Without this guard it
+        started the whole thing again — a second copy over the first, a second
+        detection, and two `Done` dialogs — which is how a failed copy phase
+        still ended in a saved project.
+        """
+        if self._busy:
+            return
+        self._busy = True
+        self.process_btn.setEnabled(False)
+        try:
+            self._run_phases()
+        finally:
+            self._busy = False
+            self.process_btn.setEnabled(True)
+
+    def _run_phases(self):
         """Run the import, phase by phase, with the GUI thread left alone.
 
         Every long phase here — copying the images, finding the markers,
@@ -155,6 +177,11 @@ class ImportDialog(QDialog):
         dialog stays alive and says where it is. It used to drive them all
         inline and pump the event loop by hand, which re-enters every slot in
         the app from the middle of this one.
+
+        Everything the phases need from a widget is read HERE, on the GUI
+        thread, and closed over. `self.name.text()` inside a job function is a
+        QLineEdit read from the worker thread, which is a data race against
+        every repaint of that widget.
         """
         left, right = self.left_pick.paths, self.right_pick.paths
         if not left or not right:
@@ -162,10 +189,15 @@ class ImportDialog(QDialog):
                                "Please choose both left and right images.")
             return
         out_root = Path(self.out_pick.first() or self._projects_root)
+        # every widget this import needs, read once and here — see the
+        # docstring
+        name = self.name.text()
+        marker_length = float(self.marker.value())
+        smooth = self.smooth_check.isChecked()
         # `safe_name`, not `replace(" ", "_")`: a colon or a question mark in
         # the typed name is a folder Windows refuses to create, and the
         # refusal arrived after the whole dialog had been filled in.
-        folder = out_root / safe_name(self.name.text())
+        folder = out_root / safe_name(name)
         try:
             folder.mkdir(parents=True, exist_ok=True)
         except OSError as e:
@@ -179,7 +211,7 @@ class ImportDialog(QDialog):
             # a virus scanner or a OneDrive placeholder holds it up.
             project = run_job(
                 self, "Importing images", lambda report, cancelled:
-                build_project(left, right, name=self.name.text(),
+                build_project(left, right, name=name,
                               copy_into=folder, on_progress=report),
                 cancellable=False)
             if isinstance(project, Exception):
@@ -200,7 +232,7 @@ class ImportDialog(QDialog):
                 self, "Resolving calibration", lambda report, cancelled:
                 resolve_calibration(
                     project, read_image,
-                    marker_length=self.marker.value(),
+                    marker_length=marker_length,
                     intr_left=il, intr_right=ir, ext_left=el, ext_right=er),
                 cancellable=False)
             if isinstance(cal, Exception):
@@ -209,7 +241,7 @@ class ImportDialog(QDialog):
             rig = cal.rig
             # what the numbers mean, kept with the project: the tag size the
             # extrinsics were scaled by is not recoverable from anything else
-            project.marker_length = float(self.marker.value())
+            project.marker_length = marker_length
             if not cal.ok:
                 cont = QMessageBox.warning(
                     self, "Calibration not successful",
@@ -241,7 +273,6 @@ class ImportDialog(QDialog):
             if isinstance(detected, Exception):
                 return                    # a cancel wrote nothing at all
 
-            smooth = self.smooth_check.isChecked()
             project.smoothing = "ema0.6" if smooth else "none"
 
             # reconstruct if calibrated
