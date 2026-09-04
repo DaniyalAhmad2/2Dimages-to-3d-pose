@@ -80,4 +80,9 @@ in the gate that is weakened. What stands in for it:
   for, so `--no-video`; `check_video` is Degraded here anyway.
 * **Nothing about accuracy.** That is `windows-test.yml`, which runs the whole
   test suite — including the Blender export path — with `POSE3D_REQUIRE_*` set
-  so the export tests cannot skip themselves into a green run.
+  so the export tests cannot skip themselves into a green run. Every test there
+  is capped at 600 seconds (`timeout` in `pyproject.toml`, enforced by
+  `pytest-timeout`): its first run blocked for 42 minutes inside one test until
+  the 45-minute job cap cancelled the job, and a cancelled job names no test and
+  prints no traceback — the timeout makes the next hang a stack trace at the
+  line that blocked.

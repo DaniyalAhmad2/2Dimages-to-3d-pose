@@ -235,17 +235,36 @@ def _as_windows(monkeypatch, interpreter_dir):
     monkeypatch.setenv("SystemRoot", str(interpreter_dir / "no-such-windows"))
 
 
+def _as_linux(monkeypatch):
+    """The other half of `_as_windows`, and just as necessary.
+
+    Every question the spec answers differently per platform — the VC runtime
+    search, the OpenGL/DLLS filter, the executables' names — it answers off
+    `IS_WINDOWS`, which is `sys.platform`. A test that asserts a Linux answer
+    without saying so is asserting a property of the machine it runs on: of
+    the five callers below, three failed outright on the Windows runner, and
+    the other two passed only because that runner has the Visual C++ runtime
+    installed system-wide — without it `vc_runtime()` raises SystemExit and
+    the spec never reaches the assertion.
+
+    Nothing but the platform: everything else here is Windows-only, and the
+    Linux branch never looks at the interpreter or the environment.
+    """
+    monkeypatch.setattr(sys, "platform", "linux")
+
+
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
                     reason="PyInstaller is a dev dependency")
-def test_the_linux_build_adds_nothing_windows_only():
+def test_the_linux_build_adds_nothing_windows_only(monkeypatch):
     """The Linux dev build has to keep working: no VC runtime search, no
     OpenGL/DLLS filtering, nothing that assumes a Windows layout."""
+    _as_linux(monkeypatch)
     assert _eval_spec().binaries == []
 
 
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
                     reason="PyInstaller is a dev dependency")
-def test_no_onnx_weight_is_bundled_inside_the_exe():
+def test_no_onnx_weight_is_bundled_inside_the_exe(monkeypatch):
     """The weights ship BESIDE the exe, in models\\, where app_dir() looks for
     them — a 150 MB copy inside _internal\\ as well would be dead weight.
 
@@ -257,6 +276,7 @@ def test_no_onnx_weight_is_bundled_inside_the_exe():
     instead."""
     spec = (ROOT / "pose3d.spec").read_text(encoding="utf-8")
     assert "import collect_data_files" not in spec, "a glob could come back"
+    _as_linux(monkeypatch)
     a = _eval_spec()
     assert not [entry for entry in a.datas + a.binaries
                 if entry[0].lower().endswith(".onnx")]
@@ -264,11 +284,12 @@ def test_no_onnx_weight_is_bundled_inside_the_exe():
 
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
                     reason="PyInstaller is a dev dependency")
-def test_the_inference_stack_is_named_as_a_hidden_import():
+def test_the_inference_stack_is_named_as_a_hidden_import(monkeypatch):
     """pose3d.detect imports rtmlib and onnxruntime inside functions.
     PyInstaller does follow function-level imports, so this is insurance
     rather than the gate — but the failure it insures against is "detection
     does nothing" on the client's machine, discovered after delivery."""
+    _as_linux(monkeypatch)
     for name in ("onnxruntime", "rtmlib"):
         assert name in _eval_spec().hiddenimports
 
@@ -357,14 +378,18 @@ def test_the_windows_build_drops_the_pyopengl_dlls_that_can_never_load(
 
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
                     reason="PyInstaller is a dev dependency")
-def test_a_console_build_ships_beside_the_windowed_one():
+def test_a_console_build_ships_beside_the_windowed_one(monkeypatch):
     """Pose3D.exe is windowed, so it has no console: `Pose3D.exe --selftest`
     writes its report into pose3d-log.txt and the client, who was asked to run
     it precisely because something is wrong, sees nothing happen at all.
 
     The second executable is the same application — same Analysis, same
     scripts — built with console=True, so the same report prints where they
-    can read it and copy it."""
+    can read it and copy it.
+
+    Pinned to Linux for the names: the Windows pair is
+    `test_the_windows_build_names_the_console_exe_the_manifest_expects`."""
+    _as_linux(monkeypatch)
     exes = _eval_spec().executables
     assert [e["name"] for e in exes] == ["pose3d", "pose3d-diagnose"]
     assert [e["console"] for e in exes] == [False, True]
@@ -386,11 +411,12 @@ def test_the_windows_build_names_the_console_exe_the_manifest_expects(
 
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
                     reason="PyInstaller is a dev dependency")
-def test_both_executables_share_one_internal_folder():
+def test_both_executables_share_one_internal_folder(monkeypatch):
     """One COLLECT, so the second exe is a bootloader and a pure-Python
     archive — 12 MB in a 516 MB dist — rather than another copy of Qt,
     onnxruntime and the character rig, and so the two can never disagree about
     what they are running."""
+    _as_linux(monkeypatch)
     a = _eval_spec()
     assert [getattr(x, "name", None) for x in a.collected][:2] == [
         "pose3d", "pose3d-diagnose"]

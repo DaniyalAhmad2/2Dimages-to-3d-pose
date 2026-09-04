@@ -20,9 +20,13 @@ and `uv sync --frozen` on the Windows runner installs the lockfile and nothing
 else, so a test that imported it would skip on the one machine that matters.
 The helpers below slice the file on indentation, which is enough to ask "which
 step is this" and "is there a `paths:` under `pull_request:`".
+
+`pyproject.toml` is the exception, and parsed properly: `tomllib` is in the
+standard library, so it is there on that machine too.
 """
 import json
 import re
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -32,6 +36,7 @@ BUNDLE_WF = ROOT / ".github" / "workflows" / "windows-bundle.yml"
 RELEASE_WF = ROOT / ".github" / "workflows" / "windows-release.yml"
 TEST_WF = ROOT / ".github" / "workflows" / "windows-test.yml"
 MANIFEST = ROOT / "packaging" / "windows" / "manifest.json"
+PYPROJECT = ROOT / "pyproject.toml"
 
 
 def _text(path: Path) -> str:
@@ -200,6 +205,36 @@ def test_the_bundle_workflow_gives_the_build_time_to_finish():
     minutes = [int(m) for m in
                re.findall(r"timeout-minutes:\s*(\d+)", _text(BUNDLE_WF))]
     assert minutes and min(minutes) >= 90
+
+
+def test_a_hung_test_fails_with_a_traceback_and_never_at_the_job_cap():
+    """The first Windows run of this suite reached 45 % in 70 seconds and then
+    sat inside one test for 42 minutes, until the job's cap cancelled it. A
+    cancelled job reports no traceback and names no test — the hang had to be
+    found by re-running the suite with a deselect list. A per-test timeout
+    turns the next one into a stack trace pointing at the line that blocked.
+
+    In `pyproject.toml` rather than in the workflow's command, so it applies
+    to every way this suite is run — CI, a developer's `pytest`, a single file
+    — and so `windows-test.yml` needs no change to get it.
+    """
+    config = tomllib.loads(_text(PYPROJECT))
+    timeout = config["tool"]["pytest"]["ini_options"].get("timeout")
+    assert timeout, "no per-test timeout: a hung test runs until the job cap"
+
+    cap = min(int(m) for m in
+              re.findall(r"timeout-minutes:\s*(\d+)", _text(TEST_WF)))
+    assert timeout < cap * 60, (
+        f"a {timeout}s per-test timeout cannot fire inside a {cap}-minute job")
+
+
+def test_the_per_test_timeout_is_backed_by_the_plugin_that_enforces_it():
+    """`timeout` is not a pytest option; without pytest-timeout installed it
+    is an unknown ini key, which pytest reports as a WARNING and otherwise
+    ignores — a gate that looks configured and enforces nothing. It belongs to
+    the dev group: it is the test runner's dependency, not the client's."""
+    dev = tomllib.loads(_text(PYPROJECT))["dependency-groups"]["dev"]
+    assert any(re.match(r"pytest-timeout\b", name) for name in dev), dev
 
 
 def test_the_windows_test_workflow_still_runs_on_every_pull_request():

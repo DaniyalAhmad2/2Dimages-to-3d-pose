@@ -25,11 +25,21 @@ dependencies = [
 dev = [
     "pytest>=9.1.1",
     "pyinstaller>=6.5",
+    "pytest-timeout>=2.4.0",
 ]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
 testpaths = ["tests"]
+# No single test in this suite takes a minute. 600 seconds is a hang, and a
+# hang is what the first Windows run of this suite produced: 42 minutes inside
+# one test until the job's 45-minute cap cancelled it, which names no test and
+# prints no traceback. This turns the next one into a stack trace at the line
+# that blocked. Here rather than in the workflow's command so it applies
+# however the suite is run, and windows-test.yml needs no change to get it.
+# timeout_method is left at its default: signals on POSIX, a thread on
+# Windows, which is the only method there.
+timeout = 600
 
 [tool.uv]
 # The system resolver returns unreachable IPv6 for the wheel CDN on this host;

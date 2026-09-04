@@ -24,6 +24,7 @@ zipped for five minutes to learn that it cannot be unzipped.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -82,12 +83,38 @@ def zip_bundle(folder: Path, out: Path,
     # tree. Both are run from the bundle's parent, which is what keeps the
     # entries rooted at the leaf.
     if shutil.which("7z"):
-        # captured so that a failure carries 7z's own words into the
-        # CalledProcessError; -bso0/-bsp0 mean there is nothing else to see.
-        subprocess.run(["7z", "a", "-tzip", "-mx=5", "-bso0", "-bsp0",
-                        str(out.resolve()), folder.name],
-                       cwd=folder.parent, check=True,
-                       capture_output=True, text=True)
+        # 7-Zip names the file itself just as make_archive does below: given a
+        # name with no extension it appends the archive type's, so `--out
+        # delivery-2026-09` produced delivery-2026-09.zip while this function
+        # returned — and main() printed, and the release step would publish —
+        # a path with nothing at it.
+        #
+        # So it is given a name that already ends in .zip, and the result is
+        # moved onto `out`. A temporary name of our own rather than
+        # `<out>.zip`, because that name can belong to somebody else — a
+        # previous release's archive, sitting exactly where 7-Zip would have
+        # written by default — and `7z a` ADDS, which would publish its
+        # contents as this bundle's, while deleting it first would destroy a
+        # file this tool did not create.
+        tmp = out.parent / f".{out.name}.{os.getpid()}.tmp.zip"
+        # This name is this tool's own: only an earlier run of it, killed
+        # between writing the file and the cleanup below, can have left one —
+        # and `a` would add to that. It is the only path here that is ever
+        # deleted; nothing else in the directory is touched.
+        tmp.unlink(missing_ok=True)
+        try:
+            # captured so that a failure carries 7z's own words into the
+            # CalledProcessError; -bso0/-bsp0 mean there is nothing else to
+            # see.
+            subprocess.run(["7z", "a", "-tzip", "-mx=5", "-bso0", "-bsp0",
+                            str(tmp.resolve()), folder.name],
+                           cwd=folder.parent, check=True,
+                           capture_output=True, text=True)
+            tmp.replace(out)
+        finally:
+            # a 7z that died half-way leaves a partial archive; the release
+            # directory is not the place to find one later and wonder.
+            tmp.unlink(missing_ok=True)
     else:
         # make_archive names the file itself, appending .zip to the base it is
         # given; move it if that is not what was asked for, so the path this
