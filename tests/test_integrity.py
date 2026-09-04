@@ -234,6 +234,14 @@ def test_the_native_box_is_inert_outside_a_frozen_app(monkeypatch):
     That is what makes a developer's `python -m pose3d.app` on Windows safe —
     and what does NOT hold once a test fakes `IS_FROZEN`, which is why the
     autouse fixture in tests/conftest.py exists."""
+    # Replacing sys.modules["ctypes"] only reaches _message_box because it
+    # imports ctypes INSIDE the function; a module-level `import ctypes` would
+    # already be bound and both of these tests would silently stop testing
+    # anything. The module docstring asks for that lazy import anyway ("no
+    # imports beyond the standard library" before Qt), so pin it here.
+    assert not hasattr(integrity, "ctypes"), \
+        "_message_box must import ctypes lazily; see this test's stand-in"
+
     monkeypatch.setitem(sys.modules, "ctypes", _exploding_ctypes())
     monkeypatch.setattr(runtime, "IS_WINDOWS", True)
     monkeypatch.setattr(runtime, "IS_FROZEN", False)
