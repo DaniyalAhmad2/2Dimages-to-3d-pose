@@ -24,6 +24,36 @@ def recorded_errors(monkeypatch):
     yield recorded
 
 
+@pytest.fixture(autouse=True)
+def closed_windows():
+    """Destroy each test's windows while Qt is still able to do it properly.
+
+    `QOpenGLWidget` — which the 3D view is — crashes inside its own destructor
+    when Python's garbage collector gets to it at interpreter exit: by then the
+    cycle collector is tearing objects down in its own order, with no
+    QApplication left to unwind the context against. It is not a fault in the
+    app (which closes its windows while Qt is alive), but it dumps core after
+    the suite's last green line, and a test run that ends in "Segmentation
+    fault" is indistinguishable from the app doing it.
+
+    So every test hands its windows back the way the app does: close, then
+    `deleteLater`, then flush the deferred deletes.
+    """
+    yield
+    try:
+        from PySide6.QtCore import QCoreApplication, QEvent
+        from PySide6.QtWidgets import QApplication
+    except ImportError:                    # a build without PySide6
+        return
+    app = QApplication.instance()
+    if app is None:
+        return
+    for widget in list(app.topLevelWidgets()):
+        widget.close()
+        widget.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+
+
 def pytest_configure(config):
     config.addinivalue_line(
         "markers",

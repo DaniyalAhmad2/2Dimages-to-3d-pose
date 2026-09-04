@@ -132,9 +132,13 @@ def test_3d_fullscreen_toggle_is_in_app(qapp):
     win._toggle_fullscreen()
     assert not win._fs_active
     assert not win._mid.isHidden()
-    # panels returned to the right column, in their original order
+    # panels returned to the right column, in their original order. The cards
+    # are what the splitter holds — each accuracy panel lives in a scroll area
+    # so that squeezing it scrolls rather than growing the window past the
+    # bottom of a 768 px screen.
     order = [win._rightcol.widget(i) for i in range(win._rightcol.count())]
-    assert order[:3] == [win._view3d_card, win.pose_acc, win.accuracy]
+    assert order[:3] == [win._view3d_card, win._pose_card, win._accuracy_card]
+    assert win.pose_acc.window() is win and win.accuracy.window() is win
 
 
 def test_main_window_builds(qapp):

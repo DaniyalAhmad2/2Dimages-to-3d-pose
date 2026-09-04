@@ -234,7 +234,12 @@ def test_a_cjk_code_page_would_refuse_the_stylesheet_outright():
 
 SMALL_SCREEN = (910, 512)          # 1366x768 @ 150 %
 TOPBAR_H = 46
-VIEW3D_MIN_H = 220
+VIEW3D_MIN_H = 160
+
+#: The physical screen the client actually has. The window is laid out in
+#: logical pixels, and Qt's `availableGeometry` reports them, so this is what
+#: a test faking a screen has to use.
+CLIENT_SCREEN = (1366, 768)
 
 
 def test_the_sidebar_is_no_longer_pinned_to_one_width(qapp):
@@ -261,11 +266,20 @@ def test_the_timeline_is_no_longer_pinned_to_one_height(qapp):
 
 def test_the_fixed_parts_still_fit_a_1366x768_screen_at_150_percent(qapp):
     """What has to be true for the window to be usable at all: the parts that
-    cannot shrink, plus the 3D view's own minimum, fit the screen."""
+    cannot shrink, plus the 3D view's own minimum, fit the screen.
+
+    Measured off the widgets, not off two literals repeated here. The literals
+    version went on passing while the real minimum grew to 949 px, because it
+    was only ever asserting about itself."""
+    from pose3d.ui.main_window import MainWindow
     from pose3d.ui.panels import Sidebar
     from pose3d.ui.timeline import Timeline
+    from pose3d.ui.view3d import View3D
 
-    used = TOPBAR_H + VIEW3D_MIN_H + Timeline().minimumHeight()
+    used = (MainWindow.TOPBAR_H + View3D().minimumHeight()
+            + Timeline().minimumHeight())
+    assert MainWindow.TOPBAR_H == TOPBAR_H
+    assert View3D().minimumHeight() == VIEW3D_MIN_H
     assert used <= SMALL_SCREEN[1], f"{used}px of fixed chrome on a 512px screen"
     assert Sidebar().minimumWidth() * 2 < SMALL_SCREEN[0]
 
@@ -276,7 +290,7 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     right of the desktop — and Windows will not let a title bar be dragged
     above the top of the screen to get them back.
     """
-    from PySide6.QtCore import QRect
+    from PySide6.QtCore import QRect, Qt
     from PySide6.QtGui import QScreen
 
     from pose3d.core.project import ProjectData
@@ -284,8 +298,31 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     from pose3d.ui.model import ProjectModel
 
     monkeypatch.setattr(QScreen, "availableGeometry",
-                        lambda self: QRect(0, 0, 1366, 768))
+                        lambda self: QRect(0, 0, *CLIENT_SCREEN))
     win = MainWindow(ProjectModel(ProjectData(name="Small_Screen"), None))
 
-    assert win.size().width() == 1366 - 40
-    assert win.size().height() == 768 - 80
+    assert win.size().width() == CLIENT_SCREEN[0] - 40
+    assert win.size().height() == CLIENT_SCREEN[1] - 80
+
+    # AFTER show(), which is the only measurement that means anything: resize()
+    # records a size, and the layout's own minimum overrides it the moment the
+    # window is mapped. It was 1025x949 here — 181 px of window below the
+    # bottom of a 768 px desktop, with the timeline in it.
+    #
+    # WA_DontShowOnScreen: show() everything the LAYOUT does — polish, activate,
+    # apply the minimum — without asking the offscreen platform plugin for a
+    # real window and a GL context it cannot give, whose teardown at
+    # interpreter exit is where this suite crashes.
+    win.setAttribute(Qt.WidgetAttribute.WA_DontShowOnScreen, True)
+    win.show()
+    qapp.processEvents()
+    hint = win.minimumSizeHint()
+    assert hint.width() <= CLIENT_SCREEN[0], hint
+    assert hint.height() <= CLIENT_SCREEN[1], hint
+    assert win.size().width() <= CLIENT_SCREEN[0], win.size()
+    assert win.size().height() <= CLIENT_SCREEN[1], win.size()
+    # Take the window down here rather than leaving a shown one (with a live
+    # GL context) for the interpreter to collect at exit: offscreen, that
+    # teardown is where Qt is least happy, and a suite that dumps core after
+    # its last green line is a suite nobody trusts.
+    win.close()

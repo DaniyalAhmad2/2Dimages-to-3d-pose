@@ -478,7 +478,7 @@ def test_the_import_settles_the_sign_after_it_has_poses():
     from pose3d.ui.import_dialog import ImportDialog
     from pose3d.ui.model import ProjectModel
 
-    src = inspect.getsource(ImportDialog._process)
+    src = inspect.getsource(ImportDialog._run_phases)
     assert src.index("finalize_world_up") > src.index("fit_project(project")
     # and the same step runs on every recompute, so re-solving 3D cannot leave
     # a stale sense behind

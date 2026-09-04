@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter,
-    QToolButton, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QScrollArea, QSplitter, QToolButton, QVBoxLayout, QWidget,
 )
 
 # The head-orientation modes as the 3D PREVIEW combo lists them: one row per
@@ -61,6 +61,27 @@ def _initial_size() -> tuple[int, int]:
             min(DESIGNED_SIZE[1], avail.height() - 80))
 
 
+def _scroll_card(widget: QWidget) -> QScrollArea:
+    """Wrap a card so that squeezing it scrolls instead of growing the window.
+
+    A QSplitter cannot make a child smaller than its `minimumSizeHint`, so a
+    panel's own content height is a floor under the whole window: the pose
+    accuracy card (308 px) and the joint list stacked over the 3D view added
+    up to a 949 px minimum on a 768 px laptop, with the timeline below the
+    bottom edge of the desktop and no way to drag it back. Given room these
+    look exactly as they did; squeezed, they scroll — the sidebar's answer to
+    the same problem.
+    """
+    area = QScrollArea()
+    area.setObjectName("cardPanel")       # the card border lives on the frame
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.viewport().setStyleSheet("background: transparent;")
+    return area
+
+
 def _export_status(line: str) -> str:
     """What one line of Blender's output means, for the progress dialog."""
     if "Fra:" in line:
@@ -78,6 +99,11 @@ def _export_status(line: str) -> str:
 
 
 class MainWindow(QMainWindow):
+    #: The top bar's height. Fixed, and the one part of the window that
+    #: genuinely cannot shrink, so the small-screen test measures it from here
+    #: rather than repeating the number.
+    TOPBAR_H = 46
+
     def __init__(self, model: ProjectModel, load_image=None, detector=None,
                  open_callback=None):
         super().__init__()
@@ -160,7 +186,8 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_topbar(self):
-        bar = QWidget(); bar.setObjectName("topbar"); bar.setFixedHeight(46)
+        bar = QWidget(); bar.setObjectName("topbar")
+        bar.setFixedHeight(self.TOPBAR_H)
         lay = QHBoxLayout(bar); lay.setContentsMargins(16, 0, 16, 0)
         self.title_label = QLabel("Project: —"); self.title_label.setObjectName("projectTitle")
         lay.addWidget(self.title_label)
@@ -207,7 +234,11 @@ class MainWindow(QMainWindow):
 
     def _build_right_column(self):
         col = QSplitter(Qt.Orientation.Vertical)
-        col.setMinimumWidth(300)
+        # A floor for the panels, not for the card above them: the 3D card's
+        # own header (title, two combos, the fullscreen button) asks for ~397
+        # and gets it. 300 was chosen for a 1540 px window and is width this
+        # column does not need on the client's 1366 px one.
+        col.setMinimumWidth(260)
 
         # 3D preview card with header (drag the splitter handles to resize)
         card = QWidget(); card.setObjectName("cardPanel")
@@ -247,14 +278,16 @@ class MainWindow(QMainWindow):
         self.view3d_error.hide()
         cl.addWidget(self.view3d_error)
         self.view3d = View3D()
-        self.view3d.setMinimumHeight(220)
         cl.addWidget(self.view3d, 1)
         self._view3d_card = card            # whole card (header+view) for fullscreen
 
-        self.pose_acc = PoseAccuracyPanel(); self.pose_acc.setObjectName("cardPanel")
-        self.accuracy = JointAccuracyList(); self.accuracy.setObjectName("cardPanel")
+        self.pose_acc = PoseAccuracyPanel()
+        self.accuracy = JointAccuracyList()
+        # the cards the layout is allowed to squeeze; see `_scroll_card`
+        self._pose_card = _scroll_card(self.pose_acc)
+        self._accuracy_card = _scroll_card(self.accuracy)
 
-        for w in (card, self.pose_acc, self.accuracy):
+        for w in (card, self._pose_card, self._accuracy_card):
             col.addWidget(w)
         col.setCollapsible(0, False)
         col.setSizes([460, 190, 300])   # 3D gets the most room by default
@@ -838,7 +871,7 @@ class MainWindow(QMainWindow):
             side = QWidget()
             sl = QVBoxLayout(side)
             sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(6)
-            for w in (self.pose_acc, self.accuracy):
+            for w in (self._pose_card, self._accuracy_card):
                 sl.addWidget(w)
             sl.addStretch(1)
 
@@ -859,7 +892,7 @@ class MainWindow(QMainWindow):
             self._root_lay.removeWidget(self._fs_split)
             # put the panels back in the right column, in their original order
             self._rightcol.insertWidget(0, self._view3d_card)
-            for i, w in enumerate((self.pose_acc, self.accuracy), 1):
+            for i, w in enumerate((self._pose_card, self._accuracy_card), 1):
                 self._rightcol.insertWidget(i, w)
             self._rightcol.setSizes([460, 190, 300])
             self._fs_side.deleteLater()
