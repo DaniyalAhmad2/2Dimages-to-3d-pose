@@ -120,10 +120,17 @@ def test_the_archive_lands_where_it_was_asked_to(tmp_path):
 def _fake_7z(monkeypatch):
     """7-Zip, in the one respect these tests are about, on any machine.
 
-    `7z a -tzip <name>` where <name> has no extension writes `<name>.zip` —
-    7-Zip appends the extension for the archive type, exactly as
-    `shutil.make_archive` does. Returns the list the fake records what it
-    wrote in, so a test can prove the trap was actually sprung.
+    Two behaviours, both of which the product has to survive:
+
+    * `7z a -tzip <name>` where <name> has no extension writes `<name>.zip` —
+      7-Zip appends the extension for the archive type, exactly as
+      `shutil.make_archive` does;
+    * `a` means ADD. Onto an archive that already exists it appends rather
+      than replacing, so a fake that always opened the file `"w"` would let a
+      product that reused a stale name pass this suite.
+
+    Returns the list the fake records what it wrote in, so a test can prove
+    the trap was actually sprung.
 
     A fake rather than the real thing because the branch taken must not depend
     on whether this machine happens to have 7-Zip: the Windows runner does and
@@ -136,7 +143,7 @@ def _fake_7z(monkeypatch):
         if not archive.suffix:
             archive = archive.with_name(archive.name + ".zip")
         root = Path(cwd)
-        with zipfile.ZipFile(archive, "w") as zf:
+        with zipfile.ZipFile(archive, "a" if archive.exists() else "w") as zf:
             for path in sorted((root / cmd[-1]).rglob("*")):
                 zf.write(path, path.relative_to(root).as_posix())
         written.append(archive)
