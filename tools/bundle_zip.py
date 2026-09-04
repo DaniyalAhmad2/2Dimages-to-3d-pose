@@ -97,9 +97,10 @@ def zip_bundle(folder: Path, out: Path,
         # contents as this bundle's, while deleting it first would destroy a
         # file this tool did not create.
         tmp = out.parent / f".{out.name}.{os.getpid()}.tmp.zip"
-        # this name is ours; only an earlier run of this tool that died
-        # between the two lines below can have left one, and `a` would add to
-        # it. Nothing else in the directory is touched.
+        # This name is this tool's own: only an earlier run of it, killed
+        # between writing the file and the cleanup below, can have left one —
+        # and `a` would add to that. It is the only path here that is ever
+        # deleted; nothing else in the directory is touched.
         tmp.unlink(missing_ok=True)
         try:
             # captured so that a failure carries 7z's own words into the
