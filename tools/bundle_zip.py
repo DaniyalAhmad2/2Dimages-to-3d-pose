@@ -24,6 +24,7 @@ zipped for five minutes to learn that it cannot be unzipped.
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -86,22 +87,33 @@ def zip_bundle(folder: Path, out: Path,
         # name with no extension it appends the archive type's, so `--out
         # delivery-2026-09` produced delivery-2026-09.zip while this function
         # returned — and main() printed, and the release step would publish —
-        # a path with nothing at it. So archive to the name 7-Zip will
-        # actually use, and move it onto `out` afterwards.
-        archive = (out if out.suffix.lower() == ".zip"
-                   else out.with_name(out.name + ".zip"))
-        # `7z a` ADDS: a stale archive of that name would be published with
-        # whatever an earlier run left in it. `out` is already gone above.
-        if archive.exists():
-            archive.unlink()
-        # captured so that a failure carries 7z's own words into the
-        # CalledProcessError; -bso0/-bsp0 mean there is nothing else to see.
-        subprocess.run(["7z", "a", "-tzip", "-mx=5", "-bso0", "-bsp0",
-                        str(archive.resolve()), folder.name],
-                       cwd=folder.parent, check=True,
-                       capture_output=True, text=True)
-        if archive != out:
-            archive.replace(out)
+        # a path with nothing at it.
+        #
+        # So it is given a name that already ends in .zip, and the result is
+        # moved onto `out`. A temporary name of our own rather than
+        # `<out>.zip`, because that name can belong to somebody else — a
+        # previous release's archive, sitting exactly where 7-Zip would have
+        # written by default — and `7z a` ADDS, which would publish its
+        # contents as this bundle's, while deleting it first would destroy a
+        # file this tool did not create.
+        tmp = out.parent / f".{out.name}.{os.getpid()}.tmp.zip"
+        # this name is ours; only an earlier run of this tool that died
+        # between the two lines below can have left one, and `a` would add to
+        # it. Nothing else in the directory is touched.
+        tmp.unlink(missing_ok=True)
+        try:
+            # captured so that a failure carries 7z's own words into the
+            # CalledProcessError; -bso0/-bsp0 mean there is nothing else to
+            # see.
+            subprocess.run(["7z", "a", "-tzip", "-mx=5", "-bso0", "-bsp0",
+                            str(tmp.resolve()), folder.name],
+                           cwd=folder.parent, check=True,
+                           capture_output=True, text=True)
+            tmp.replace(out)
+        finally:
+            # a 7z that died half-way leaves a partial archive; the release
+            # directory is not the place to find one later and wonder.
+            tmp.unlink(missing_ok=True)
     else:
         # make_archive names the file itself, appending .zip to the base it is
         # given; move it if that is not what was asked for, so the path this

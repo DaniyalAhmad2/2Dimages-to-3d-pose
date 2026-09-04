@@ -167,39 +167,72 @@ def test_the_7z_branch_also_lands_where_it_was_asked_to(tmp_path, monkeypatch):
     assert bundle_zip.zip_bundle(folder, out) == out
     assert out.is_file() and zipfile.is_zipfile(out)
     assert zipfile.ZipFile(out).namelist() == ["Pose3D-Windows/Pose3D.exe"]
-    assert written == [out.with_name(out.name + ".zip")], \
-        "the fake has to append .zip, or this test proves nothing"
+
+    # 7-Zip is never handed a name it would append .zip to -- that is the
+    # whole fault -- and what it wrote was MOVED onto `out`, not copied.
+    assert len(written) == 1
+    assert written[0].suffix == ".zip", written[0]
+    assert not written[0].exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "build", "delivery-2026-09"], "a temporary file was left behind"
 
 
 def test_the_7z_branch_does_not_add_a_second_zip_suffix(tmp_path, monkeypatch):
-    """The usual case, and the one a blanket "+ .zip" would break:
-    `Pose3D-Windows.zip` is already the name 7-Zip will use, so it is asked
-    for directly and there is nothing to move afterwards."""
-    written = _fake_7z(monkeypatch)
+    """The usual case, and the one a blanket "+ .zip" would break: nothing
+    called `Pose3D-Windows.zip.zip` may be written, and nothing but the
+    archive may be left in the release directory."""
+    _fake_7z(monkeypatch)
     folder = _bundle(tmp_path, "Pose3D.exe")
     out = tmp_path / "Pose3D-Windows.zip"
 
     assert bundle_zip.zip_bundle(folder, out) == out
-    assert written == [out], "no Pose3D-Windows.zip.zip"
     assert out.is_file() and zipfile.is_zipfile(out)
+    assert sorted(p.name for p in tmp_path.iterdir()) == [
+        "Pose3D-Windows.zip", "build"], "no Pose3D-Windows.zip.zip, no temp"
 
 
-def test_a_stale_archive_is_not_added_to(tmp_path, monkeypatch):
-    """`7z a` ADDS to an archive that is already there. `out` itself is
-    unlinked first; the name 7-Zip will actually write has to be too, or a
-    re-run publishes whatever the previous one left in it."""
+def test_a_zip_beside_an_extension_less_out_is_left_alone(tmp_path,
+                                                          monkeypatch):
+    """`<out>.zip` beside an extension-less `out` is where 7-Zip would write
+    by default, and it is a name that can already belong to somebody — a
+    previous release's archive in the same directory. Two things must not
+    happen to it: `7z a` ADDS, so its contents must not be published as this
+    bundle's; and it must not be deleted to make room, because this tool did
+    not create it.
+    """
     written = _fake_7z(monkeypatch)
     folder = _bundle(tmp_path, "Pose3D.exe")
     out = tmp_path / "delivery-2026-09"
-    stale = out.with_name(out.name + ".zip")
-    with zipfile.ZipFile(stale, "w") as zf:
-        zf.writestr("Pose3D-Windows/from-the-last-run.dll", b"x")
+    neighbour = out.with_name(out.name + ".zip")
+    with zipfile.ZipFile(neighbour, "w") as zf:
+        zf.writestr("Pose3D-Windows/from-the-last-release.dll", b"x")
 
     bundle_zip.zip_bundle(folder, out)
 
-    assert written == [stale]
-    assert "Pose3D-Windows/from-the-last-run.dll" not in \
-        zipfile.ZipFile(out).namelist()
+    assert neighbour.is_file(), "a file this tool did not create was deleted"
+    assert zipfile.ZipFile(neighbour).namelist() == [
+        "Pose3D-Windows/from-the-last-release.dll"], "it was added to"
+    assert written != [neighbour], "7-Zip was pointed at somebody else's file"
+    assert zipfile.ZipFile(out).namelist() == ["Pose3D-Windows/Pose3D.exe"]
+
+
+def test_a_failing_7z_leaves_no_temporary_file_behind(tmp_path, monkeypatch):
+    """The archive is built under a name of this tool's own and moved onto
+    `out` at the end, so a 7z that dies half-way — a full disk, a locked
+    output file — must not leave the half of it it did write in the release
+    directory for somebody to find later and wonder about."""
+    def run(cmd, cwd=None, **kw):
+        Path(cmd[-2]).write_bytes(b"half an archive")
+        raise subprocess.CalledProcessError(2, cmd, "", "ERROR: disk full")
+
+    monkeypatch.setattr(bundle_zip.shutil, "which", lambda name: "7z")
+    monkeypatch.setattr(bundle_zip.subprocess, "run", run)
+    folder = _bundle(tmp_path, "Pose3D.exe")
+
+    with pytest.raises(subprocess.CalledProcessError):
+        bundle_zip.zip_bundle(folder, tmp_path / "delivery-2026-09")
+
+    assert [p.name for p in tmp_path.iterdir()] == ["build"]
 
 
 def test_a_bundle_that_is_too_deep_is_refused_before_it_is_zipped(tmp_path):
