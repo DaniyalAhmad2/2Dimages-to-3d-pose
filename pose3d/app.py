@@ -265,6 +265,35 @@ def _configure_gl(argv) -> str:
     return "software"
 
 
+def _is_diagnose_exe(argv) -> bool:
+    """True when this process IS the diagnose build, started with no arguments.
+
+    `pose3d.spec` builds `Pose3D-diagnose.exe` from the same script as
+    `Pose3D.exe`; the console flag is the only difference between them. The
+    name is therefore the only thing that can say which one the client
+    double-clicked, and a double-click passes no arguments.
+    """
+    if argv:
+        return False                      # asked for something specific
+    return Path(sys.executable).stem.lower().endswith("diagnose")
+
+
+def _hold_console() -> None:
+    """Keep a double-clicked console window open long enough to read.
+
+    Windows closes it the instant the process returns, which would take the
+    report with it. Only in the frozen build: from a terminal the shell keeps
+    the output, and a test run must not block on stdin.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    try:
+        input("\nPress Enter to close this window. "
+              "The report was also saved as pose3d-diagnostics.txt.\n")
+    except (EOFError, OSError, KeyboardInterrupt):
+        pass                              # no console to wait on
+
+
 def main():
     # A frozen windowed build has no console to inherit, so anything that
     # writes to stdout/stderr — rtmlib's download progress, a Qt warning, a
@@ -289,6 +318,17 @@ def main():
     if "--diagnose" in sys.argv[1:]:
         from pose3d.diagnostics import main as diagnose
         sys.exit(diagnose())
+
+    # The client's first instruction when nothing works is to run the
+    # diagnostics — and the double-clickable thing that does it is this
+    # executable. It is built from the same script as Pose3D.exe, so with no
+    # arguments it used to open the GUI in a console window: no report, no
+    # pose3d-diagnostics.txt, and the same app they had already failed to use.
+    if _is_diagnose_exe(sys.argv[1:]):
+        from pose3d.diagnostics import main as diagnose
+        code = diagnose()
+        _hold_console()
+        sys.exit(code)
 
     _pre_qt_checks()
 

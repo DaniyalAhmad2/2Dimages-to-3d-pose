@@ -204,3 +204,133 @@ def test_a_job_that_cannot_be_cancelled_still_runs(qapp):
         return "done"
 
     assert run_job(None, "Recompute 3D", work, cancellable=False) == "done"
+
+
+# --- the teardown that a segmentation fault was hiding in -------------------
+#
+# A user re-imported a project from its own images folder, the copy phase
+# failed with `SameFileError`, and the app died with `Segmentation fault (core
+# dumped)`. The core's backtrace is `sendPostedEvents -> notifyInternal2 ->
+# QObject::event -> PySide6 -> 0xa1`: a queued signal delivered into a slot
+# whose Python object had already been freed. `run_job` left the job wired to
+# a `_Sink` that its own return destroys, opened a modal error box in the
+# middle of that teardown, and `QProgressDialog.setValue()` pumps the event
+# loop from inside the very slot that is being torn down.
+
+
+class _FakeDialog:
+    """Enough QProgressDialog for `_Sink`, with a call log."""
+
+    def __init__(self, on_set_value=None):
+        self.calls = []
+        self._on_set_value = on_set_value
+
+    def setMaximum(self, v):
+        self.calls.append(("setMaximum", v))
+
+    def setValue(self, v):
+        self.calls.append(("setValue", v))
+        if self._on_set_value is not None:
+            self._on_set_value()           # what a modal setValue() really does
+
+    def setLabelText(self, t):
+        self.calls.append(("setLabelText", t))
+
+
+class _FakeLoop:
+    def __init__(self):
+        self.quits = 0
+
+    def quit(self):
+        self.quits += 1
+
+
+def test_a_report_arriving_after_the_job_was_reaped_touches_nothing(qapp):
+    """The dangling delivery, in one call.
+
+    Between `loop.exec()` returning and `run_job` returning, the dialog is
+    closed and the sink is on its way out. A progress signal already in the
+    queue is delivered after that — and used to drive a dialog that had been
+    closed and deleted.
+    """
+    from pose3d.ui.worker import _Sink
+
+    dialog, loop = _FakeDialog(), _FakeLoop()
+    sink = _Sink(dialog, loop)
+    sink.on_progress(1, 10, "half way")
+    assert dialog.calls, "a live sink must drive the dialog"
+
+    sink.detach()
+    dialog.calls.clear()
+    sink.on_progress(2, 10, "later")
+    sink.on_finished("a late result")
+
+    assert dialog.calls == []
+    assert loop.quits == 0
+
+
+def test_a_progress_report_cannot_re_enter_itself(qapp):
+    """`QProgressDialog.setValue()` calls `processEvents()` while the dialog
+    is modal, so delivering one progress signal can deliver the next one from
+    inside the first. Nothing about the dialog needs that recursion, and the
+    stack it builds is what a later teardown unwinds into."""
+    from pose3d.ui.worker import _Sink
+
+    depth, seen = [0], []
+
+    def pump():
+        # what processEvents() does from inside setValue(): deliver the next
+        # queued progress signal into the same slot
+        depth[0] += 1
+        seen.append(depth[0])
+        if depth[0] < 5:
+            sink.on_progress(depth[0], 10, "deeper")
+        depth[0] -= 1
+
+    dialog, loop = _FakeDialog(on_set_value=pump), _FakeLoop()
+    sink = _Sink(dialog, loop)
+    sink.on_progress(0, 10, "start")
+
+    assert seen == [1], f"on_progress re-entered itself: {seen}"
+
+
+def test_the_error_box_opens_only_once_the_job_is_finished_and_unwired(
+        qapp, monkeypatch):
+    """The modal box runs an event loop of its own. Every posted event in the
+    queue is delivered inside it, so by the time it opens the job must be
+    finished and reaped, the dialog closed, and nothing left connected that
+    could reach objects this function is about to drop."""
+    from pose3d.ui import guard, worker
+
+    made = {}
+    real_dialog, real_job = worker.QProgressDialog, worker.Job
+    monkeypatch.setattr(worker, "QProgressDialog",
+                        lambda *a, **kw: made.setdefault(
+                            "dialog", real_dialog(*a, **kw)))
+    monkeypatch.setattr(worker, "Job",
+                        lambda *a, **kw: made.setdefault(
+                            "job", real_job(*a, **kw)))
+
+    state = {}
+
+    def record(parent, title, text):
+        job, dialog = made["job"], made["dialog"]
+        state["finished"] = job.isFinished()
+        state["running"] = job.isRunning()
+        state["visible"] = dialog.isVisible()
+        state["connections"] = (job.receivers("2progress(int,int,QString)"),
+                                job.receivers("2finished_res(PyObject)"))
+
+    monkeypatch.setattr(guard, "report_error", record)
+
+    def boom(report, cancelled):
+        report(1, 2, "half way")
+        raise RuntimeError("the copy fell over")
+
+    res = worker.run_job(None, "Importing images", boom)
+
+    assert isinstance(res, RuntimeError)
+    assert state["finished"] is True and state["running"] is False
+    assert state["visible"] is False
+    assert state["connections"] == (0, 0), \
+        "the job was still wired to the sink when the modal box opened"

@@ -11,8 +11,8 @@ from __future__ import annotations
 import numpy as np
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (
-    QComboBox, QHBoxLayout, QLabel, QMainWindow, QPushButton, QSplitter,
-    QToolButton, QVBoxLayout, QWidget,
+    QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
+    QScrollArea, QSplitter, QToolButton, QVBoxLayout, QWidget,
 )
 
 # The head-orientation modes as the 3D PREVIEW combo lists them: one row per
@@ -61,6 +61,27 @@ def _initial_size() -> tuple[int, int]:
             min(DESIGNED_SIZE[1], avail.height() - 80))
 
 
+def _scroll_card(widget: QWidget) -> QScrollArea:
+    """Wrap a card so that squeezing it scrolls instead of growing the window.
+
+    A QSplitter cannot make a child smaller than its `minimumSizeHint`, so a
+    panel's own content height is a floor under the whole window: the pose
+    accuracy card (308 px) and the joint list stacked over the 3D view added
+    up to a 949 px minimum on a 768 px laptop, with the timeline below the
+    bottom edge of the desktop and no way to drag it back. Given room these
+    look exactly as they did; squeezed, they scroll — the sidebar's answer to
+    the same problem.
+    """
+    area = QScrollArea()
+    area.setObjectName("cardPanel")       # the card border lives on the frame
+    area.setWidget(widget)
+    area.setWidgetResizable(True)
+    area.setFrameShape(QFrame.Shape.NoFrame)
+    area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+    area.viewport().setStyleSheet("background: transparent;")
+    return area
+
+
 def _export_status(line: str) -> str:
     """What one line of Blender's output means, for the progress dialog."""
     if "Fra:" in line:
@@ -78,6 +99,11 @@ def _export_status(line: str) -> str:
 
 
 class MainWindow(QMainWindow):
+    #: The top bar's height. Fixed, and the one part of the window that
+    #: genuinely cannot shrink, so the small-screen test measures it from here
+    #: rather than repeating the number.
+    TOPBAR_H = 46
+
     def __init__(self, model: ProjectModel, load_image=None, detector=None,
                  open_callback=None):
         super().__init__()
@@ -160,7 +186,8 @@ class MainWindow(QMainWindow):
         return w
 
     def _build_topbar(self):
-        bar = QWidget(); bar.setObjectName("topbar"); bar.setFixedHeight(46)
+        bar = QWidget(); bar.setObjectName("topbar")
+        bar.setFixedHeight(self.TOPBAR_H)
         lay = QHBoxLayout(bar); lay.setContentsMargins(16, 0, 16, 0)
         self.title_label = QLabel("Project: —"); self.title_label.setObjectName("projectTitle")
         lay.addWidget(self.title_label)
@@ -207,7 +234,11 @@ class MainWindow(QMainWindow):
 
     def _build_right_column(self):
         col = QSplitter(Qt.Orientation.Vertical)
-        col.setMinimumWidth(300)
+        # A floor for the panels, not for the card above them: the 3D card's
+        # own header (title, two combos, the fullscreen button) asks for ~397
+        # and gets it. 300 was chosen for a 1540 px window and is width this
+        # column does not need on the client's 1366 px one.
+        col.setMinimumWidth(260)
 
         # 3D preview card with header (drag the splitter handles to resize)
         card = QWidget(); card.setObjectName("cardPanel")
@@ -247,14 +278,16 @@ class MainWindow(QMainWindow):
         self.view3d_error.hide()
         cl.addWidget(self.view3d_error)
         self.view3d = View3D()
-        self.view3d.setMinimumHeight(220)
         cl.addWidget(self.view3d, 1)
         self._view3d_card = card            # whole card (header+view) for fullscreen
 
-        self.pose_acc = PoseAccuracyPanel(); self.pose_acc.setObjectName("cardPanel")
-        self.accuracy = JointAccuracyList(); self.accuracy.setObjectName("cardPanel")
+        self.pose_acc = PoseAccuracyPanel()
+        self.accuracy = JointAccuracyList()
+        # the cards the layout is allowed to squeeze; see `_scroll_card`
+        self._pose_card = _scroll_card(self.pose_acc)
+        self._accuracy_card = _scroll_card(self.accuracy)
 
-        for w in (card, self.pose_acc, self.accuracy):
+        for w in (card, self._pose_card, self._accuracy_card):
             col.addWidget(w)
         col.setCollapsible(0, False)
         col.setSizes([460, 190, 300])   # 3D gets the most room by default
@@ -483,33 +516,46 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_diagnostics(self):
-        """Help > Diagnostics. The same report `--diagnose` writes.
+        """Help > Diagnostics. The same report `--diagnose` writes — from a
+        process of its own.
 
-        It runs on the GUI thread and takes a few seconds — it starts Blender
-        and one detection — so it wears the wait cursor rather than a progress
-        dialog: half of what it reports is Qt's own state, and none of it can
-        be gathered from a worker thread that may not create widgets.
+        It used to run here, under a wait cursor. What it runs is a real
+        Blender export (deadline: ten minutes) and, on a machine whose GL is
+        dead, a software-GL child (five more), and its Qt check builds a
+        View3D, shows it and pumps the event loop twice. In the live app that
+        is a quarter of an hour of "Not Responding", a stray 320x240 window
+        over the dashboard, and every slot re-entered from the middle of this
+        one — the exact failures this window was rebuilt to remove,
+        reintroduced by the feature added to diagnose them, on the one path a
+        client reaches when something is already wrong.
+
+        So it goes through `run_job` like every other long thing: off the GUI
+        thread, with a Cancel that kills the child, and nothing GL-related in
+        this process at all.
         """
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication
-
         from pose3d import diagnostics
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            text = diagnostics.report()
-        finally:
-            QApplication.restoreOverrideCursor()
-        path = None
-        try:
-            path = diagnostics.write_report(text=text)
-        except OSError as e:
-            # Not fatal, and worth saying: it is usually the install being
-            # read-only, which is itself half the diagnosis.
-            guard.report_error(
-                self, "The diagnostics report could not be saved",
-                f"{type(e).__name__}: {e}\n\nThe report itself is below — "
-                "use Copy and paste it into an email.")
-        diagnostics.show_report(self, text, path)
+
+        def job(report, cancelled):
+            report(0, 0, "Running the diagnostics…")
+
+            def on_line(line):
+                if line.strip():
+                    report(0, 0, line.strip()[:120])
+
+            text, stopped = diagnostics.run_in_child(on_line=on_line,
+                                                     cancelled=cancelled)
+            if stopped == "cancelled":
+                raise Cancelled()
+            return text
+
+        text = run_job(self, "Diagnostics", job)
+        if isinstance(text, Exception):
+            return                       # cancelled, or already reported
+        # The child writes the file itself, as `--diagnose` does; naming it
+        # only when it is really there keeps the dialog from pointing at a
+        # path a read-only install refused to create.
+        path = diagnostics.default_path()
+        diagnostics.show_report(self, text, path if path.exists() else None)
 
     @guarded
     def _on_redetect_head(self):
@@ -732,7 +778,17 @@ class MainWindow(QMainWindow):
                                     keep_root_motion=True,
                                     schedule="one_per_pose",
                                     allow_fallback=False, on_line=on_line,
-                                    cancelled=cancelled)
+                                    cancelled=cancelled,
+                                    # No overall deadline from here. This is
+                                    # two full EEVEE passes over every
+                                    # keyframe on the client's laptop, and ten
+                                    # minutes is an ordinary duration for it;
+                                    # a cap would destroy a legitimate render
+                                    # with nothing written. What stops a hung
+                                    # one is the idle deadline, and what stops
+                                    # a slow one is the user, through a Cancel
+                                    # button that now really does kill Blender.
+                                    timeout=None, idle_timeout=300)
 
         # Cancel really does stop it now: the export polls `cancelled` and
         # kills the Blender child, which is why the button is here at all.
@@ -815,7 +871,7 @@ class MainWindow(QMainWindow):
             side = QWidget()
             sl = QVBoxLayout(side)
             sl.setContentsMargins(0, 0, 0, 0); sl.setSpacing(6)
-            for w in (self.pose_acc, self.accuracy):
+            for w in (self._pose_card, self._accuracy_card):
                 sl.addWidget(w)
             sl.addStretch(1)
 
@@ -836,7 +892,7 @@ class MainWindow(QMainWindow):
             self._root_lay.removeWidget(self._fs_split)
             # put the panels back in the right column, in their original order
             self._rightcol.insertWidget(0, self._view3d_card)
-            for i, w in enumerate((self.pose_acc, self.accuracy), 1):
+            for i, w in enumerate((self._pose_card, self._accuracy_card), 1):
                 self._rightcol.insertWidget(i, w)
             self._rightcol.setSizes([460, 190, 300])
             self._fs_side.deleteLater()

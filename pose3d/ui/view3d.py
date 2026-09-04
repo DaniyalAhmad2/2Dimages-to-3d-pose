@@ -145,8 +145,16 @@ class View3D(gl.GLViewWidget):
     CAPTURE_COLOR = (1.0, 0.72, 0.25, 0.85)    # the measured skeleton
     FILLED_COLOR = (1.0, 0.62, 0.10, 1.0)      # interpolated, not measured
 
+    #: The smallest the 3D view may be squeezed to. It lives here rather than
+    #: at the call site because it is a fact about the view (a character in a
+    #: box shorter than this is unreadable), and because the window's own
+    #: minimum is the sum of facts like it: 220 here plus the accuracy cards
+    #: put the dashboard's floor at 949 px on the client's 768 px laptop.
+    MIN_HEIGHT = 160
+
     def __init__(self):
         super().__init__()
+        self.setMinimumHeight(self.MIN_HEIGHT)
         self.setBackgroundColor((14, 16, 22))
         self.setCameraPosition(distance=4.0, elevation=14, azimuth=-70)
         self._grid = gl.GLGridItem()          # XY plane, z = 0 (the ground)

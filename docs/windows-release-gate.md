@@ -46,7 +46,7 @@ these files, because there is no second Windows machine here to run them on.
 | 10 | `check_bundle_layout.py` **on the extracted copy** | a file the archive or the extraction dropped. This is the copy that actually broke last time. |
 | 11 | `Pose3D.exe --selftest --no-video`, from the extracted copy, `Start-Process -Wait` | the app the client double-clicks, from where they run it, with `POSE3D_BLENDER=""`, `POSE3D_MODELS=""` and an empty `XDG_CACHE_HOME`: it can only pass by finding what the bundle itself ships. `Start-Process -Wait` and not `&`, because `Pose3D.exe` is built for the GUI subsystem and PowerShell does not wait for those — `&` returns immediately and `$LASTEXITCODE` would describe the launch, not the self-test. |
 | 12 | print `selftest-out.txt`, `selftest-err.txt` and the extracted copy's `pose3d-log.txt`, then fail on a non-zero exit | a windowed exe writes into `pose3d-log.txt` and nowhere else. Printed on a *passing* run too, so the log records which Blender and which weights the bundle actually found. |
-| 13 | `Pose3D-diagnose.exe --selftest`, same starved environment, whenever the extraction succeeded | the console build of the same checks — the exe the client is told to run when something goes wrong. Running it here, pass or fail, means the report they would send is one this gate has already produced. Evidence, not a second gate: step 12 already failed the job on that exit code, and this step is meant to run *after* that failure. |
+| 13 | `Pose3D-diagnose.exe --selftest --no-video`, same starved environment, wrapped in `try`/`catch`, whenever the extraction succeeded | the console build of the same checks — the exe the client is told to run when something goes wrong. Running it here, pass or fail, means the report they would send is one this gate has already produced. Evidence, not a second gate: step 12 already failed the job on that exit code, and this step is meant to run *after* that failure — hence the `try`/`catch` and the `exit 0`: under GitHub's `$ErrorActionPreference = 'Stop'` a non-zero exit from a native command is itself terminating, which would turn a green job's evidence step red. `--no-video` for the same reason step 12 has it: EEVEE needs WGL extensions this runner has no driver for, and without the flag this asks a slower, different question. |
 
 ## The one check this runner cannot make
 
@@ -65,7 +65,8 @@ in the gate that is weakened. What stands in for it:
 * `check_qt_opengl`'s `ImportError` path stays fatal, so a build that cannot
   even import the 3D view fails whatever the GPU situation;
 * on the client's machine `Pose3D.exe --selftest` is strict, and
-  `Pose3D-diagnose.exe` is how they run it.
+  `Diagnose.cmd` (which runs `Pose3D-diagnose.exe --diagnose`) is how they run
+  it — with no arguments that exe diagnoses rather than starting the app.
 
 ## What the gate still does not prove
 

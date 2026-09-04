@@ -210,3 +210,55 @@ def test_the_windows_test_workflow_still_runs_on_every_pull_request():
     triggers = _block(_text(TEST_WF), "on:")
     assert "pull_request:" in triggers
     assert "paths" not in triggers
+
+
+# --- the composite action's own failure modes -------------------------------
+
+def test_every_run_step_in_the_action_names_its_shell():
+    """A `run:` step in a COMPOSITE action with no `shell:` is a validation
+    error before any step executes — the whole job fails at parse time with a
+    message about the action, not about the build. All ten have it today; it
+    is the easiest thing in the world to leave off the eleventh, and nothing
+    else here asserts it."""
+    missing, wrong = [], []
+    for name, body in _steps(_text(ACTION)).items():
+        if not re.search(r"^\s+run:", body, re.M):
+            continue
+        found = re.search(r"^\s+shell:\s*(\S+)", body, re.M)
+        if found is None:
+            missing.append(name)
+        elif found.group(1) != "pwsh":
+            wrong.append((name, found.group(1)))
+    assert missing == [], f"run: steps with no shell: {missing}"
+    assert wrong == [], f"run: steps on another shell: {wrong}"
+
+
+def test_the_diagnose_step_asks_the_same_question_as_the_gate():
+    """It claims to be "the same question asked through the other exe, not an
+    easier one", and without --no-video it is a different one: check_video
+    launches Blender again for a render this runner documents as dying with
+    EXCEPTION_ACCESS_VIOLATION, and can spend the whole idle deadline doing
+    it."""
+    step = _steps(_text(ACTION))["Diagnose the extracted copy"]
+    assert "--no-video" in step
+
+
+def test_the_diagnose_step_cannot_fail_the_job():
+    """It is evidence, and it runs after a failure on purpose. GitHub's pwsh
+    wrapper sets $ErrorActionPreference='Stop', and on PowerShell >= 7.3 a
+    non-zero exit from a native command becomes a terminating error — so
+    `exit 0` two lines below never runs and a green job's evidence step goes
+    red."""
+    step = _steps(_text(ACTION))["Diagnose the extracted copy"]
+    assert "try {" in step and "catch" in step
+    assert "exit 0" in step
+
+
+def test_the_interpreter_handed_to_the_bundle_script_is_one_line():
+    """`$python = uv run python -c "…"` becomes a PowerShell ARRAY if uv ever
+    writes a line of its own to stdout, and an array splats into extra
+    arguments to the ps1. Take the last non-empty line, and prove it is a
+    path before handing it over."""
+    step = _the_step_that(_text(ACTION), "pwsh tools/make_windows_bundle.ps1")
+    assert "Select-Object -Last 1" in step
+    assert "Test-Path $python" in step

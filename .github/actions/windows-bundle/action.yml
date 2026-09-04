@@ -76,7 +76,14 @@ runs:
         # -Python, because `python` off PATH on a Windows runner is often the
         # Microsoft Store stub rather than the environment the lockfile
         # installed, and the script runs every repo tool through it.
-        $python = uv run python -c "import sys; print(sys.executable)"
+        # Select-Object -Last 1: uv writes its resolve/sync chatter to stderr,
+        # but one stray stdout line would make $python an ARRAY, and an array
+        # splats into extra arguments to the ps1 rather than failing.
+        $python = (uv run python -c "import sys; print(sys.executable)" |
+                   Where-Object { $_.Trim() } | Select-Object -Last 1).Trim()
+        if (-not (Test-Path $python)) {
+          throw "uv did not name an interpreter (got: '$python')"
+        }
         pwsh tools/make_windows_bundle.ps1 `
           -Dist dist/Pose3D -Out build/Pose3D-Windows -Python $python
         if ($LASTEXITCODE -ne 0) {
@@ -211,8 +218,22 @@ runs:
         # No 2>&1: merging a native command's stderr into the success stream
         # raises NativeCommandError under the $ErrorActionPreference='Stop'
         # this runner sets, and both streams reach the log anyway.
-        & (Join-Path $env:CLIENT_BUNDLE 'Pose3D-diagnose.exe') --selftest
-        Write-Host "Pose3D-diagnose.exe exited $LASTEXITCODE"
+        #
+        # try/catch for the same reason, one level up: on PowerShell >= 7.3
+        # with $PSNativeCommandUseErrorActionPreference in effect, a non-zero
+        # exit from a native command IS a terminating error under 'Stop', so
+        # without this the `exit 0` below never runs and a green job's
+        # evidence step goes red.
+        #
+        # --no-video, like the step above: EEVEE needs WGL extensions this
+        # runner has no driver for. Without it this asks a different and
+        # slower question than the gate it is evidence for.
+        try {
+          & (Join-Path $env:CLIENT_BUNDLE 'Pose3D-diagnose.exe') --selftest --no-video
+          Write-Host "Pose3D-diagnose.exe exited $LASTEXITCODE"
+        } catch {
+          Write-Host "Pose3D-diagnose.exe could not be run: $_"
+        }
         # Evidence, not a second gate: the step above already failed the job on
         # this exit code, and this step runs after a failure on purpose.
         exit 0

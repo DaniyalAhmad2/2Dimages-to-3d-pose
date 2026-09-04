@@ -93,8 +93,8 @@
       "kind": "required",
       "min_count": 1,
       "min_size": 1,
-      "stage": "pre-qt",
-      "why": "Qt's native style plugin; the app pins Fusion, but a plugins/styles folder that arrived empty means the Qt plugin tree was only partly copied and the platform plugin is next"
+      "stage": "later",
+      "why": "Qt's native style plugin; the app pins Fusion, so a missing one costs nothing visible, and this rule rests on Qt 6.11 still shipping qmodernwindowsstyle.dll AND PyInstaller not excluding it - as a pre-qt rule that guess could refuse to start a healthy client bundle, which is a worse failure than the one it catches"
     },
     {
       "pattern": "_internal/PySide6/opengl32sw.dll",
@@ -168,6 +168,14 @@
       "min_size": 0,
       "stage": "later",
       "why": "where projects and exports default to; the app creates it if it has to, but its absence means the folder was assembled by something other than the bundle script"
+    },
+    {
+      "pattern": "Diagnose.cmd",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "later",
+      "why": "the double-clickable diagnostics, and the documented fallback for a diagnose exe that will not run; the one file whose absence must not be silent was the one nothing looked for"
     },
     {
       "pattern": "README.txt",

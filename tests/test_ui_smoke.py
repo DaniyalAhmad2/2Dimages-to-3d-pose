@@ -132,9 +132,13 @@ def test_3d_fullscreen_toggle_is_in_app(qapp):
     win._toggle_fullscreen()
     assert not win._fs_active
     assert not win._mid.isHidden()
-    # panels returned to the right column, in their original order
+    # panels returned to the right column, in their original order. The cards
+    # are what the splitter holds — each accuracy panel lives in a scroll area
+    # so that squeezing it scrolls rather than growing the window past the
+    # bottom of a 768 px screen.
     order = [win._rightcol.widget(i) for i in range(win._rightcol.count())]
-    assert order[:3] == [win._view3d_card, win.pose_acc, win.accuracy]
+    assert order[:3] == [win._view3d_card, win._pose_card, win._accuracy_card]
+    assert win.pose_acc.window() is win and win.accuracy.window() is win
 
 
 def test_main_window_builds(qapp):
@@ -1178,3 +1182,149 @@ def test_a_healthy_gl_view_shows_no_placeholder(qapp, monkeypatch):
     v.show()
     assert v.check_gl() is True
     assert v.placeholder() is None
+
+
+# --- the import that segfaulted --------------------------------------------
+#
+# Re-importing into an existing project folder failed in the copy phase, and
+# the app then ran the whole import a second time by itself and died with
+# `Segmentation fault (core dumped)`. Three things have to hold: a failed
+# phase stops the import, a second `_process` while one is running does
+# nothing, and no widget is read from the worker thread.
+
+
+def test_a_failed_first_phase_stops_the_import(qapp, tmp_path, monkeypatch):
+    """`run_job` hands a failure back as the exception it caught (it has
+    already been reported). Every phase after it must not run, and the dialog
+    must still be there for the user to correct what went wrong."""
+    from shiboken6 import Shiboken
+
+    from pose3d.ui import import_dialog
+
+    titles = []
+
+    def failing_run_job(parent, title, fn, cancellable=True):
+        titles.append(title)
+        return OSError("the copy fell over")
+
+    monkeypatch.setattr(import_dialog, "run_job", failing_run_job)
+
+    dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
+    dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
+    dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
+    dlg._process()
+
+    assert titles == ["Importing images"], titles
+    assert dlg.result_folder is None
+    assert Shiboken.isValid(dlg), "the dialog was destroyed under the user"
+    assert not dlg.isHidden() or dlg.result() == 0
+
+
+def test_a_second_process_while_one_is_running_does_nothing(
+        qapp, tmp_path, monkeypatch):
+    """A modal progress dialog pumps the event loop from inside
+    `QProgressDialog.setValue()`, and a modal error box runs one of its own,
+    so a click on Process that was queued behind either of them arrives while
+    the import is still going. It used to start the whole import again — a
+    second copy, a second detection, over the top of the first."""
+    from pose3d.ui import import_dialog
+
+    calls = []
+
+    def reentering_run_job(parent, title, fn, cancellable=True):
+        calls.append(title)
+        if len(calls) == 1:
+            dlg._process()             # what the pumped event loop delivers
+        return OSError("stop here")
+
+    monkeypatch.setattr(import_dialog, "run_job", reentering_run_job)
+
+    dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
+    dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
+    dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
+    dlg._process()
+
+    assert calls == ["Importing images"], calls
+    # and the button is usable again once the import has finished
+    assert dlg.process_btn.isEnabled()
+
+
+def test_the_long_phases_are_handed_values_read_on_the_gui_thread(
+        qapp, tmp_path, monkeypatch):
+    """`self.name.text()` inside a job function is a QLineEdit read from the
+    WORKER thread, and `self.marker.value()` a QDoubleSpinBox one. Widgets
+    belong to the GUI thread; the values have to be taken before the job
+    starts and closed over."""
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT, Frame, ProjectData
+    from pose3d.ui import import_dialog
+    from pose3d.ui.worker import Cancelled
+
+    jobs, seen = {}, {}
+
+    def capturing_run_job(parent, title, fn, cancellable=True):
+        jobs[title] = fn
+        if title == "Importing images":
+            return ProjectData(name="snapshot", fps=30,
+                               calibration_ref="calibration",
+                               frames=[Frame(frame_id="0001",
+                                             images={CAM_LEFT: "l.jpg",
+                                                     CAM_RIGHT: "r.jpg"})])
+        return Cancelled()
+
+    monkeypatch.setattr(import_dialog, "run_job", capturing_run_job)
+    monkeypatch.setattr(import_dialog, "build_project",
+                        lambda left, right, **kw: seen.update(kw))
+    monkeypatch.setattr(import_dialog, "resolve_calibration",
+                        lambda project, reader, **kw: seen.update(kw))
+
+    dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
+    dlg.name.setText("Imported_Session")
+    dlg.marker.setValue(0.05)
+    dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
+    dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
+    dlg._process()
+
+    # the user (or a repaint) changes the widgets while the job is running
+    dlg.name.setText("CHANGED")
+    dlg.marker.setValue(0.25)
+    for title in ("Importing images", "Resolving calibration"):
+        jobs[title](lambda *a: None, lambda: False)   # what the thread runs
+
+    assert seen["name"] == "Imported_Session"
+    assert seen["marker_length"] == 0.05
+
+
+def test_the_gui_export_has_no_overall_deadline_and_asks_for_the_idle_one(
+        qapp, tmp_path, monkeypatch):
+    """The client's export renders two full EEVEE passes over every keyframe
+    on a laptop; ten minutes is an ordinary duration for that. Before this
+    branch the overall deadline was inoperative on the GUI path (`p.wait`
+    only ran after EOF), so the rewrite's enforced 600 s was a new way to
+    destroy a legitimate long render, with nothing written and no way to ask
+    for more time. The guards that stay are the working Cancel button and the
+    idle deadline, which is the one that can tell a hung Blender from a slow
+    one."""
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+    seen = {}
+
+    def fake_export(poses, out_dir, **kw):
+        seen.update(kw)
+        return blender_export._failure("blender_cancelled", "Cancelled.", 125)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    win._on_export()
+
+    assert seen["timeout"] is None, "the GUI export must not be capped"
+    assert seen["idle_timeout"] == 300
+    assert seen["cancelled"] is not None, "Cancel is the guard that replaces it"

@@ -401,6 +401,9 @@ def _show(text: str, path) -> None:
     not the report: the console output and the file are the deliverable."""
     global _QAPP
     import traceback
+    if os.environ.get(NO_DIALOG_ENV) == "1":
+        # a child of the running app: the parent shows the report
+        return
     try:
         from PySide6.QtWidgets import QApplication
 
@@ -419,6 +422,67 @@ def _show(text: str, path) -> None:
         show_report(None, text, path)
     except Exception:                     # noqa: BLE001 - see the docstring
         traceback.print_exc()
+
+
+# --- running it somewhere else ---------------------------------------------
+
+#: The child is told not to end with a dialog of its own: from Help >
+#: Diagnostics the parent already has a window to show the report in, and a
+#: second modal box from a process the user cannot see is nobody's idea.
+NO_DIALOG_ENV = "POSE3D_NO_DIALOG"
+
+#: Long enough for a real run (a Blender export and, on a broken machine, a
+#: software-GL child), short enough that a wedged child is not forever.
+CHILD_TIMEOUT_S = 1200
+
+
+def child_command() -> list[str]:
+    """The command that produces this report in a process of its own.
+
+    Frozen, that is the console build beside the app — the same executable the
+    client is told to run, so the in-app item and the support instruction
+    produce the same text. From source it is this module, run as a module.
+    """
+    if getattr(sys, "frozen", False):
+        exe = Path(sys.executable).with_name("Pose3D-diagnose.exe")
+        if exe.exists():
+            return [str(exe), "--diagnose"]
+        return [sys.executable, "--diagnose"]   # single-exe build
+    return [sys.executable, "-m", "pose3d.diagnostics"]
+
+
+def run_in_child(on_line=None, cancelled=None) -> tuple[str, str]:
+    """Produce the report in a child process; return (text, stopped).
+
+    `stopped` is "" when the child finished on its own, else "cancelled" or
+    "timeout". Half a report from a child that was stopped is still the best
+    diagnostic there is, so the text is whatever it managed to say.
+
+    This exists because `report()` cannot run in the window's own process:
+    it starts a real Blender export and, on a machine whose GL is dead, a
+    software-GL child — up to a quarter of an hour with the window painted
+    "Not Responding" — and its Qt check builds a View3D, shows it and pumps
+    the event loop, which from inside the live app is a stray window over the
+    dashboard and every slot re-entered from the middle of one.
+
+    The pump and the kill are `blender_export`'s: one implementation of "read
+    a child's output, stop it when asked, and reap it on Windows too".
+    """
+    from pose3d.export.blender_export import _pump
+
+    env = dict(os.environ)
+    env[NO_DIALOG_ENV] = "1"
+    chunks: list[str] = []
+    # runtime.subprocess_kwargs(): no inherited stdin (a frozen build has none
+    # to give), UTF-8 whatever the code page says, and CREATE_NO_WINDOW so the
+    # console build does not flash a black window over the dashboard.
+    kwargs = runtime.subprocess_kwargs()
+    kwargs.pop("stdin", None)
+    proc = subprocess.Popen(
+        child_command(), stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        stdin=subprocess.DEVNULL, text=True, bufsize=1, env=env, **kwargs)
+    stopped = _pump(proc, chunks, on_line, CHILD_TIMEOUT_S, None, cancelled)
+    return "".join(chunks), stopped
 
 
 def main() -> int:
@@ -459,3 +523,7 @@ def main() -> int:
         _print(unsaved)
     _show("".join(parts) + unsaved, path)
     return 0
+
+
+if __name__ == "__main__":                # `python -m pose3d.diagnostics`
+    sys.exit(main())
