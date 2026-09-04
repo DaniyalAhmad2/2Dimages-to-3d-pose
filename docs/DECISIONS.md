@@ -128,3 +128,18 @@ never sees a tag (F42).
   copy, and `check_qt_opengl`'s ImportError path stays fatal. Cost if wrong: a GL fault that is neither a
   missing file nor a failed import reaches the client, where `Pose3D.exe --selftest` is strict and
   `Pose3D-diagnose.exe` prints the answer. See `docs/windows-release-gate.md`.
+- **Tests never reach an OS dialog; every native message box is a seam.** `pose3d.integrity._message_box`
+  is a `MessageBoxW` drawn by Windows rather than by Qt — deliberately, because Qt is exactly what may be
+  unable to start — and the first Windows run of the test suite drew it for real: a test faked a frozen
+  bundle with a file missing, and on a Windows host `runtime.IS_WINDOWS` is True as well, so the suite
+  blocked on a modal dialog for 42 minutes until the job's 45-minute cap cancelled it. The rule is now the
+  same one `pose3d.ui.guard.report_error` has had since the Qt dialogs went in: anything that can draw a
+  window the suite cannot close is a single named function, replaced by an autouse fixture in
+  `tests/conftest.py` for every test whether it asks or not, and the tests assert on what the client would
+  have read. Both fixtures assert their own presence (`test_no_test_can_draw_the_native_message_box`,
+  `test_the_fixture_is_autouse_so_no_test_can_open_a_modal`). Backstop for the next one nobody foresaw:
+  `timeout = 600` in `pyproject.toml` (pytest-timeout), so a blocked test is a traceback in ten minutes
+  rather than a cancelled job that names nothing. Cost if wrong: the product's own dialog is exercised only
+  through the seam, so a fault in the two lines of ctypes below it would be found on the client's machine —
+  which is why `_message_box` is also tested unpatched, both that it is inert outside a frozen app and that
+  it is not inert inside one.
