@@ -12,6 +12,14 @@ jobs:
   test:
     runs-on: windows-latest
     timeout-minutes: 45
+    env:
+      # Qt's offscreen platform plugin on Windows has no font database of its
+      # own: with no directory to load from, every glyph is a box as wide as
+      # the font is tall, and every text-driven size in the suite is fiction
+      # — the screen-fit test measured a 1385 px window minimum this way,
+      # against 1057 with real fonts. Segoe UI lives here, and it is what the
+      # client's copy of the app renders with.
+      QT_QPA_FONTDIR: C:\Windows\Fonts
 
     steps:
       - uses: actions/checkout@v4

@@ -284,6 +284,27 @@ def test_the_fixed_parts_still_fit_a_1366x768_screen_at_150_percent(qapp):
     assert Sidebar().minimumWidth() * 2 < SMALL_SCREEN[0]
 
 
+def _text_metrics_are_real(app) -> tuple[bool, str]:
+    """Whether this platform plugin draws text with real glyphs.
+
+    Qt's offscreen plugin on Windows has no font database unless
+    QT_QPA_FONTDIR names one; every glyph is then a box as wide as the font is
+    tall, "Saved" is 195 px, and every text-driven minimum in the window is
+    fiction — the first Windows run measured 1385 px that way against 1057 with
+    real fonts. windows-test.yml sets the directory; this is the check that it
+    took, and the numbers to read when it did not."""
+    from PySide6.QtGui import QFontDatabase, QFontInfo, QFontMetrics
+
+    metrics = QFontMetrics(app.font())
+    narrow = metrics.horizontalAdvance("iiii")
+    wide = metrics.horizontalAdvance("MMMM")
+    families = len(QFontDatabase.families())
+    detail = (f"{families} font families; app font resolves to "
+              f"{QFontInfo(app.font()).family()!r}; 'iiii' {narrow} px vs "
+              f"'MMMM' {wide} px")
+    return families > 0 and narrow < wide, detail
+
+
 def _minimums(window, wide: int = 180) -> str:
     """The visible widgets whose minimum would hold a window open past a
     laptop's edge: type, objectName, minimumSizeHint, explicit minimumSize —
@@ -329,6 +350,11 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel
 
+    real, fonts = _text_metrics_are_real(qapp)
+    if not real:
+        pytest.skip("no real fonts on this platform plugin, so text-driven "
+                    f"minimums mean nothing here: {fonts}")
+
     monkeypatch.setattr(QScreen, "availableGeometry",
                         lambda self: QRect(0, 0, *CLIENT_SCREEN))
     win = MainWindow(ProjectModel(ProjectData(name="Small_Screen"), None))
@@ -352,7 +378,7 @@ def test_the_window_opens_no_larger_than_the_screen_it_is_on(qapp, monkeypatch):
     # The number alone cannot be acted on from a CI log: the first Windows run
     # said 1385 against 1057 here, and nothing in it said which widget. Name
     # them, every time, so a failure on a runner nobody can sit at is a fix.
-    tree = _minimums(win)
+    tree = f"{fonts}\n{_minimums(win)}"
     assert hint.width() <= CLIENT_SCREEN[0], f"{hint}\n{tree}"
     assert hint.height() <= CLIENT_SCREEN[1], f"{hint}\n{tree}"
     assert win.size().width() <= CLIENT_SCREEN[0], win.size()

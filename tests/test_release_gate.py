@@ -247,6 +247,17 @@ def test_the_windows_test_workflow_still_runs_on_every_pull_request():
     assert "paths" not in triggers
 
 
+def test_the_windows_suite_measures_text_with_real_fonts():
+    """Qt's offscreen platform plugin on Windows has no font database unless
+    QT_QPA_FONTDIR names one: every glyph is then a box as wide as the font
+    is tall, and the screen-fit test measured a 1385 px window minimum that
+    way against 1057 with real fonts. That test skips itself where the fonts
+    are fake, so without this line the Windows run would pass having measured
+    nothing."""
+    job = _runs(_block(_text(TEST_WF), "  test:"))
+    assert re.search(r"QT_QPA_FONTDIR:\s*C:\\Windows\\Fonts", job), job
+
+
 # --- the composite action's own failure modes -------------------------------
 
 def test_every_run_step_in_the_action_names_its_shell():
