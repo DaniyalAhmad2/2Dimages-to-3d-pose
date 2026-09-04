@@ -293,3 +293,91 @@ def test_pre_qt_checks_is_not_reached_by_the_selftest(monkeypatch):
     with pytest.raises(SystemExit):
         app.main()
     assert called == []
+
+
+# --- the diagnose executable, as the client is told to run it ---------------
+
+class _FakeQApp:
+    """A QApplication that never runs an event loop, so a test that reaches
+    the GUI branch fails instead of hanging the suite."""
+
+    def __init__(self, argv):
+        pass
+
+    def exec(self):
+        return 0
+
+    def setStyle(self, _s):
+        pass
+
+    def setPalette(self, _p):
+        pass
+
+    def setStyleSheet(self, _s):
+        pass
+
+
+def _no_gui(monkeypatch):
+    opened = []
+    monkeypatch.setattr(app, "open_project_window", opened.append)
+    monkeypatch.setattr(app, "_pre_qt_checks", lambda: None)
+    monkeypatch.setattr(app, "apply_dark_theme", lambda a: None)
+    monkeypatch.setattr(app, "QApplication", _FakeQApp)
+    return opened
+
+
+def test_the_diagnose_exe_with_no_arguments_writes_the_report(monkeypatch,
+                                                              tmp_path):
+    """README.txt tells the client to double-click `Pose3D-diagnose.exe`, and
+    the whole support workflow is the file it writes. Built from the same
+    script as `Pose3D.exe`, with no arguments it used to fall through to the
+    GUI — in a console window, having diagnosed nothing."""
+    ran = []
+    monkeypatch.setattr("pose3d.diagnostics.main",
+                        lambda: ran.append("diagnose") or 0)
+    monkeypatch.setattr(sys, "argv", ["Pose3D-diagnose"])
+    monkeypatch.setattr(sys, "executable",
+                        str(tmp_path / "Pose3D-diagnose.exe"))
+    opened = _no_gui(monkeypatch)
+
+    with pytest.raises(SystemExit) as e:
+        app.main()
+
+    assert e.value.code == 0
+    assert ran == ["diagnose"]
+    assert opened == [], "the GUI must not start"
+
+
+def test_the_double_clicked_diagnose_exe_keeps_its_window_open(monkeypatch,
+                                                              tmp_path):
+    """A double-clicked console exe closes its window the moment it returns,
+    so the report the client was told to read scrolls past and vanishes."""
+    monkeypatch.setattr("pose3d.diagnostics.main", lambda: 0)
+    monkeypatch.setattr(sys, "argv", ["Pose3D-diagnose"])
+    monkeypatch.setattr(sys, "executable",
+                        str(tmp_path / "Pose3D-diagnose.exe"))
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    _no_gui(monkeypatch)
+    waited = []
+    monkeypatch.setattr("builtins.input", lambda *a: waited.append(a) or "")
+
+    with pytest.raises(SystemExit):
+        app.main()
+
+    assert len(waited) == 1
+
+
+def test_the_ordinary_exe_with_no_arguments_still_starts_the_app(monkeypatch,
+                                                                 tmp_path):
+    """The dispatch is on the executable's own name, and only that."""
+    ran = []
+    monkeypatch.setattr("pose3d.diagnostics.main", lambda: ran.append(1) or 0)
+    monkeypatch.setattr(sys, "argv", ["Pose3D"])
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Pose3D.exe"))
+    opened = _no_gui(monkeypatch)
+
+    with pytest.raises(SystemExit):
+        app.main()
+
+    assert ran == []
+    assert opened == [None]

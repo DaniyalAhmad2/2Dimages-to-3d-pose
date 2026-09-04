@@ -44,6 +44,7 @@ MODEL_BYTES = 1_000_000
 CONTENTS = (
     "Pose3D.exe",
     "Pose3D-diagnose.exe",
+    "Diagnose.cmd",
     "README.txt",
     "_internal/python312.dll",
     "_internal/vcruntime140.dll",

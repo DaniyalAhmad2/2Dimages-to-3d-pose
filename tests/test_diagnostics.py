@@ -209,12 +209,27 @@ def test_diagnose_runs_before_the_bundle_check_that_might_stop_the_app(
 DIAGNOSE_CMD = ROOT / "packaging" / "windows" / "Diagnose.cmd"
 
 
-def test_the_cmd_fallback_runs_the_selftest_and_shows_the_log():
+def test_the_cmd_fallback_runs_the_diagnostics_and_shows_the_log():
+    """`--selftest` is a verdict and writes no file. What the client is asked
+    to send is `pose3d-diagnostics.txt`, and `--diagnose` is the only thing
+    that writes it."""
     text = DIAGNOSE_CMD.read_bytes().decode("ascii")
-    assert "--selftest" in text
+    assert "--diagnose" in text
+    # the prose may explain the difference; no command line may run the other
+    assert '.exe" --selftest' not in text
+    assert "pose3d-diagnostics.txt" in text, "name the file to send"
     assert "pose3d-log.txt" in text, "the windowed exe prints only in there"
     assert "pause" in text, "double-clicked, it must not vanish"
     assert "\r\n" in text, "cmd.exe needs CRLF"
+
+
+def test_the_cmd_fallback_looks_where_the_log_really_is():
+    """`runtime._open_log()` falls back to %LOCALAPPDATA%\\Pose3D whenever the
+    install folder is not writable — which is every install under Program
+    Files, the case the fallback was written for. Printing only the local copy
+    says "no log file" while the log exists."""
+    text = DIAGNOSE_CMD.read_bytes().decode("ascii")
+    assert "%LOCALAPPDATA%\\Pose3D" in text
 
 
 def test_the_cmd_fallback_works_without_the_second_exe():
@@ -222,6 +237,31 @@ def test_the_cmd_fallback_works_without_the_second_exe():
     require it."""
     text = DIAGNOSE_CMD.read_bytes().decode("ascii")
     assert "Pose3D-diagnose.exe" in text and "Pose3D.exe" in text
+
+
+CLIENT_DOCS = (ROOT / "packaging" / "windows" / "README.txt",
+               ROOT / "README.md")
+
+
+def test_the_client_is_told_to_run_the_thing_that_writes_the_report():
+    """The support workflow is only as good as its first instruction. It used
+    to be "double-click Pose3D-diagnose.exe", which with no arguments started
+    the GUI in a console window and wrote nothing."""
+    for doc in CLIENT_DOCS:
+        text = doc.read_text(encoding="utf-8")
+        assert "Diagnose.cmd" in text, doc
+        assert "pose3d-diagnostics.txt" in text, doc
+
+
+def test_the_client_is_told_both_places_the_log_can_be():
+    """`runtime._open_log()` falls back to %LOCALAPPDATA%\\Pose3D when the
+    install folder is not writable, which is every install under Program
+    Files. A doc that names only the folder next to the exe sends the client
+    looking for a file that is somewhere else."""
+    for doc in CLIENT_DOCS:
+        text = doc.read_text(encoding="utf-8")
+        assert "pose3d-log.txt" in text, doc
+        assert "%LOCALAPPDATA%\\Pose3D" in text, doc
 
 
 def test_the_bundle_script_ships_the_fallback():

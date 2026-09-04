@@ -31,7 +31,8 @@ What is in this folder
 ----------------------
 
   Pose3D.exe            the application
-  Pose3D-diagnose.exe   run this if something goes wrong (see below)
+  Diagnose.cmd          run this if something goes wrong (see below)
+  Pose3D-diagnose.exe   what Diagnose.cmd runs; it works on its own too
   _internal\            its libraries — do not move or delete
   blender\              Blender, used to write the BVH/FBX/MP4 exports
   models\               the pose detection models
@@ -58,26 +59,39 @@ accuracy on the right and a frame timeline along the bottom.
 If something goes wrong
 -----------------------
 
-Double-click Pose3D-diagnose.exe.
+Double-click Diagnose.cmd.
 
-It runs the same checks this build was verified with before it shipped — the
-libraries, Blender, the character rig, the pose models, OpenGL — and says
-which one is wrong. It writes everything it found to
+It runs Pose3D-diagnose.exe --diagnose and then prints the log, in a window
+that waits for you at the end. Between them they cover the same checks this
+build was verified with before it shipped — the libraries, Blender, the
+character rig, the pose models, OpenGL — and say which one is wrong.
+
+Everything found is written to
 
   pose3d-diagnostics.txt
 
-next to the .exe. Send that one file over: it names which files the bundle
-found, where it looked and what your machine reported, which is almost always
-enough to answer the question without a round of "what happens if you...".
+Send that one file over: it names which files the bundle found, where it
+looked and what your machine reported, which is almost always enough to
+answer the question without a round of "what happens if you...".
 
-(It prints into a console window, which Windows may close again as soon as it
-finishes. That is fine — the file is what matters.)
+Double-clicking Pose3D-diagnose.exe does the same diagnosis on its own (it
+needs no arguments) and holds its console window open at the end; Diagnose.cmd
+is the one to reach for because it also prints the log, and it still says
+something useful when the .exe itself will not run.
 
 If the app got as far as opening, one more file is worth sending with it:
 
-  pose3d-log.txt         written next to Pose3D.exe whenever the app runs.
-                         Crashes and library errors go here, because a
+  pose3d-log.txt         crashes and library errors go here, because a
                          windowed application has no console to print to.
+
+Both files are written next to Pose3D.exe when that folder can be written to.
+When it cannot — an install under "Program Files" is the usual case — they go
+to
+
+  %LOCALAPPDATA%\Pose3D\
+
+instead. Paste that into the File Explorer address bar to open it; the
+diagnostics report names the exact path it used, at the top.
 
 Three things worth checking first:
 
