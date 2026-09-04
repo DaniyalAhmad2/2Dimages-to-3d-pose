@@ -19,6 +19,7 @@ try/except that logs and lets the app start.
 """
 import json
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -27,6 +28,42 @@ from pose3d import app, integrity, runtime
 from tests.test_bundle_layout import MODEL_BYTES, fake_bundle
 
 ROOT = Path(__file__).resolve().parent.parent
+
+#: The real `_message_box`, bound before tests/conftest.py's autouse
+#: `shown_message_boxes` fixture rebinds the module attribute. The two tests
+#: that check the guard INSIDE the function have to call the unpatched one —
+#: the same trick, for the same reason, as `report_error` in test_guard.py.
+_real_message_box = integrity._message_box
+
+
+class _Reached(BaseException):
+    """Raised where the real function would reach into ctypes.
+
+    Deliberately not an `Exception`: `_message_box` swallows those on purpose
+    ("a dialog is a bonus"), so an AssertionError raised inside it would be
+    caught and a test asserting nothing would pass.
+    """
+
+
+def _exploding_ctypes():
+    """A ctypes stand-in whose `windll` — the door to the dialog — cannot be
+    opened quietly.
+
+    A real module object, and only that one name explodes. `import ctypes`
+    reads `__spec__` off whatever is in `sys.modules`, and pytest's traceback
+    machinery reads `__file__` off every module it walks, so a stand-in that
+    answered everything with an exception would take the run down instead of
+    failing the test.
+    """
+    module = types.ModuleType("ctypes")
+
+    def missing(name):
+        if name == "windll":
+            raise _Reached("ctypes.windll was reached")
+        raise AttributeError(name)
+
+    module.__getattr__ = missing
+    return module
 
 
 @pytest.fixture
@@ -156,6 +193,63 @@ def test_a_broken_bundle_is_explained_on_stderr_and_stops(monkeypatch, bundle,
     assert exc.value.code == 1
     err = capsys.readouterr().err
     assert "blender.exe" in err and "antivirus" in err.lower()
+
+
+# --- the native box, which no test may ever actually draw -------------------
+
+def test_no_test_can_draw_the_native_message_box():
+    """The Windows suite stopped here for 42 minutes and was killed by the
+    job's 45-minute cap. The test above fakes a frozen bundle, and on a real
+    Windows host `runtime.IS_WINDOWS` is True as well — so the product drew
+    its native MessageBoxW on a runner where nobody can press OK. Every test
+    that reaches `run_startup_check()` with problems has that hazard, so the
+    replacement is autouse in tests/conftest.py rather than opt-in here: the
+    same protection `recorded_errors` already gives the Qt dialog.
+    """
+    assert integrity._message_box is not _real_message_box, (
+        "tests/conftest.py's autouse shown_message_boxes fixture is not in "
+        "place; a Windows run of this suite would block on a modal dialog")
+
+
+def test_a_broken_bundle_says_the_same_thing_in_the_box_as_in_the_log(
+        monkeypatch, bundle, capsys, shown_message_boxes):
+    """Two channels, one text. The windowed build has no console, so the box
+    is the only thing the client who double-clicked the exe will ever see;
+    stderr is the copy they can send us. A box that said less than the log
+    would send them back to us for what the log already answered."""
+    frozen(monkeypatch, bundle)
+    (bundle / "blender/blender.exe").unlink()
+
+    with pytest.raises(SystemExit) as exc:
+        integrity.run_startup_check()
+
+    assert exc.value.code == 1, "a broken bundle still stops the launch"
+    err = capsys.readouterr().err
+    assert shown_message_boxes == [err.rstrip("\n")]
+
+
+def test_the_native_box_is_inert_outside_a_frozen_app(monkeypatch):
+    """The real function, with the fixture's recorder out of the way: from a
+    checkout it must not so much as import ctypes, whatever the platform. This
+    is what makes a developer's `python -m pose3d.app` on Windows safe, and
+    what the autouse fixture above stands in for on a frozen fake."""
+    monkeypatch.setitem(sys.modules, "ctypes", _exploding_ctypes())
+    monkeypatch.setattr(runtime, "IS_WINDOWS", True)
+    monkeypatch.setattr(runtime, "IS_FROZEN", False)
+
+    assert _real_message_box("anything at all") is None
+
+
+def test_the_native_box_is_what_the_frozen_windows_app_draws(monkeypatch):
+    """...and the guard above is a guard, not dead code: with both flags set,
+    the same call does reach ctypes. Without this the inertness test would
+    pass just as well on a function that had stopped drawing anything."""
+    monkeypatch.setitem(sys.modules, "ctypes", _exploding_ctypes())
+    monkeypatch.setattr(runtime, "IS_WINDOWS", True)
+    monkeypatch.setattr(runtime, "IS_FROZEN", True)
+
+    with pytest.raises(_Reached, match="windll"):
+        _real_message_box("files are missing")
 
 
 def test_a_broken_checker_can_never_brick_a_healthy_bundle(monkeypatch,

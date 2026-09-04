@@ -25,6 +25,30 @@ def recorded_errors(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def shown_message_boxes(monkeypatch):
+    """Every native OS message box the app would draw, recorded as its text.
+
+    `pose3d.integrity._message_box` is a `MessageBoxW` drawn by Windows, not
+    by Qt — deliberately, because Qt is exactly what may be unable to start.
+    That makes it a second modal dialog the suite can park in front of a CI
+    job, and one `recorded_errors` above cannot reach. It cost 42 minutes of a
+    Windows run and the job's 45-minute cap: a test faked a frozen bundle with
+    files missing, and on a real Windows host `runtime.IS_WINDOWS` is True as
+    well, so the box was drawn for a runner with nobody to press OK.
+
+    Replaced here for every test, asked for or not, because the hazard belongs
+    to every test that reaches `run_startup_check()` with something to report
+    — including ones that reach it through `pose3d.app._pre_qt_checks` — and
+    not to the file that happens to test the module. Ask for it by name to
+    assert on what the client would have read.
+    """
+    shown: list[str] = []
+    from pose3d import integrity
+    monkeypatch.setattr(integrity, "_message_box", shown.append)
+    yield shown
+
+
+@pytest.fixture(autouse=True)
 def closed_windows():
     """Destroy each test's windows while Qt is still able to do it properly.
 
