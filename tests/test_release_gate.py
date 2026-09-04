@@ -20,6 +20,9 @@ and `uv sync --frozen` on the Windows runner installs the lockfile and nothing
 else, so a test that imported it would skip on the one machine that matters.
 The helpers below slice the file on indentation, which is enough to ask "which
 step is this" and "is there a `paths:` under `pull_request:`".
+
+`pyproject.toml` is the exception, and parsed properly: `tomllib` is in the
+standard library, so it is there on that machine too.
 """
 import json
 import re

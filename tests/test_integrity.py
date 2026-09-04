@@ -230,9 +230,10 @@ def test_a_broken_bundle_says_the_same_thing_in_the_box_as_in_the_log(
 
 def test_the_native_box_is_inert_outside_a_frozen_app(monkeypatch):
     """The real function, with the fixture's recorder out of the way: from a
-    checkout it must not so much as import ctypes, whatever the platform. This
-    is what makes a developer's `python -m pose3d.app` on Windows safe, and
-    what the autouse fixture above stands in for on a frozen fake."""
+    checkout it never reaches `ctypes.windll`, whatever the platform says.
+    That is what makes a developer's `python -m pose3d.app` on Windows safe —
+    and what does NOT hold once a test fakes `IS_FROZEN`, which is why the
+    autouse fixture in tests/conftest.py exists."""
     monkeypatch.setitem(sys.modules, "ctypes", _exploding_ctypes())
     monkeypatch.setattr(runtime, "IS_WINDOWS", True)
     monkeypatch.setattr(runtime, "IS_FROZEN", False)
