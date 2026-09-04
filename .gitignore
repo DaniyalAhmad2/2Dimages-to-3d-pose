@@ -45,3 +45,5 @@ workspace/
 # Capture data / exports produced while testing (client data, large)
 assets/*
 !assets/checkerboard.md
+pose3d-diagnostics.txt
+pose3d-log.txt
