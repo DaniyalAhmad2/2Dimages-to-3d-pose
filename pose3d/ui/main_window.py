@@ -732,7 +732,17 @@ class MainWindow(QMainWindow):
                                     keep_root_motion=True,
                                     schedule="one_per_pose",
                                     allow_fallback=False, on_line=on_line,
-                                    cancelled=cancelled)
+                                    cancelled=cancelled,
+                                    # No overall deadline from here. This is
+                                    # two full EEVEE passes over every
+                                    # keyframe on the client's laptop, and ten
+                                    # minutes is an ordinary duration for it;
+                                    # a cap would destroy a legitimate render
+                                    # with nothing written. What stops a hung
+                                    # one is the idle deadline, and what stops
+                                    # a slow one is the user, through a Cancel
+                                    # button that now really does kill Blender.
+                                    timeout=None, idle_timeout=300)
 
         # Cancel really does stop it now: the export polls `cancelled` and
         # kills the Blender child, which is why the button is here at all.

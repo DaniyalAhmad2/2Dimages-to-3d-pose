@@ -139,11 +139,17 @@ def test_the_launch_defaults_are_unchanged_for_todays_callers(tmp_path,
                                                               monkeypatch):
     """`idle_timeout` and `cancelled` are new keyword parameters: a caller
     that passes neither — the self-test, the demo builder, the smoke tests —
-    must go on getting exactly what it got before."""
+    must go on getting exactly what it got before.
+
+    `idle_timeout=None` is what that means. A non-None default is a kill
+    condition no caller had: an FBX bake or one heavy EEVEE frame that says
+    nothing for five minutes used to finish, and would now be killed. The
+    callers that want the deadline ask for it (the GUI export, the
+    self-test), which is the whole of the difference."""
     import inspect
 
     sig = inspect.signature(blender_export.export_animation)
-    assert sig.parameters["idle_timeout"].default == 300.0
+    assert sig.parameters["idle_timeout"].default is None
     assert sig.parameters["cancelled"].default is None
     assert sig.parameters["timeout"].default == 600
 
@@ -159,3 +165,4 @@ def test_the_launch_defaults_are_unchanged_for_todays_callers(tmp_path,
 def test_a_stopped_export_says_which_way_it_was_stopped(reason):
     """Both reasons carry a sentence of their own; neither is a bare errno."""
     assert reason in blender_export.FAILURE_MESSAGES
+

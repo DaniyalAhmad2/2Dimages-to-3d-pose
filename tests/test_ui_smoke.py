@@ -1288,3 +1288,39 @@ def test_the_long_phases_are_handed_values_read_on_the_gui_thread(
 
     assert seen["name"] == "Imported_Session"
     assert seen["marker_length"] == 0.05
+
+
+def test_the_gui_export_has_no_overall_deadline_and_asks_for_the_idle_one(
+        qapp, tmp_path, monkeypatch):
+    """The client's export renders two full EEVEE passes over every keyframe
+    on a laptop; ten minutes is an ordinary duration for that. Before this
+    branch the overall deadline was inoperative on the GUI path (`p.wait`
+    only ran after EOF), so the rewrite's enforced 600 s was a new way to
+    destroy a legitimate long render, with nothing written and no way to ask
+    for more time. The guards that stay are the working Cancel button and the
+    idle deadline, which is the one that can tell a hung Blender from a slow
+    one."""
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(filedialog, "existing_directory", lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+    seen = {}
+
+    def fake_export(poses, out_dir, **kw):
+        seen.update(kw)
+        return blender_export._failure("blender_cancelled", "Cancelled.", 125)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+    data, rig, gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    win._on_export()
+
+    assert seen["timeout"] is None, "the GUI export must not be capped"
+    assert seen["idle_timeout"] == 300
+    assert seen["cancelled"] is not None, "Cancel is the guard that replaces it"

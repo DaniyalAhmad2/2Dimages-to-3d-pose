@@ -491,7 +491,7 @@ def export_animation(
     schedule: str = "one_per_pose",
     camera=None,
     allow_fallback: bool = False,
-    idle_timeout: float = 300.0,
+    idle_timeout: float | None = None,
     cancelled=None,
 ) -> ExportResult:
     """Write BVH + FBX (+ mp4) for a take, by posing the bundled character.
@@ -520,6 +520,13 @@ def export_animation(
     while Blender runs so the user can stop it. Any of the three kills the
     child and reaps it before returning `blender_timeout` / `blender_cancelled`
     — the export used to promise "and was stopped" while nothing had been.
+
+    Both deadlines default to what today's callers already had: `timeout=600`
+    as before, and `idle_timeout=None`, because an idle deadline is a kill
+    condition NO caller had. An FBX bake or a single heavy EEVEE frame can say
+    nothing for five minutes and still be working. The callers that want it
+    ask for it — the GUI export (`idle_timeout=300, timeout=None`, where the
+    Cancel button is the real guard) and the self-test.
     """
     requested_bundled = character == "__bundled__"
     if requested_bundled:

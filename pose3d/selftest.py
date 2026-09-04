@@ -467,8 +467,13 @@ def _export(render_video: bool, timeout: int):
     moved = _POSE.copy()
     moved[int(Joint.LEFT_WRIST)] = [-0.30, 0.0, 1.75]
     out = Path(tempfile.mkdtemp(prefix="pose3d-selftest-"))
+    # The self-test opts into the idle deadline on purpose: on a CI runner or
+    # a client machine with no GL driver, a Blender that says nothing at all
+    # is the failure being looked for, and the overall deadline alone would
+    # hold the whole report up for its full length.
     res = export_animation(np.stack([_POSE, moved]), out, name="selftest",
-                           fps=24, render_video=render_video, timeout=timeout)
+                           fps=24, render_video=render_video, timeout=timeout,
+                           idle_timeout=300)
     sizes = {e: (out / f"selftest.{e}").stat().st_size
              for e in ("bvh", "fbx", "mp4") if (out / f"selftest.{e}").exists()}
     return res, sizes
