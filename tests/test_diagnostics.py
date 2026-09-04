@@ -9,6 +9,7 @@ anything: it answers those questions, and it never fails to be produced.
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -297,31 +298,39 @@ def test_help_diagnostics_is_in_the_menu(qapp):
 def test_help_diagnostics_writes_the_report_and_shows_it(qapp, monkeypatch,
                                                          tmp_path):
     shown = []
-    monkeypatch.setattr(diagnostics, "report", lambda: "REPORT")
+    monkeypatch.setattr(diagnostics, "run_in_child",
+                        lambda on_line=None, cancelled=None: ("REPORT", ""))
+    monkeypatch.setattr(diagnostics, "show_report",
+                        lambda parent, text, path: shown.append((text, path)))
+    monkeypatch.setattr("pose3d.runtime.log_path",
+                        lambda: tmp_path / "pose3d-log.txt")
+    # the child writes the file, as `--diagnose` does; this stands in for it
+    (tmp_path / "pose3d-diagnostics.txt").write_text("REPORT", encoding="utf-8")
+    win = _window(qapp)
+    _diagnostics_action(win).trigger()
+    assert shown == [("REPORT", tmp_path / "pose3d-diagnostics.txt")]
+
+
+def test_a_report_that_could_not_be_saved_still_reaches_the_user(
+        qapp, monkeypatch, tmp_path, recorded_errors):
+    """A read-only install is itself half the diagnosis, and the report says
+    so in its own text (the child writes "this report could not be saved").
+    What must not happen is a dialog pointing at a file that is not there."""
+    shown = []
+    monkeypatch.setattr(
+        diagnostics, "run_in_child",
+        lambda on_line=None, cancelled=None: (
+            "REPORT\n(this report could not be saved: OSError: Access is "
+            "denied)\n", ""))
     monkeypatch.setattr(diagnostics, "show_report",
                         lambda parent, text, path: shown.append((text, path)))
     monkeypatch.setattr("pose3d.runtime.log_path",
                         lambda: tmp_path / "pose3d-log.txt")
     win = _window(qapp)
     _diagnostics_action(win).trigger()
-    assert shown == [("REPORT", tmp_path / "pose3d-diagnostics.txt")]
-    assert (tmp_path / "pose3d-diagnostics.txt").exists()
-
-
-def test_a_report_that_cannot_be_saved_still_reaches_the_user(
-        qapp, monkeypatch, recorded_errors):
-    shown = []
-    monkeypatch.setattr(diagnostics, "report", lambda: "REPORT")
-    monkeypatch.setattr(diagnostics, "show_report",
-                        lambda parent, text, path: shown.append((text, path)))
-    monkeypatch.setattr(diagnostics, "write_report",
-                        lambda *a, **k: (_ for _ in ()).throw(
-                            OSError("Access is denied")))
-    win = _window(qapp)
-    _diagnostics_action(win).trigger()
-    assert shown == [("REPORT", None)]
-    assert recorded_errors, "the save failure is worth saying out loud"
-    assert "Access is denied" in recorded_errors[0][1]
+    assert len(shown) == 1
+    assert "Access is denied" in shown[0][0]
+    assert shown[0][1] is None, "no path is better than one that is not there"
 
 
 # --- a Qt that cannot start ------------------------------------------------
@@ -418,3 +427,136 @@ def test_a_qt_that_cannot_start_does_not_take_the_report_with_it(tmp_path):
     assert "nosuchplatform" in written, "it says why there is no OpenGL line"
     assert "stubbed for the test" in written, "the transcript still got there"
     assert written in res.stdout, "and the console has it too"
+
+
+# --- Help > Diagnostics runs somewhere else --------------------------------
+#
+# `diagnostics.report()` starts a real Blender export (timeout 600) and, on a
+# machine with dead GL, a software-GL child (timeout 300) — up to a quarter of
+# an hour of "Not Responding" on the one code path a client reaches when
+# something is already wrong. And `check_qt_opengl` builds a View3D, shows it
+# and calls processEvents twice, which from inside the live app is a stray
+# window over the dashboard and every slot re-entered from the middle of this
+# one. It belongs in a process of its own.
+
+def test_the_child_command_is_the_diagnose_exe_when_frozen(monkeypatch,
+                                                           tmp_path):
+    exe = tmp_path / "Pose3D-diagnose.exe"
+    exe.write_text("", encoding="utf-8")
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    monkeypatch.setattr(sys, "executable", str(tmp_path / "Pose3D.exe"))
+
+    assert diagnostics.child_command() == [str(exe), "--diagnose"]
+
+
+def test_the_child_command_is_the_module_from_source(monkeypatch):
+    monkeypatch.delattr(sys, "frozen", raising=False)
+
+    assert diagnostics.child_command() == [sys.executable, "-m",
+                                           "pose3d.diagnostics"]
+
+
+def _fake_child(tmp_path, body: str) -> list[str]:
+    script = tmp_path / "child.py"
+    script.write_text(body, encoding="utf-8")
+    return [sys.executable, str(script)]
+
+
+def test_the_report_comes_back_from_the_child_line_by_line(monkeypatch,
+                                                           tmp_path):
+    monkeypatch.setattr(
+        diagnostics, "child_command",
+        lambda: _fake_child(tmp_path,
+                            "print('Pose3D diagnostics')\nprint('OpenGL: ok')\n"))
+    lines = []
+
+    text, stopped = diagnostics.run_in_child(on_line=lines.append)
+
+    assert stopped == ""
+    assert "Pose3D diagnostics" in text and "OpenGL: ok" in text
+    assert lines == ["Pose3D diagnostics", "OpenGL: ok"]
+
+
+def test_cancelling_the_diagnostics_kills_the_child_and_reaps_it(monkeypatch,
+                                                                 tmp_path):
+    """The Cancel button has to end the process, not orphan it: this is the
+    child that launches Blender."""
+    monkeypatch.setattr(
+        diagnostics, "child_command",
+        lambda: _fake_child(tmp_path,
+                            "import time\nprint('starting', flush=True)\n"
+                            "time.sleep(120)\n"))
+    procs = []
+    real_popen = diagnostics.subprocess.Popen
+    monkeypatch.setattr(diagnostics.subprocess, "Popen",
+                        lambda *a, **k: procs.append(real_popen(*a, **k))
+                        or procs[-1])
+    started = time.monotonic()
+
+    text, stopped = diagnostics.run_in_child(cancelled=lambda: True)
+
+    assert stopped == "cancelled"
+    assert time.monotonic() - started < 20
+    assert procs and procs[0].returncode is not None, "the child was orphaned"
+
+
+def test_the_child_is_told_not_to_open_a_dialog_of_its_own(monkeypatch,
+                                                           tmp_path):
+    """`--diagnose` ends by showing the report in a Qt dialog. From a child of
+    the running app that is a second window nobody asked for, in a process
+    whose only job is to write the text back."""
+    monkeypatch.setattr(
+        diagnostics, "child_command",
+        lambda: _fake_child(tmp_path,
+                            "import os\nprint(os.environ.get('POSE3D_NO_DIALOG'))\n"))
+
+    text, stopped = diagnostics.run_in_child()
+
+    assert text.strip() == "1"
+
+
+def test_the_dialog_is_skipped_when_the_parent_says_so(monkeypatch):
+    shown = []
+    monkeypatch.setattr(diagnostics, "show_report",
+                        lambda *a, **k: shown.append(a))
+    monkeypatch.setenv("POSE3D_NO_DIALOG", "1")
+
+    diagnostics._show("REPORT", None)
+
+    assert shown == []
+
+
+def test_help_diagnostics_runs_a_child_and_never_the_checks_here(
+        qapp, monkeypatch, tmp_path):
+    """Nothing GL-related, and no Blender, in the process holding the window."""
+    win = _window(qapp)
+
+    def refuse():
+        raise AssertionError("the checks must not run in the GUI process")
+
+    monkeypatch.setattr(diagnostics, "report", refuse)
+    monkeypatch.setattr(diagnostics, "run_in_child",
+                        lambda on_line=None, cancelled=None: ("REPORT\n", ""))
+    shown = []
+    monkeypatch.setattr(diagnostics, "show_report",
+                        lambda parent, text, path=None: shown.append((text, path)))
+
+    win._on_diagnostics()
+
+    assert shown and shown[0][0] == "REPORT\n"
+
+
+def test_a_cancelled_diagnostics_run_says_nothing_and_shows_nothing(
+        qapp, monkeypatch, recorded_errors):
+    win = _window(qapp)
+    monkeypatch.setattr(diagnostics, "run_in_child",
+                        lambda on_line=None, cancelled=None: ("half a\n",
+                                                              "cancelled"))
+    shown = []
+    monkeypatch.setattr(diagnostics, "show_report",
+                        lambda *a, **k: shown.append(a))
+
+    win._on_diagnostics()
+
+    assert shown == []
+    assert recorded_errors == []

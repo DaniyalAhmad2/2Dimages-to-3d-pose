@@ -483,33 +483,46 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_diagnostics(self):
-        """Help > Diagnostics. The same report `--diagnose` writes.
+        """Help > Diagnostics. The same report `--diagnose` writes — from a
+        process of its own.
 
-        It runs on the GUI thread and takes a few seconds — it starts Blender
-        and one detection — so it wears the wait cursor rather than a progress
-        dialog: half of what it reports is Qt's own state, and none of it can
-        be gathered from a worker thread that may not create widgets.
+        It used to run here, under a wait cursor. What it runs is a real
+        Blender export (deadline: ten minutes) and, on a machine whose GL is
+        dead, a software-GL child (five more), and its Qt check builds a
+        View3D, shows it and pumps the event loop twice. In the live app that
+        is a quarter of an hour of "Not Responding", a stray 320x240 window
+        over the dashboard, and every slot re-entered from the middle of this
+        one — the exact failures this window was rebuilt to remove,
+        reintroduced by the feature added to diagnose them, on the one path a
+        client reaches when something is already wrong.
+
+        So it goes through `run_job` like every other long thing: off the GUI
+        thread, with a Cancel that kills the child, and nothing GL-related in
+        this process at all.
         """
-        from PySide6.QtCore import Qt
-        from PySide6.QtWidgets import QApplication
-
         from pose3d import diagnostics
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            text = diagnostics.report()
-        finally:
-            QApplication.restoreOverrideCursor()
-        path = None
-        try:
-            path = diagnostics.write_report(text=text)
-        except OSError as e:
-            # Not fatal, and worth saying: it is usually the install being
-            # read-only, which is itself half the diagnosis.
-            guard.report_error(
-                self, "The diagnostics report could not be saved",
-                f"{type(e).__name__}: {e}\n\nThe report itself is below — "
-                "use Copy and paste it into an email.")
-        diagnostics.show_report(self, text, path)
+
+        def job(report, cancelled):
+            report(0, 0, "Running the diagnostics…")
+
+            def on_line(line):
+                if line.strip():
+                    report(0, 0, line.strip()[:120])
+
+            text, stopped = diagnostics.run_in_child(on_line=on_line,
+                                                     cancelled=cancelled)
+            if stopped == "cancelled":
+                raise Cancelled()
+            return text
+
+        text = run_job(self, "Diagnostics", job)
+        if isinstance(text, Exception):
+            return                       # cancelled, or already reported
+        # The child writes the file itself, as `--diagnose` does; naming it
+        # only when it is really there keeps the dialog from pointing at a
+        # path a read-only install refused to create.
+        path = diagnostics.default_path()
+        diagnostics.show_report(self, text, path if path.exists() else None)
 
     @guarded
     def _on_redetect_head(self):
