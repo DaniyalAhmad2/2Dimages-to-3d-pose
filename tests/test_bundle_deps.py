@@ -57,9 +57,12 @@ def test_what_loads_first_cannot_reach_into_a_subfolder():
 
 def test_windows_own_dlls_are_not_expected_in_the_bundle():
     """Redistributing kernel32 is neither possible nor desirable."""
+    # ucrtbase.dll used to be on this list. It is exactly the file a client's
+    # Windows turned out not to have in working order, so it is bundled and
+    # audited now (test_the_universal_c_runtime_is_not_treated_as_system_provided_either).
     imports = [("_internal/python312.dll", d)
                for d in ("KERNEL32.dll", "ADVAPI32.dll", "WS2_32.dll",
-                         "VERSION.dll", "bcrypt.dll", "ucrtbase.dll")]
+                         "VERSION.dll", "bcrypt.dll")]
     assert deps.unresolved(imports, ["python312.dll"]) == []
 
 
@@ -96,6 +99,19 @@ def test_the_visual_cpp_runtime_is_never_treated_as_system_provided():
     for dll in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll",
                 "concrt140.dll", "msvcr90.dll", "msvcr100.dll"):
         assert not deps.is_system_dll(dll)
+
+
+def test_the_universal_c_runtime_is_not_treated_as_system_provided_either():
+    """It was, as "shipped with Windows 10" — and a client's Windows turned out
+    not to have it in working order, so python312.dll would not load. The
+    bundle carries it now, and the audit demands it like the VC runtime. The
+    OS API sets (api-ms-win-core-*, ...) stay Windows': the loader resolves
+    them from the schema baked into the OS, no file needed."""
+    assert not deps.is_system_dll("ucrtbase.dll")
+    assert not deps.is_system_dll("api-ms-win-crt-runtime-l1-1-0.dll")
+    assert not deps.is_system_dll("API-MS-WIN-CRT-HEAP-L1-1-0.DLL")
+    assert deps.is_system_dll("api-ms-win-core-file-l1-1-0.dll")
+    assert deps.is_system_dll("api-ms-win-core-synch-l1-2-0.dll")
 
 
 def test_a_bundle_without_internal_is_rejected(tmp_path):
@@ -156,6 +172,10 @@ def test_the_release_gate_runs_the_audit_before_the_self_test():
 # --- the spec's Windows-only additions, evaluated ---------------------------
 
 VC_RUNTIME = ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+# a stand-in for the Universal C Runtime the spec now bundles: ucrtbase plus
+# a few of the ~15 api-ms-win-crt-* forwarders (the real set is globbed)
+UCRT_FAKE = ("ucrtbase.dll", "api-ms-win-crt-runtime-l1-1-0.dll",
+             "api-ms-win-crt-heap-l1-1-0.dll", "api-ms-win-crt-string-l1-1-0.dll")
 
 
 def _is_pe(entry):
@@ -225,7 +245,7 @@ def _eval_spec(hook_datas=()):
     return a
 
 
-def _as_windows(monkeypatch, interpreter_dir):
+def _as_windows(monkeypatch, interpreter_dir, ucrt: bool = True):
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(sys, "executable", str(interpreter_dir / "python.exe"))
     monkeypatch.setattr(sys, "base_prefix", str(interpreter_dir / "base"))
@@ -233,6 +253,14 @@ def _as_windows(monkeypatch, interpreter_dir):
     monkeypatch.delenv("ProgramFiles", raising=False)
     monkeypatch.delenv("ProgramFiles(x86)", raising=False)
     monkeypatch.setenv("SystemRoot", str(interpreter_dir / "no-such-windows"))
+    # The Universal C Runtime the spec bundles, faked in this fake Windows's
+    # System32 — the VC runtime is NOT put there, so the VC tests above still
+    # prove nothing is found by falling back to System32 for it.
+    if ucrt:
+        system32 = interpreter_dir / "no-such-windows" / "System32"
+        system32.mkdir(parents=True, exist_ok=True)
+        for name in UCRT_FAKE:
+            (system32 / name).write_bytes(b"")
 
 
 def _as_linux(monkeypatch):
@@ -305,7 +333,7 @@ def test_the_windows_build_bundles_the_runtime_beside_the_interpreter(
     for name in VC_RUNTIME:
         (tmp_path / name).write_bytes(b"")
     bundled = _eval_spec().binaries
-    assert {Path(src).name for src, _ in bundled} == set(VC_RUNTIME)
+    assert {Path(src).name for src, _ in bundled} == set(VC_RUNTIME) | set(UCRT_FAKE)
     assert {dest for _, dest in bundled} == {"."}, "must land in _internal/"
 
 
@@ -320,7 +348,24 @@ def test_the_windows_build_falls_back_to_the_base_interpreter(
     base.mkdir()
     for name in VC_RUNTIME:
         (base / name).write_bytes(b"")
-    assert {Path(src).parent for src, _ in _eval_spec().binaries} == {base}
+    vc = [src for src, _ in _eval_spec().binaries if Path(src).name in VC_RUNTIME]
+    assert {Path(src).parent for src in vc} == {base}
+
+
+@pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,
+                    reason="PyInstaller is a dev dependency")
+def test_a_windows_build_without_the_universal_c_runtime_stops(monkeypatch,
+                                                              tmp_path):
+    """The other half of the C runtime. A build machine without the Windows
+    SDK redist would build a bundle that loads here and dies on a client whose
+    Windows lacks the UCRT — the python312.dll dialog — so the build stops."""
+    _as_windows(monkeypatch, tmp_path, ucrt=False)
+    for name in VC_RUNTIME:
+        (tmp_path / name).write_bytes(b"")
+    with pytest.raises(SystemExit) as exc:
+        _eval_spec()
+    assert "ucrtbase.dll" in str(exc.value)
+    assert "api-ms-win-crt" in str(exc.value)
 
 
 @pytest.mark.skipif(importlib.util.find_spec("PyInstaller") is None,

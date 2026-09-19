@@ -50,6 +50,11 @@ CONTENTS = (
     "_internal/vcruntime140.dll",
     "_internal/vcruntime140_1.dll",
     "_internal/msvcp140.dll",
+    "_internal/ucrtbase.dll",
+    *(f"_internal/api-ms-win-crt-{n}-l1-1-0.dll" for n in (
+        "conio", "convert", "environment", "filesystem", "heap", "locale",
+        "math", "multibyte", "private", "process", "runtime", "stdio",
+        "string", "time", "utility")),
     "_internal/PySide6/opengl32sw.dll",
     "_internal/PySide6/plugins/platforms/qwindows.dll",
     "_internal/PySide6/plugins/imageformats/qjpeg.dll",

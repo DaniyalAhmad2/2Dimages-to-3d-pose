@@ -143,3 +143,21 @@ never sees a tag (F42).
   through the seam, so a fault in the two lines of ctypes below it would be found on the client's machine —
   which is why `_message_box` is also tested unpatched, both that it is inert outside a frozen app and that
   it is not inert inside one.
+
+
+## The Universal C Runtime ships in the bundle (2026-09-20)
+
+The bundle audit classed `ucrtbase.dll` and the `api-ms-win-crt-*` forwarders as "provided by
+Windows 10". A client followed the extraction instructions exactly — a complete folder, straight
+on `C:` — and still got *"Failed to load Python DLL … python312.dll … The specified module could not
+be found"*. That dialog names the file whose *dependency* is missing, and the only dependencies of
+`python312.dll` not in `_internal\` were the UCRT; their Windows did not have it in working order.
+Ruling: bundle it, from the Windows SDK redist Microsoft ships for this purpose (`pose3d.spec
+ucrt()`, System32 as fallback, build stops if neither has it); the audit treats `api-ms-win-crt-*`
+and `ucrtbase.dll` like the VC runtime (must be bundled) while the OS API sets stay Windows'; the
+manifest requires both at the `bootloader` stage; and `Diagnose.cmd` checks every bootloader-stage
+file in plain cmd before it runs the diagnose exe — which is a Python program and dies with the
+same dialog, so it could never have reported this. Cost if wrong: about 1 MB and fifteen small
+DLLs, and a bundled UCRT older than the client's is what PyInstaller shipped for years. The
+one-click `vc_redist.x64.exe` stays documented as the last resort for a complete folder that
+still fails, because it repairs the system copies too.

@@ -185,11 +185,18 @@ quarantines a file out of `_internal\` because the build is unsigned. Check the
 quarantine list; `Pose3D-diagnose.exe` names the missing file.
 
 **"Failed to load Python DLL ... `_internal\python312.dll`. LoadLibrary: The
-specified module could not be found."** A file is missing from `_internal\`.
-Extract the `.zip` again to a short path on `C:` — `C:\Pose3D` — rather than
-Downloads, Documents or anywhere OneDrive syncs, where "files on-demand" can
-leave placeholders instead of real files, and check the anti-virus quarantine
-for anything from `_internal\`. Only if it still fails, install the
+specified module could not be found."** Despite the wording, this is what
+Windows says when a file that `python312.dll` *depends on* is missing — and
+every one of those now ships inside `_internal\`: the Visual C++ runtime and,
+since build 17, the Universal C Runtime (`ucrtbase.dll` + `api-ms-win-crt-*`),
+which a client's Windows turned out not to have in working order. So it means
+a file is missing from the extracted folder. **Double-click `Diagnose.cmd`**:
+it checks those files in plain cmd, before any Python runs, and names the one
+that is missing or empty. Usual causes: the extraction stopped early, the
+anti-virus quarantined something from `_internal\`, or the folder is under
+OneDrive ("files on-demand" placeholders). Extract again to `C:\Pose3D`; if
+the zip was downloaded, right-click it → Properties → **Unblock** first. Only
+if a *complete* folder still fails, install the
 [Microsoft Visual C++ Redistributable (x64)](https://aka.ms/vs/17/release/vc_redist.x64.exe).
 
 **Export fails, or the app says a folder is read-only.** Export somewhere you

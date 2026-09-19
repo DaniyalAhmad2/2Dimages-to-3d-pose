@@ -65,6 +65,22 @@
       "why": "the C++ standard library half of the Visual C++ runtime; onnxruntime and OpenCV link against it directly"
     },
     {
+      "pattern": "_internal/ucrtbase.dll",
+      "kind": "required",
+      "min_count": 1,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the Universal C Runtime that python312.dll and the Visual C++ runtime import; a client's Windows had it missing or damaged and python312.dll failed to load with 'the specified module could not be found' naming the wrong file, so it ships here instead of being assumed"
+    },
+    {
+      "pattern": "_internal/api-ms-win-crt-*.dll",
+      "kind": "required",
+      "min_count": 12,
+      "min_size": 1,
+      "stage": "bootloader",
+      "why": "the UCRT forwarder DLLs (api-ms-win-crt-runtime, -heap, -string, -stdio, ... about 15) that resolve to ucrtbase.dll; python312.dll imports them by these exact names, so they have to be beside it"
+    },
+    {
       "pattern": "_internal/PySide6/plugins/platforms/qwindows.dll",
       "kind": "required",
       "min_count": 1,

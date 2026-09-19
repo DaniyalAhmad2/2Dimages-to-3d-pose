@@ -560,3 +560,21 @@ def test_a_cancelled_diagnostics_run_says_nothing_and_shows_nothing(
 
     assert shown == []
     assert recorded_errors == []
+
+
+def test_diagnose_cmd_checks_the_bootloader_files_without_any_python():
+    """`Pose3D-diagnose.exe` is a Python program: when python312.dll will not
+    load it dies with the very dialog it was asked to explain. So the batch
+    file checks the files Windows loads BEFORE any Python — the interpreter,
+    both halves of the C runtime — by itself, in pure cmd, and says which one
+    is missing or empty. That has to come before it tries the exe."""
+    text = DIAGNOSE_CMD.read_text(encoding="utf-8")
+    before_exe = text.split('"Pose3D-diagnose.exe" --diagnose', 1)[0]
+    for name in ("_internal\\python312.dll", "_internal\\vcruntime140.dll",
+                 "_internal\\vcruntime140_1.dll", "_internal\\msvcp140.dll",
+                 "_internal\\ucrtbase.dll", "api-ms-win-crt-"):
+        assert name in before_exe, f"{name} is not checked before the exe runs"
+    assert ":need" in text and "MISSING" in text and "EMPTY" in text
+    # the two causes that are the machine's, not the folder's
+    assert "Zone.Identifier" in before_exe, "Mark of the Web is not detected"
+    assert "AMD64" in before_exe, "a 32-bit Windows is not detected"

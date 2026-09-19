@@ -115,6 +115,48 @@ def vc_runtime():
     return found
 
 
+# The Universal C Runtime: ucrtbase.dll and the api-ms-win-crt-*.dll
+# forwarders that python312.dll, the Visual C++ runtime, onnxruntime and
+# OpenCV import by name. Windows 10 ships it — and "Windows ships it" is the
+# assumption that failed on a client machine: the DLL audit classed it as
+# provided by Windows, the client's Windows had it missing or damaged, and
+# python312.dll would not load: "Failed to load Python DLL ... python312.dll.
+# LoadLibrary: The specified module could not be found" — naming the file
+# whose DEPENDENCY was missing, which is what that error always means. So it
+# ships in the bundle, like the VC runtime already does. Microsoft
+# redistributes it for exactly this (Windows Kits\10\Redist\...\ucrt),
+# PyInstaller shipped it for years, and a copy beside python312.dll is found
+# on the DLL search path before System32 is consulted.
+def _ucrt_dirs():
+    """Where to look, redistributable copy first."""
+    for var in ("ProgramFiles(x86)", "ProgramFiles"):
+        root = os.environ.get(var)
+        if root:
+            kits = Path(root) / "Windows Kits" / "10" / "Redist"
+            # newer SDKs version the folder (Redist\10.0.22621.0\ucrt\...),
+            # older ones do not (Redist\ucrt\...); newest first
+            yield from sorted(kits.glob("*/ucrt/DLLs/x64"), reverse=True)
+            yield kits / "ucrt" / "DLLs" / "x64"
+    yield Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
+
+
+def ucrt():
+    """ucrtbase.dll and every api-ms-win-crt-*.dll, as `binaries` pairs."""
+    for folder in _ucrt_dirs():
+        base = folder / "ucrtbase.dll"
+        forwarders = sorted(folder.glob("api-ms-win-crt-*.dll"))
+        if base.is_file() and forwarders:
+            return [(str(p), ".") for p in (base, *forwarders)]
+    raise SystemExit(
+        "pose3d.spec: cannot find the Universal C Runtime (ucrtbase.dll and "
+        "the api-ms-win-crt-*.dll forwarders).\n"
+        "Looked in the Windows SDK redist (Windows Kits\\10\\Redist\\..."
+        "\\ucrt\\DLLs\\x64) and in System32. The bundle would launch here "
+        "and fail on a client machine whose Windows lacks or has damaged the "
+        "UCRT — the python312.dll failure — so stop here instead.\n"
+        "Install the Windows 10 SDK (any version) on the build machine.")
+
+
 hiddenimports = [
     "OpenGL",
     "pyqtgraph.opengl",
@@ -140,7 +182,7 @@ if not IS_WINDOWS:
 a = Analysis(
     ["pose3d/app.py"],
     pathex=["."],
-    binaries=vc_runtime() if IS_WINDOWS else [],
+    binaries=(vc_runtime() + ucrt()) if IS_WINDOWS else [],
     datas=datas,
     hiddenimports=hiddenimports,
     # PyInstaller >= 6.5 refuses to bundle two Qt bindings at once, and pulling

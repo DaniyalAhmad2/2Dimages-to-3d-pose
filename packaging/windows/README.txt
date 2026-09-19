@@ -104,13 +104,20 @@ Three things worth checking first:
   worked, that is the usual cause.
 
 * "Failed to load Python DLL ... _internal\python312.dll. LoadLibrary: The
-  specified module could not be found." means a file is missing from
-  _internal\, not that anything is wrong with your Windows.
+  specified module could not be found." Despite the wording, Windows says this
+  when a file python312.dll DEPENDS ON is missing - and every one of those is
+  inside _internal\ (the Visual C++ runtime and the Universal C Runtime), so
+  it means a file is missing from your extracted folder, not that anything is
+  wrong with your Windows.
 
-  Extract the .zip again to a short path on your C: drive (C:\Pose3D), not
-  Downloads, Documents or anywhere under OneDrive, and check your anti-virus
-  quarantine for files from _internal\.
+  Double-click Diagnose.cmd: it checks those files before any Python runs and
+  names the one that is missing or empty.
 
-  Only if that does not fix it, install the Microsoft Visual C++
+  Usual causes: the extraction stopped early, your anti-virus removed a file
+  (Windows Security > Protection history, and restore it), or the folder is
+  under OneDrive. Extract the .zip again to C:\Pose3D. If the .zip came from
+  a download, right-click it > Properties > tick Unblock > OK, first.
+
+  Only if a complete folder still fails, install the Microsoft Visual C++
   Redistributable (x64) from Microsoft:
   https://aka.ms/vs/17/release/vc_redist.x64.exe

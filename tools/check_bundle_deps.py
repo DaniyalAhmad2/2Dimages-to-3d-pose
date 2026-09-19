@@ -48,9 +48,11 @@ SYSTEM_DLLS = frozenset({
     "ncrypt.dll", "netapi32.dll", "ntdll.dll", "ole32.dll", "oleaut32.dll",
     "opengl32.dll", "propsys.dll", "psapi.dll", "rpcrt4.dll", "secur32.dll",
     "setupapi.dll", "shell32.dll", "shlwapi.dll",
-    # ucrtbase.dll is the universal CRT, shipped with Windows 10 and serviced
-    # by Windows Update. PyInstaller bundles a copy as well; either resolves.
-    "ucrtbase.dll",
+    # NOT ucrtbase.dll. It is "shipped with Windows 10" — and that assumption
+    # is exactly how a client's copy failed: their Windows lacked or had
+    # damaged the Universal C Runtime, python312.dll could not load, and the
+    # dialog named python312.dll. The UCRT is bundled now (pose3d.spec
+    # `ucrt()`) and audited like the Visual C++ runtime; see UCRT_PREFIX.
     "uiautomationcore.dll", "user32.dll", "userenv.dll", "uxtheme.dll",
     "version.dll", "winhttp.dll", "wintrust.dll", "winmm.dll", "ws2_32.dll",
     "wsock32.dll", "wtsapi32.dll",
@@ -66,6 +68,13 @@ SYSTEM_DLLS = frozenset({
 # drivers.
 SYSTEM_PREFIXES = ("api-ms-win-", "ext-ms-", "d3dcompiler_")
 
+# ...except the C-runtime API sets. api-ms-win-crt-*.dll are the Universal C
+# Runtime's forwarders to ucrtbase.dll — a redistributable Microsoft ships in
+# the Windows SDK precisely because a machine may not have them, and the names
+# python312.dll imports. They have to be in the bundle beside ucrtbase.dll;
+# this prefix is checked before the OS-API-set prefixes above.
+UCRT_PREFIX = "api-ms-win-crt-"
+
 BINARY_SUFFIXES = (".dll", ".pyd", ".exe")
 
 # The only directories on the DLL search path when the bootloader starts. What
@@ -78,6 +87,8 @@ SEARCH_ROOTS = ("", "_internal")
 def is_system_dll(name: str) -> bool:
     """Is `name` provided by Windows itself?"""
     low = name.lower()
+    if low.startswith(UCRT_PREFIX):
+        return False                    # bundled, like the VC runtime
     return low in SYSTEM_DLLS or low.startswith(SYSTEM_PREFIXES)
 
 
