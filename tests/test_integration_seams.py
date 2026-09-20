@@ -106,3 +106,52 @@ def test_the_3d_joints_are_actually_drawn_in_those_colours(qapp, tmp_path):
     row = int(np.flatnonzero(drawn == j["corrected"])[0])
     assert np.allclose(colors[row], _status_rgba("corrected"))
     assert RAG_COLORS["corrected"].name() != RAG_COLORS["green"].name()
+
+
+# --------------------------------------------------------------------------
+# Seam 2 — T2 and T4 each wrote the joint-status rule
+# --------------------------------------------------------------------------
+
+def test_the_camera_view_asks_the_shared_joint_status_rule(qapp, monkeypatch):
+    """Two copies of the rule is the defect, not two copies that agree today.
+
+    `camera_view._joint_status` (T2) and `panels.joint_status` (T4) stated the
+    same five-clause order independently. They agree on every input as merged,
+    which is exactly why nothing would catch the next edit to one of them —
+    and "the two panels disagree about which joints are flagged" is the
+    client's own complaint. So this pins the CALL: the camera view must get
+    its band from the shared function, not from a copy that matches it.
+    """
+    from pose3d.ui import camera_view as cv
+
+    monkeypatch.setattr(cv, "joint_status", lambda *a, **k: "corrected")
+    panel = cv.CameraPanel("LEFT VIEW", CAM_LEFT)
+    panel.view.set_pose(np.zeros((NUM_JOINTS, 2)), np.ones(NUM_JOINTS))
+    panel.set_accuracy(np.full(NUM_JOINTS, 0.001), None, None)
+
+    assert panel.view._joint_status(0)[0] == "corrected"
+
+
+@pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
+@pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
+@pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),
+                                              (False, True), (True, True)])
+def test_both_panels_band_a_joint_the_same_way(state, err, filled, corrected):
+    """…and the answer itself is unchanged for every combination."""
+    from pose3d.ui.panels import joint_status
+    from pose3d.ui.model import (
+        STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED)
+
+    states = {"ok": STATE_OK, "rejected": STATE_REJECTED,
+              "not_measured": STATE_NOT_MEASURED}
+    got = joint_status(states[state], err, filled, corrected)
+    if corrected:
+        assert got == "corrected"
+    elif filled:
+        assert got == "filled"
+    elif state == "rejected":
+        assert got == "rejected"
+    elif state == "not_measured" or not np.isfinite(err):
+        assert got == "unmeasured"
+    else:
+        assert got in ("green", "amber", "red")
