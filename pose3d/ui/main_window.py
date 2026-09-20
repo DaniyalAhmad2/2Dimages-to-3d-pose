@@ -622,11 +622,25 @@ class MainWindow(QMainWindow):
                                                      cancelled=cancelled)
             if stopped == "cancelled":
                 raise Cancelled()
-            return text
+            return text, stopped
 
-        text = self._run_job("Diagnostics", job)
-        if isinstance(text, Exception):
+        res = self._run_job("Diagnostics", job)
+        if isinstance(res, Exception):
             return                       # cancelled, or already reported
+        text, stopped = res
+        if stopped == "timeout":
+            # `run_in_child` has three outcomes and only "cancelled" was read,
+            # so a child killed at its 20-minute deadline had its half-written
+            # transcript shown — and saved — exactly like a complete one. The
+            # difference is the one fact that would redirect the whole
+            # investigation: a machine where the self-test genuinely stops at
+            # a section, versus one too slow to reach the rest.
+            text = ("*** THIS REPORT IS INCOMPLETE ***\n"
+                    "The diagnostics run was stopped at its deadline, so it "
+                    "breaks off part-way through. What is below is as far as "
+                    "it got; the sections after that were never run. Taking "
+                    "this long is itself worth telling us about. The saved "
+                    "file holds the same partial report.\n\n" + text)
         # The child writes the file itself, as `--diagnose` does; naming it
         # only when it is really there keeps the dialog from pointing at a
         # path a read-only install refused to create.
