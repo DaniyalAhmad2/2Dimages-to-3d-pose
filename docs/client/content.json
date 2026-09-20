@@ -10,7 +10,7 @@
           "Open the releases page: https://github.com/DaniyalAhmad2/2Dimages-to-3d-pose/releases  — and under the **newest release** at the top, open the **Assets** section and download **Pose3D-Windows.zip** (about 720 MB).",
           "Before extracting, right-click the downloaded zip → **Properties** → tick **Unblock** → **OK**. Windows tags downloaded files, and some security settings refuse to load program files that carry the tag.",
           "Extract the whole zip to a short folder directly on your C: drive, for example **C:\\Pose3D**. Right-click the file, choose **Extract All**, type that folder as the destination, and wait until it finishes completely.",
-          "Do not run the app from inside the zip, do not put it in Program Files, and avoid Desktop or Documents if OneDrive is syncing them.",
+          "Do not run the app from inside the zip, do not put it in Program Files, and do not put it on the Desktop or in Documents — those are the folders OneDrive syncs, and its \"files on-demand\" can leave empty placeholders where the app's own files should be.",
           "Double-click **Pose3D.exe**. The first time, Windows shows a blue screen that says \"Windows protected your PC\". Click **More info**, then **Run anyway**. This appears for any app that is not code-signed. It is not a virus warning, and you only see it once."
         ] },
         { "p": "There is nothing else to install, and the app does not need an internet connection." }

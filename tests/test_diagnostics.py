@@ -306,22 +306,30 @@ def test_both_install_instructions_name_the_same_short_path():
         assert "C:\\Pose3D" in _install_steps(doc), doc
 
 
-def test_neither_document_recommends_the_folders_that_break_it():
-    """Desktop and Documents are the two folders OneDrive syncs by default,
-    where "files on-demand" leaves placeholder stubs instead of the real DLLs.
-    Naming them is fine — as the folders to avoid."""
+def _recommends_a_onedrive_folder(line: str) -> bool:
+    """True if this line points the client AT Desktop or Documents.
+
+    Naming them is fine — as the folders to keep out of. What is checked is
+    the few words immediately in front of the name, not the whole line: "some-
+    where writable — Desktop or Documents, not Program Files" carries a "not"
+    and still sends the client to the folder that breaks the app.
+    """
     import re
 
+    hit = re.search(r"(?<!Docker )\bDesktop\b|\bDocuments\b", line)
+    if not hit:
+        return False
+    before = line[max(0, hit.start() - 40):hit.start()]
+    return not re.search(r"avoid|\bnot\b|never|instead of|out of", before, re.I)
+
+
+def test_neither_document_recommends_the_folders_that_break_it():
+    """Desktop and Documents are the two folders OneDrive syncs by default,
+    where "files on-demand" leaves placeholder stubs instead of the real
+    DLLs."""
     for doc in CLIENT_DOCS:
         for line in doc.read_text(encoding="utf-8").splitlines():
-            hit = re.search(r"(?<!Docker )\bDesktop\b|\bDocuments\b", line)
-            if not hit:
-                continue
-            # the warning has to come first: "somewhere writable — Desktop or
-            # Documents, not Program Files" has a "not" in it and still sends
-            # the client to the folder that breaks the app
-            assert re.search(r"avoid|\bnot\b|never|instead of", line[:hit.start()],
-                             re.I), \
+            assert not _recommends_a_onedrive_folder(line), \
                 f"{doc.name}: reads as a recommendation — {line.strip()!r}"
 
 
@@ -403,8 +411,16 @@ def test_the_guide_does_not_pin_the_download_to_one_build():
     assert "build-17" not in text
 
 
-def test_the_guide_still_tells_him_to_unblock_the_download():
-    assert "Unblock" in _guide_text()
+def test_the_guide_gives_the_same_install_steps_as_the_two_readmes():
+    """Three documents reach the client — this one, `README.md` and the
+    `README.txt` in the zip — and the launch failure came out of two of them
+    disagreeing. Unblock, then `C:\\Pose3D`, then the exe, in all three."""
+    text = _guide_text()
+    order = [text.find(s) for s in ("Unblock", "C:\\Pose3D", "Pose3D.exe")]
+    assert -1 not in order, f"a step is missing {order}"
+    assert order == sorted(order), f"steps out of order {order}"
+    for line in text.splitlines():
+        assert not _recommends_a_onedrive_folder(line), line
 
 
 #: Every problem the client raised, and the phrase the release note answers it
