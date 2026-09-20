@@ -254,6 +254,139 @@ def test_a_normally_sized_export_adds_no_note(qapp, tmp_path, monkeypatch):
     assert "could not be sized" not in body
 
 
+# --------------------------------------------------------------------------
+# Seam 5 — one unreadable photo still took the whole import down
+# --------------------------------------------------------------------------
+
+class _FlatDetector:
+    """A detector that answers the same pose for any image it is given."""
+    head_source = "nose"
+    keypoint_model = "coco17"
+    provenance = "flat-stub"
+
+    def detect(self, image_bgr):
+        from pose3d.detect.base import Detection
+        from pose3d.core.skeleton import NUM_HEAD_KP
+        xy = np.tile(np.array([10.0, 20.0]), (NUM_JOINTS, 1))
+        return Detection(xy=xy, scores=np.ones(NUM_JOINTS),
+                         head_xy=np.tile(np.array([11.0, 21.0]),
+                                         (NUM_HEAD_KP, 1)),
+                         head_scores=np.ones(NUM_HEAD_KP))
+
+
+def _photo_pairs(tmp_path, n=4, blank_pair=2, blank_cam="left"):
+    """`n` real image pairs on disk, one photo of which is a 0-byte file.
+
+    The OneDrive online-only placeholder: the file exists, the copy succeeds,
+    and every reader gets nothing.
+    """
+    import cv2
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    lefts, rights = [], []
+    img = np.full((48, 64, 3), 120, np.uint8)
+    for i in range(n):
+        lp, rp = tmp_path / f"l{i}.png", tmp_path / f"r{i}.png"
+        cv2.imwrite(str(lp), img)
+        cv2.imwrite(str(rp), img)
+        lefts.append(lp); rights.append(rp)
+    (lefts if blank_cam == "left" else rights)[blank_pair].write_bytes(b"")
+    return [str(p) for p in lefts], [str(p) for p in rights]
+
+
+def test_an_unreadable_photo_does_not_abort_the_whole_import(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    """CONFIRMED CRITICAL by T4's reviewer, and only visible end to end.
+
+    T4 taught the CALIBRATION to skip a pair it cannot read. Detection still
+    raised `ImageReadError` on the same file, the dialog's outer handler
+    caught it, and the import ended with "Import failed" and nothing written —
+    after the copy, after the calibration, on a take whose other pairs were
+    all fine. A 0-byte OneDrive placeholder is the client's own case.
+    """
+    from PySide6.QtWidgets import QMessageBox
+    from pose3d.ui import import_dialog
+
+    lefts, rights = _photo_pairs(tmp_path / "src")
+    monkeypatch.setattr(import_dialog, "run_job",
+                        lambda parent, title, fn, cancellable=True:
+                        fn(lambda *a, **k: None, lambda: False))
+    monkeypatch.setattr(QMessageBox, "warning",
+                        staticmethod(lambda *a, **k:
+                                     QMessageBox.StandardButton.Yes))
+    shown = []
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: shown.append(a[2])))
+
+    out = tmp_path / "projects"
+    dlg = import_dialog.ImportDialog(projects_root=str(out))
+    dlg._detector = _FlatDetector()
+    dlg.left_pick.paths = lefts
+    dlg.right_pick.paths = rights
+    dlg.out_pick.paths = [str(out)]
+    dlg.name.setText("Placeholder_Take")
+    dlg._process()
+
+    assert recorded_errors == [], recorded_errors
+    assert dlg.result_folder, "the import wrote nothing"
+    from pose3d.core.io_project import load_project
+    project = load_project(dlg.result_folder)
+    assert len(project.frames) == 4
+
+    # the three readable pairs were detected in both views...
+    for i in (0, 1, 3):
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            assert np.isfinite(project.frames[i].kp2d[cam]).all()
+    # ...and the one that could not be read is MISSING, not invented
+    assert np.isnan(project.frames[2].kp2d[CAM_LEFT]).all()
+    assert np.isfinite(project.frames[2].kp2d[CAM_RIGHT]).all()
+
+    # and the user is told which pair it was
+    assert shown, "the import summary was never shown"
+    assert project.frames[2].frame_id in shown[-1]
+
+
+def test_detect_project_records_the_pairs_it_could_not_read(tmp_path):
+    """The pipeline half of the same fact, asked directly: a skip is recorded
+    in the shape the calibration records one, so the caller has a reason to
+    show and not just a hole in the data."""
+    from pose3d.core.importer import build_project
+    from pose3d.imageio import read_image
+    from pose3d.pipeline import detect_project
+
+    lefts, rights = _photo_pairs(tmp_path / "src")
+    project = build_project(lefts, rights, name="t",
+                            copy_into=tmp_path / "proj")
+    skipped = []
+    detect_project(project, _FlatDetector(), read_image, skipped=skipped)
+
+    assert [s["camera"] for s in skipped] == [CAM_LEFT]
+    assert skipped[0]["frame"] == project.frames[2].frame_id
+    assert "0 bytes" in skipped[0]["reason"]
+
+
+def test_a_loader_that_returns_none_is_skipped_by_detection_too(tmp_path):
+    """`cv2.imread` answers None where `read_image` raises, and the tools and
+    `pose3d.quality` still pass a plain `cv2.imread`."""
+    import cv2
+    from pose3d.core.importer import build_project
+    from pose3d.pipeline import detect_project
+
+    lefts, rights = _photo_pairs(tmp_path / "src", blank_pair=0)
+    project = build_project(lefts, rights, name="t",
+                            copy_into=tmp_path / "proj")
+    bad = project.frames[1].images[CAM_RIGHT]
+
+    def loader(path):
+        return None if str(path) == str(bad) else cv2.imread(str(path))
+
+    skipped = []
+    detect_project(project, _FlatDetector(), loader, skipped=skipped)
+
+    assert {(s["frame"], s["camera"]) for s in skipped} == {
+        (project.frames[0].frame_id, CAM_LEFT),
+        (project.frames[1].frame_id, CAM_RIGHT)}
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),

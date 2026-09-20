@@ -30,7 +30,8 @@ from pose3d.calib.extrinsics import (
 )
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
-from pose3d.pipeline import CalibratedRig
+from pose3d.pipeline import (
+    CalibratedRig, _frame_order, read_frame_image, summarise_unreadable)
 
 # ArUco dictionaries to try, most likely first (the client's tags are 6x6).
 _DICT_NAMES = [
@@ -273,40 +274,15 @@ def _approx_intrinsics(image: np.ndarray) -> Intrinsics:
 # --------------------------------------------------------------------------
 # tag observations
 # --------------------------------------------------------------------------
-def _read_frame_image(frame, cam, load_image, skipped=None):
-    """This frame's image for `cam`, or None with the reason recorded.
-
-    A photo that cannot be read costs its own PAIR and nothing else. It used
-    to cost the take: `pose3d.imageio.read_image` raises `ImageReadError`
-    where `cv2.imread` returned None — 0-byte OneDrive placeholders being the
-    case it was written for — and the `is None` skip below was left over from
-    the old reader, so one bad file in 26 pairs aborted the whole import.
-
-    Every failure of the injected loader is caught, not just `ImageReadError`:
-    the loader is a parameter (the GUI passes `read_image`, the tools pass
-    `cv2.imread`, tests pass doubles), and a frame is the unit of loss
-    whatever it raises. `frame.images.get(cam)` returning None is the same
-    kind of accident and used to be worse — `read_image(None)` dies in
-    `Path(None)` with a TypeError that names nothing.
-    """
-    path = frame.images.get(cam)
-
-    def note(reason):
-        if skipped is not None:
-            skipped.append({"frame": frame.frame_id, "camera": cam,
-                            "reason": reason})
-
-    if path is None:
-        note("this frame has no photo for that camera")
-        return None
-    try:
-        img = load_image(path)
-    except Exception as e:
-        note(str(e) or f"{type(e).__name__}")
-        return None
-    if img is None:
-        note(f"'{path}' could not be read")
-    return img
+#: This frame's image for `cam`, or None with the reason recorded.
+#:
+#: THE rule for every pass over a take's photographs, and it lives in
+#: `pipeline` because two passes each having their own is what the import
+#: broke on: the calibration skipped a 0-byte OneDrive placeholder and the
+#: detection right after it raised on the same file, so the import ended with
+#: "Import failed" and nothing written. Imported under the old private name
+#: so this module's own callers below read unchanged.
+_read_frame_image = read_frame_image
 
 
 def first_readable_pair(project: ProjectData, load_image, skipped=None):
@@ -330,27 +306,15 @@ def first_readable_pair(project: ProjectData, load_image, skipped=None):
     return None
 
 
-def _frame_order(frame_id):
-    """Sort key for frame ids: numerically when they are numbers.
-
-    The ids the importer writes are zero-padded ("0007"), where lexicographic
-    and numeric order agree — but a project whose frames are named "9" and
-    "10" would be listed 10 before 9, in a sentence whose whole job is to let
-    the user find the photo.
-    """
-    s = str(frame_id)
-    return (0, int(s), "") if s.isdigit() else (1, 0, s)
-
-
 def summarise_skipped(skipped) -> str:
-    """One sentence naming the pairs a calibration could not read."""
-    if not skipped:
-        return ""
-    frames = sorted({s["frame"] for s in skipped}, key=_frame_order)
-    shown = ", ".join(frames[:5]) + (", …" if len(frames) > 5 else "")
-    return (f" {len(frames)} image pair(s) were skipped because a photo could "
-            f"not be read ({shown}); the calibration used the rest. "
-            f"The first was: {skipped[0]['reason']}")
+    """One sentence naming the pairs a calibration could not read.
+
+    Appended to a message that is already a sentence, hence the leading
+    space. The naming itself is `pipeline.summarise_unreadable`, shared with
+    the detection, which skips the same photos for the same reason.
+    """
+    note = summarise_unreadable(skipped, "the calibration used the rest")
+    return f" {note}" if note else ""
 
 
 def detect_all_tags(project: ProjectData, load_image, dictionaries=None,
