@@ -434,6 +434,10 @@ def test_an_undetected_body_joint_is_a_placeholder_never_a_measurement():
     measurement. The rest of the old rule stands: the toggle still only hides
     and un-hides, and a frame that DOES see the joint draws it normally.
     """
+    # locally, like every other Qt import here: this module is collected on
+    # machines where PySide6 is not installed
+    from PySide6.QtCore import Qt
+
     p = _face_panel()
     xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
     scores = np.full(NUM_JOINTS, 0.9)
@@ -454,6 +458,11 @@ def test_an_undetected_body_joint_is_a_placeholder_never_a_measurement():
     p.view.set_show_joints(True)
     assert item.is_placeholder, \
         "the joints toggle turned a placeholder into an ordinary dot"
+    # and it still LOOKS like one. The flag is what the code reads; the
+    # dashes are what the user reads, and the whole point of the old rule is
+    # that a resurrected dot must never pass for a measurement.
+    assert item.pen().style() == Qt.PenStyle.DashLine
+    assert item.brush().style() == Qt.BrushStyle.NoBrush
     assert all(p.view._joints[j].isVisible() for j in range(NUM_JOINTS)), \
         "the toggle failed to bring the joints back"
 
@@ -463,6 +472,7 @@ def test_an_undetected_body_joint_is_a_placeholder_never_a_measurement():
                             (1, 2)) * 10 + 5, scores)
     assert p.view._joints[gone].isVisible()
     assert not p.view._joints[gone].is_placeholder
+    assert p.view._joints[gone].pen().style() == Qt.PenStyle.SolidLine
 
 
 def test_frame_change_delivers_head3d_to_the_3d_view():
