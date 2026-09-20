@@ -498,10 +498,16 @@ def test_the_release_note_answers_every_complaint_the_client_made():
         assert phrase in text, complaint
 
 
-def test_the_release_note_leaves_the_build_number_for_the_build():
-    """The build that carries these fixes does not exist yet; a number written
-    here before it is published is a number that will be wrong."""
-    assert "[build NN]" in RELEASE_NOTES.read_text(encoding="utf-8")
+#: The GitHub release the note describes. Bump it with every resubmission, so
+#: a note that still names the previous build fails here before it is sent.
+RELEASE_BUILD = "build-18"
+
+
+def test_the_release_note_names_the_build_that_carries_it():
+    """A note that names the wrong build sends the client to the wrong zip."""
+    text = RELEASE_NOTES.read_text(encoding="utf-8")
+    assert "[build NN]" not in text
+    assert text.splitlines()[0].endswith(RELEASE_BUILD)
 
 
 def test_the_bundle_script_ships_the_fallback():

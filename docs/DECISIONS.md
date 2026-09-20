@@ -192,6 +192,11 @@ against the delivered behaviour once they merge:
   heights, not the single lowest frame**, so one bad ankle cannot push the whole character down
   through the floor or bob it against the ground. Cost if wrong: a take genuinely captured off
   the ground sits at a small constant offset, visible and correctable.
+- **Ruling: a photograph that cannot be read costs its pair, never the import.** Calibration
+  skips the pair and says so; detection keeps the frame with that view marked missing (no 2D
+  points for it) so the other view and the rest of the take are untouched; the import summary
+  names the pair. Cost if wrong: a frame with one view missing shows red joints the client can
+  place by hand.
 - **Ruling: "Calibrated (with problems)" is to be reworded, and one warning suppressed.** The
   nominal-up warning is not to be shown while the recorded vertical is in use — it is a statement
   about a fallback that did not happen — and the other two are to be reworded in plain language

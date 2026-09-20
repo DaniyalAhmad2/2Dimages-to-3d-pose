@@ -1,4 +1,4 @@
-# Pose3D — what changed in [build NN]
+# Pose3D — what changed in build-18
 
 Everything you reported is answered below: what you said, what changed, and the
 quickest way to check it for yourself. Nothing here needs a technical step.
@@ -34,9 +34,11 @@ me `pose3d-diagnostics.txt`. It names the exact file that is missing.
 - **"Leaning further forward than my character."** The forward lean is gone;
   the character stands as the figure in your photographs stands. *Check: a
   side-on pose, compared with the photograph beside it.*
-- **"Clipping below zero on the Z axis."** The character's feet sit on the
-  floor instead of sinking through it, and it no longer bobs against the floor
-  between frames. *Check: any standing pose, viewed from the side.*
+- **"Clipping below zero on the Z axis."** The character stands on the grid
+  whenever both feet are down instead of sinking through it, and one badly
+  detected ankle can no longer push the whole take underground. When the
+  figure jumps or kicks, the character leaves the floor as the figure does.
+  *Check: any standing pose, viewed from the side.*
 - **"The neck and head are bent down in the image but upright in the preview."**
   The head and neck now follow the photographs. *Check: the bent-forward pose
   you sent.*
@@ -56,8 +58,10 @@ me `pose3d-diagnostics.txt`. It names the exact file that is missing.
   step through the frames, in both camera views and the 3D view. *Check: press
   left and right.*
 - **Joints the detector could not find.** A missing joint now appears as a
-  hollow handle you can drag into place instead of simply not being there.
-  *Check: a frame where an arm is hidden.*
+  red dashed handle you can drag into place instead of simply not being there,
+  and the 3D view colours every joint the same way the photographs do (green
+  seen, amber unsure, red missing, purple corrected). *Check: a frame where an
+  arm is hidden.*
 - **Corrections that vanished.** Your corrections are saved with the project
   and are still there when you reopen it, including after the 3D is
   recalculated. *Check: correct a joint, close the app, open the project
