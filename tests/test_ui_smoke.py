@@ -1279,19 +1279,98 @@ def test_the_long_phases_are_handed_values_read_on_the_gui_thread(
 
     dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
     dlg.name.setText("Imported_Session")
-    dlg.marker.setValue(0.05)
+    dlg.marker.setValue(5.0)                    # centimetres, as the box says
     dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
     dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
     dlg._process()
 
     # the user (or a repaint) changes the widgets while the job is running
     dlg.name.setText("CHANGED")
-    dlg.marker.setValue(0.25)
+    dlg.marker.setValue(25.0)
     for title in ("Importing images", "Resolving calibration"):
         jobs[title](lambda *a: None, lambda: False)   # what the thread runs
 
     assert seen["name"] == "Imported_Session"
     assert seen["marker_length"] == 0.05
+
+
+# --- the marker size box: what the client types, in the unit he measures in -
+#
+# The box used to be metres (suffix " m", range 0.005-2.0, default 0.05) while
+# every document we sent said "measure the black square with a ruler and type
+# that number", recommending 8-10 cm tags. Typing 8 was silently clamped to
+# the maximum, 2.000 m: the whole metric scale then 25x too large, with
+# nothing on screen connecting it back to the box.
+
+
+def _import_dialog_with_captured_phases(tmp_path, monkeypatch):
+    """The dialog, plus the job functions and the kwargs its phases were
+    handed — the capture pattern above, reused."""
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT, Frame, ProjectData
+    from pose3d.ui import import_dialog
+    from pose3d.ui.worker import Cancelled
+
+    jobs, seen = {}, {}
+
+    def capturing_run_job(parent, title, fn, cancellable=True):
+        jobs[title] = fn
+        if title == "Importing images":
+            return ProjectData(name="snapshot", fps=30,
+                               calibration_ref="calibration",
+                               frames=[Frame(frame_id="0001",
+                                             images={CAM_LEFT: "l.jpg",
+                                                     CAM_RIGHT: "r.jpg"})])
+        return Cancelled()
+
+    monkeypatch.setattr(import_dialog, "run_job", capturing_run_job)
+    monkeypatch.setattr(import_dialog, "build_project",
+                        lambda left, right, **kw: seen.update(kw))
+    monkeypatch.setattr(import_dialog, "resolve_calibration",
+                        lambda project, reader, **kw: seen.update(kw))
+
+    dlg = import_dialog.ImportDialog(projects_root=str(tmp_path))
+    dlg.left_pick.paths = [str(tmp_path / "l.jpg")]
+    dlg.right_pick.paths = [str(tmp_path / "r.jpg")]
+    return dlg, jobs, seen
+
+
+def test_the_marker_size_box_is_centimetres(qapp, tmp_path, monkeypatch):
+    """Client-facing unit: the brief says "5cm x 5cm Aruco markers", the guide
+    says to measure the black square with a ruler, and a ruler reads
+    centimetres."""
+    dlg, _, _ = _import_dialog_with_captured_phases(tmp_path, monkeypatch)
+
+    assert dlg.marker.suffix() == " cm"
+    assert dlg.marker.value() == pytest.approx(5.00)
+    assert dlg.marker.decimals() == 2
+    assert dlg.marker.minimum() == pytest.approx(0.5)
+    assert dlg.marker.maximum() == pytest.approx(200.0)
+
+
+def test_the_marker_size_the_client_types_reaches_the_solver_in_metres(
+        qapp, tmp_path, monkeypatch):
+    """8 in the box is an 8 cm tag — 0.08 m everywhere below the dialog, so
+    `project.json` and the calibration report keep the metres they always
+    held."""
+    dlg, jobs, seen = _import_dialog_with_captured_phases(tmp_path, monkeypatch)
+
+    dlg.marker.setValue(8.0)               # the client's 8 cm tag
+    dlg._process()
+    jobs["Resolving calibration"](lambda *a: None, lambda: False)
+
+    assert seen["marker_length"] == pytest.approx(0.08)
+
+
+def test_the_marker_size_says_which_square_to_measure(qapp, tmp_path,
+                                                      monkeypatch):
+    """Which square: the black one, edge to edge — not the white quiet zone
+    around it, which is the other thing a ruler lands on."""
+    from PySide6.QtWidgets import QLabel
+
+    dlg, _, _ = _import_dialog_with_captured_phases(tmp_path, monkeypatch)
+
+    hints = [w.text() for w in dlg.findChildren(QLabel)]
+    assert any("black square" in h and "edge to edge" in h for h in hints), hints
 
 
 def test_the_gui_export_has_no_overall_deadline_and_asks_for_the_idle_one(
