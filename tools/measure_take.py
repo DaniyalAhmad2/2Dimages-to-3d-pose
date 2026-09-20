@@ -169,10 +169,12 @@ def markdown(q: TakeQuality, title: str) -> str:
         A(f"| {role} | {_f(v['median_deg'], 1)} | {_f(v['max_deg'], 1)} |")
     A("")
     gd = q.ground_datum_pct
-    A(f"**Ground datum** — captured ankle above the character's lowest vertex: "
-      f"median {_f(gd['median'], 1)} % of height, peak-to-peak "
-      f"{_f(gd['peak_to_peak'], 1)} % (the figure bobs against a fixed grid by "
-      f"the peak-to-peak).")
+    A(f"**Ground datum** — the posed sole above the take's floor (the take is "
+      f"seated once, so this is how high the figure stands over the grid, not "
+      f"a bob): median {_f(gd['median'], 1)} % of height, peak-to-peak "
+      f"{_f(gd['peak_to_peak'], 1)} %, highest {_f(gd.get('max'), 1)} %; "
+      f"{gd.get('below_floor', 0)} frame(s) of {gd.get('n', 0)} sit below the "
+      f"floor, which is what the robust floor costs.")
     return "\n".join(L)
 
 

@@ -25,9 +25,15 @@ from pyqtgraph import Vector
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
-from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
+from pose3d.core.skeleton import BONES, NUM_JOINTS
 from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import detect_vertical, upright_matrix
+# The ground rule is pure geometry and lives in `pose3d.geometry.placement`, so
+# that `pose3d.quality` and the fidelity tool — neither of which may import a
+# Qt/OpenGL stack — measure the SAME ground this view draws. Re-exported here
+# under its old name: it was this module's function for two phases and the
+# tests and tools that import it by that path are right to.
+from pose3d.geometry.placement import ground_datum, take_floor  # noqa: F401
 
 GL_UNAVAILABLE_TEXT = (
     "The 3D preview could not start: this machine's graphics driver did not "
@@ -106,30 +112,6 @@ class GLUnavailable(QWidget):
 
     def restart_button(self) -> QPushButton:
         return self._restart
-
-
-def ground_datum(verts, joints, drop):
-    """View-space z of the ground plane under a posed character.
-
-    The SOLE beneath the lower ANKLE, not the lowest mesh vertex. Which vertex
-    is lowest changes from frame to frame — a foot, a knee, a fingertip — so
-    the old rule slid the ground plane about under the figure and it bobbed
-    against the grid by up to 11 % of body height. The ankles are tracked
-    joints, so this datum moves only when the subject does. `drop` is the rig's
-    rest ankle-to-sole height in these same units (`Character.ground_drop`).
-    Falls back to the old rule when neither ankle could be posed.
-
-    The sole is deliberately NOT levelled onto the plane: the shin of this
-    rigid-footed mannequin genuinely tilts 16-86 deg, and flattening the foot
-    would replace a measurement with a convention.
-    """
-    if joints is not None:
-        z = [joints[int(j)][2]
-             for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
-        z = [q for q in z if np.isfinite(q)]
-        if z:
-            return float(min(z)) - float(drop)
-    return float(verts[:, 2].min())
 
 
 class View3D(gl.GLViewWidget):
@@ -347,20 +329,25 @@ class View3D(gl.GLViewWidget):
             against the pelvis by up to 5.8 % of body height and quietly
             deleted the subject's travel;
           * vertically, Phase 2's ankle datum — the sole beneath the lower
-            ankle, never the lowest mesh vertex — taken at its LOWEST over the
-            take, so the grid is the ground the subject actually stood on and
-            the figure rises off it when the subject did instead of being
-            re-seated frame by frame (that re-seating was a 34 % of rig height
-            swing the export had no counterpart for).
+            ankle, never the lowest mesh vertex — taken over the take by
+            `placement.take_floor`, so the grid is the ground the subject
+            actually stood on and the figure rises off it when the subject did
+            instead of being re-seated frame by frame (that re-seating was a
+            34 % of rig height swing the export had no counterpart for).
 
-        VISIBLE CONSEQUENCE, on the record: seating on the LOWEST sole the take
-        reaches means the figure touches the grid on exactly one frame and
-        stands above it on the rest — by up to 34.34 % of rig height on the
-        client take, which is the spread of the per-frame seat that used to be
-        applied. That is the honest reading of the data (the subject really
-        was higher on those frames) and it is what makes the preview and the
-        export the same rigid map, but it is a change to what the preview
-        looks like and worth saying out loud rather than discovering.
+        VISIBLE CONSEQUENCE, on the record: the take is seated ONCE, so a frame
+        the subject spent in the air is drawn in the air. What the floor may
+        NOT be is one frame's opinion: seating on `min(seats)` let the single
+        lowest sole of the take decide where the ground was, and every other
+        frame then floated by however far that one dipped — the client's own
+        take spreads 44.6 % of body height between its lowest sole and its
+        highest. `take_floor` therefore discards the lowest tenth of the frames
+        (see its docstring), which on that take moves the floor by 0.70 % of
+        height and leaves 3 frames of 26 below the grid. On this take the hover
+        is mostly REAL — it contains jumps and kicks, and the sole heights are
+        spread continuously rather than clustered with one outlier — so the
+        robust floor is a guard against one bad frame, not a cure for the
+        float; that is worth saying out loud rather than discovering.
 
         (None, 0.0) when the take is not known yet — a single `set_pose` with
         no `fit_subject` still draws, on the old per-frame rule.
@@ -409,10 +396,11 @@ class View3D(gl.GLViewWidget):
                     continue
                 seats.append(ground_datum(verts, cj, ch.ground_drop(vpose, valid)))
                 pelvis.append(take_pelvis_ref(pose[None]))
-            if not seats:
+            floor = take_floor(seats)
+            if floor is None:
                 self._place = (None, 0.0)
                 return self._place
-            offset = np.array([ref[0], ref[1], float(min(seats))])
+            offset = np.array([ref[0], ref[1], floor])
             pel = np.asarray([p for p in pelvis if p is not None], float)
             travel = float(np.linalg.norm(pel.max(0) - pel.min(0))) if len(pel) else 0.0
             self._place = (offset, travel)

@@ -38,6 +38,7 @@ from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, Joint
 from pose3d.geometry.bonefit import measure_bone_lengths
 from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import de_tilt_matrix, sequence_up
+from pose3d.geometry.placement import ground_datum, take_floor
 from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, reprojection_error,
 )
@@ -515,9 +516,11 @@ def limb_metrics(character, up: np.ndarray, height: float) -> dict:
     positional metric in the repo is structurally blind to it: a bone can aim
     at exactly the right joint while twisted 50 deg about that aim.
 
-    Sole tilt is the posed foot bone's axis off horizontal; the ground datum is
-    the captured ankle's height above the character's lowest vertex, as % of
-    body height — what makes the figure bob against a fixed grid.
+    Sole tilt is the posed foot bone's axis off horizontal; the ground datum
+    is how far the posed sole sits above the take's floor, as % of body height
+    — what the client sees as the figure hovering over (or dipping through)
+    the grid. Both the sole and the floor come from `geometry.placement`, the
+    one implementation the 3D view seats the take with.
     """
     up = np.asarray(up, float).reshape(-1, NUM_JOINTS, 3)
     refs = _rest_bend_references(character)
@@ -557,13 +560,15 @@ def limb_metrics(character, up: np.ndarray, height: float) -> dict:
             sole[role].append(float(np.degrees(np.arcsin(
                 min(1.0, abs(float(axis[2])))))))
 
-        ankles = [p[int(j), 2] for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)
-                  if valid[int(j)]]
-        if ankles:
-            verts, _, _ = character.pose_and_joints(p, valid, None)
-            if verts is not None:
-                ground.append(_pct(min(ankles) - float(verts[:, 2].min()),
-                                   height))
+        verts, _, cj = character.pose_and_joints(p, valid, None)
+        if verts is not None and len(verts):
+            # The SAME datum the 3D view seats this frame on, from the SAME
+            # function (`geometry.placement.ground_datum`). Measuring the
+            # captured ankle above the character's lowest mesh vertex — the
+            # rule the view replaced — is what let this metric report a bob
+            # the take-wide seat means nobody ever sees.
+            ground.append(ground_datum(verts, cj,
+                                       character.ground_drop(p, valid)))
 
     def stats(vals):
         return {"n": len(vals),
@@ -580,12 +585,34 @@ def limb_metrics(character, up: np.ndarray, height: float) -> dict:
         "roll_error_max_deg": _nanstat(
             [s["max_deg"] for s in roll_stats.values()], np.max),
         "sole_tilt_deg": {role: stats(v) for role, v in sole.items()},
-        "ground_datum_pct": {
-            "n": len(ground),
-            "median": float(np.median(ground)) if ground else float("nan"),
-            "peak_to_peak": (float(np.max(ground) - np.min(ground)) if ground
-                             else float("nan")),
-        },
+        "ground_datum_pct": _ground_stats(ground, height),
+    }
+
+
+def _ground_stats(seats, height: float) -> dict:
+    """How far above the take's floor each frame's sole sits, as % of height.
+
+    The take is seated ONCE (`View3D._take_placement`), so the number that
+    describes what a viewer sees is the gap between each frame's sole and that
+    one floor — not the frame-to-frame movement of a datum that no longer
+    moves. `peak_to_peak` keeps its key and its meaning (the spread of the
+    figure's height above the grid over the take); `median` now reads as the
+    typical hover rather than as a rig constant.
+    """
+    floor = take_floor(seats)
+    if floor is None:
+        return {"n": 0, "median": float("nan"), "peak_to_peak": float("nan"),
+                "max": float("nan"), "below_floor": 0}
+    gaps = np.asarray([_pct(s - floor, height) for s in seats], float)
+    return {
+        "n": int(gaps.size),
+        "median": float(np.median(gaps)),
+        "peak_to_peak": float(np.ptp(gaps)),
+        "max": float(np.max(gaps)),
+        # Frames the robust floor leaves BELOW the grid. Not a fault — it is
+        # what "one frame may not decide where the floor is" costs — but it is
+        # the cost, so it is reported rather than left to be discovered.
+        "below_floor": int((gaps < 0.0).sum()),
     }
 
 

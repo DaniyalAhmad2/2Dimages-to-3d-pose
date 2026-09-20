@@ -263,6 +263,128 @@ def test_the_view_and_the_export_place_the_figure_the_same_way():
         f"view and export disagree by {np.abs(resid - resid.mean(0)).max():.6f} rig units"
 
 
+# --- the floor the take is seated on ---------------------------------------
+
+def test_the_floor_is_a_low_quantile_of_the_per_frame_seats():
+    """The rule itself, without a character in the way.
+
+    A take's floor is the lowest sole the subject reached EXCEPT the lowest
+    tenth of its frames, so one bad frame cannot decide where the ground is —
+    and it is an order statistic, never an interpolation between two frames, so
+    the floor is always a height some frame actually stood at.
+    """
+    from pose3d.geometry.placement import take_floor
+    assert take_floor([]) is None
+    assert take_floor([0.5]) == 0.5
+    assert take_floor([-3.0] + [0.0] * 9) == 0.0        # one dip in ten
+    assert take_floor([-3.0, -3.0] + [0.0] * 18) == 0.0  # two in twenty
+    assert take_floor([-3.0, -1.0] + [0.0] * 8) == -1.0  # only one is spared
+    assert take_floor([-3.0, 0.0]) == -3.0   # two frames: nothing to be robust on
+    assert take_floor([float("nan"), 1.0, 1.0]) == 1.0   # a NaN is not a seat
+
+
+def _standing_take(n=10, dip=0.0, dip_frame=None, jump=0.0, jump_frame=None):
+    """One standing pose, repeated, with at most one frame moved vertically.
+
+    `dip` and `jump` are fractions of body height. A take like this is the
+    controlled version of what the seat rule has to survive: the subject stood
+    still, and ONE frame's ankle came out low (a dropped reconstruction, a foot
+    the detector put through the floor) or high (a jump).
+    """
+    from tests.synth import sample_skeleton_3d
+    base = sample_skeleton_3d()
+    h = float(np.ptp(base[:, 2]))
+    out = []
+    for i in range(n):
+        p = base.copy()
+        if dip_frame is not None and i == dip_frame:
+            p[:, 2] -= dip * h
+        if jump_frame is not None and i == jump_frame:
+            p[:, 2] += jump * h
+        out.append(p)
+    return np.stack(out)
+
+
+def _sole_above_grid_pct(view, poses):
+    """Per frame: the gap between the character's sole and the grid, % of height.
+
+    Read off what `set_pose` DRAWS — the character's own ankle joint, less the
+    rig's rest ankle-to-sole drop — because that is the gap the client sees
+    between the feet and the grid, and it is the number his complaint is about.
+    """
+    ch = view._character
+    height = float(np.median([_z_extent(p) for p in poses]))
+    out = []
+    for pose in poses:
+        view.set_pose(pose)
+        cj = view.drawn["char"][0]
+        valid = ~np.isnan(pose).any(1)
+        z = min(float(cj[int(Joint.LEFT_ANKLE), 2]),
+                float(cj[int(Joint.RIGHT_ANKLE), 2]))
+        out.append((z - ch.ground_drop(pose, valid)) / height * 100.0)
+    return np.asarray(out)
+
+
+@needs_character()
+def test_one_dipping_frame_does_not_lift_the_rest_of_the_take():
+    """Seating the take on its single LOWEST sole is one frame's opinion.
+
+    The client complained the figure clipped through the floor; the fix for it
+    seated the whole take on the lowest sole the take reaches, which leaves
+    every other frame hovering by however far that one frame dipped (34.3 % of
+    body height on his take). One outlying frame may not decide where the floor
+    is: the take is seated on a low QUANTILE of the per-frame soles, so a
+    subject who stood still stands ON the grid.
+    """
+    poses = _standing_take(n=10, dip=0.30, dip_frame=4)
+    view = _headless_view(poses)
+
+    gap = _sole_above_grid_pct(view, poses)
+    standing = np.delete(gap, 4)
+    assert abs(standing).max() <= 2.0, \
+        f"the standing frames hover {standing.max():.1f} % of height above the grid"
+    # ...and the frame that really was lower is still drawn lower, which is the
+    # honest reading of it: the floor is where the subject stood, not where the
+    # worst frame of the reconstruction went.
+    assert gap[4] <= -25.0
+
+
+@needs_character()
+def test_a_jump_still_leaves_the_floor():
+    """The robust floor must not flatten the take onto the grid either."""
+    poses = _standing_take(n=10, jump=0.30, jump_frame=4)
+    view = _headless_view(poses)
+
+    gap = _sole_above_grid_pct(view, poses)
+    assert gap[4] >= 25.0, "the jump was seated back onto the grid"
+    assert abs(np.delete(gap, 4)).max() <= 2.0
+
+
+@needs_character()
+def test_the_view_and_the_metrics_measure_the_same_ground():
+    """One ground rule, called by the view and by `quality.limb_metrics`.
+
+    The rule lived in the Qt widget module, so `pose3d.quality` — which the
+    CLI tools and this suite import without Qt — went on measuring the
+    lowest-mesh-vertex rule the view had replaced, and reported a peak-to-peak
+    "bob" that the take-wide seat means nobody ever sees.
+    """
+    from pose3d.geometry.placement import ground_datum as shared
+    from pose3d.quality import limb_metrics
+    from pose3d.ui.view3d import ground_datum as used_by_the_view
+    assert used_by_the_view is shared
+
+    poses = fixture_poses()
+    view = _headless_view(poses)
+    height = float(np.median([_z_extent(p) for p in poses]))
+    gap = _sole_above_grid_pct(view, poses)
+
+    metric = limb_metrics(view._character, poses, height)["ground_datum_pct"]
+    assert metric["n"] == len(poses)
+    assert np.isclose(metric["median"], float(np.median(gap)), atol=1e-6)
+    assert np.isclose(metric["peak_to_peak"], float(np.ptp(gap)), atol=1e-6)
+
+
 @needs_character()
 def test_one_unposable_frame_does_not_cost_the_take_its_placement():
     """A frame with no PELVIS and no hips must be SKIPPED, not fatal.
