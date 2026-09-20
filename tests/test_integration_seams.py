@@ -497,6 +497,46 @@ def test_a_calibration_that_lost_one_pair_still_says_it_used_the_rest(
     assert "0007" in note
 
 
+# --------------------------------------------------------------------------
+# Seam 12 — the size fallback depended on the caller's frame with no body axis
+# --------------------------------------------------------------------------
+
+def test_the_size_fallback_is_the_same_whichever_way_the_take_is_turned():
+    """The view hands `take_scale` RAW world poses until the window has given
+    it an orientation; the export always de-tilts first. `take_scale` de-tilts
+    for both so they agree by construction — but when `sequence_up` cannot
+    find a body axis the de-tilt was SKIPPED and the height read straight off
+    the z extent, which is the caller's frame again. Two callers, two sizes,
+    one figure, and the invariant this whole pass rests on is that the export
+    poses and sizes the character exactly as the live view does.
+    """
+    from scipy.spatial.transform import Rotation
+
+    from pose3d.geometry.placement import take_scale
+
+    class _Rig:
+        rig_h = 1.7
+
+        def fit_to_subject(self, poses):
+            return None                   # no bone could be measured
+
+    # a pose with no body axis at all: `sequence_up` needs a spine
+    rng = np.random.default_rng(7)
+    poses = np.full((3, NUM_JOINTS, 3), np.nan)
+    for i in range(3):
+        poses[i, :4] = rng.normal(size=(4, 3))
+
+    from pose3d.geometry.orient import sequence_up
+    assert sequence_up(poses) is None, "this fixture must have no body axis"
+
+    upright, _ = take_scale(_Rig(), poses)
+    R = Rotation.from_euler("xyz", [40.0, 25.0, 70.0], degrees=True).as_matrix()
+    turned, _ = take_scale(_Rig(), poses @ R.T)
+
+    assert upright is not None
+    assert turned == pytest.approx(upright, rel=1e-9)
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),
