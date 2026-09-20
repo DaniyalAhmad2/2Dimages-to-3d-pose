@@ -363,6 +363,69 @@ def test_a_jump_still_leaves_the_floor():
 
 
 @needs_character()
+def test_what_the_robust_floor_does_to_the_client_take():
+    """The honest measurement, on the take the complaint is about.
+
+    Measured here, not assumed: the client's 26 frames spread 44.6 % of body
+    height between their lowest sole and their highest, and the distribution
+    is CONTINUOUS — there is no single dipping frame holding the rest up. So
+    the robust floor moves the seat by 0.70 % of height and leaves 3 frames
+    below the grid, and the figure still stands well clear of it on the frames
+    where the subject jumped or kicked. That is the reconstruction reporting
+    what the take contains; the floor rule is a guard against one bad frame,
+    not a cure for a take with real air in it.
+    """
+    poses = fixture_poses()
+    view = _headless_view(poses)
+    gap = _sole_above_grid_pct(view, poses)
+
+    assert int((gap < 0).sum()) == 3          # the lowest tenth, by the rule
+    assert gap.min() > -1.0                   # and barely below: measured -0.73 %
+    assert 8 <= int((np.abs(gap) <= 2.0).sum())   # the standing frames, on it
+    assert gap.max() > 25.0                   # ...and the jump still a jump
+    assert 4.0 < float(np.median(gap)) < 9.0  # measured 6.33 %
+
+
+@needs_character()
+def test_the_view_and_the_export_agree_on_the_client_take():
+    """The binding invariant, on real data rather than a synthetic walk.
+
+    The same similarity check as the synthetic version above — the export is
+    the view through one scale and one constant offset — but over 26
+    photographed frames with dropouts, a jump and a kick in them, which is
+    where a placement rule that is subtly per-frame shows up.
+    """
+    from pose3d.geometry.character import take_pelvis_ref
+    poses = fixture_poses()
+    view = _headless_view(poses)
+    ch = view._character
+    ref = take_pelvis_ref(poses)
+    assert view._take_placement()[0] is not None
+
+    seen, expected = [], []
+    for pose in poses:
+        valid = ~np.isnan(pose).any(1)
+        if not valid.any():
+            continue
+        _mats, al = ch.pose_bone_matrices(pose, valid, None,
+                                          keep_root_motion=True,
+                                          pelvis_ref=ref, return_alignment=True)
+        if al is None:
+            continue
+        rig = ch._joints_from_skin(ch._skin_matrices(pose, valid)[0])
+        exported = (al.transform[:3, :3] @ rig.T).T + al.transform[:3, 3]
+        view.set_pose(pose)
+        drawn = view.drawn["char"][0]
+        for j in range(len(drawn)):
+            if np.isfinite(rig[j]).all() and np.isfinite(drawn[j]).all():
+                seen.append(drawn[j]); expected.append(exported[j])
+
+    resid = np.asarray(expected) - np.asarray(seen) * ch._scale
+    assert np.abs(resid - resid.mean(0)).max() <= 1e-6 * ch.rig_h, \
+        f"view and export disagree by {np.abs(resid - resid.mean(0)).max():.6f}"
+
+
+@needs_character()
 def test_the_view_and_the_metrics_measure_the_same_ground():
     """One ground rule, called by the view and by `quality.limb_metrics`.
 
