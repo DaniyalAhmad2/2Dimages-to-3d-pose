@@ -137,7 +137,7 @@ def test_the_camera_view_asks_the_shared_joint_status_rule(qapp, monkeypatch):
 # --------------------------------------------------------------------------
 
 def test_a_face_only_edit_turns_the_frames_dot_purple(qapp, tmp_path):
-    """A nose placed by hand IS a correction to that frame.
+    """An eye placed by hand IS a correction to that frame.
 
     T1 split the flags in two — `Frame.corrected` for the body joints,
     `Frame.head_corrected` for the face points — and gave the question one
@@ -146,11 +146,18 @@ def test_a_face_only_edit_turns_the_frames_dot_purple(qapp, tmp_path):
     the face reported itself uncorrected: its dot stayed green and it was
     missing from Show = Corrected, which is the one view that exists to find
     the frames the user has worked on.
+
+    An EYE, in Face mode, because that is a dot the user can actually reach:
+    under the nose convention the camera panels draw no separate nose handle
+    (the canonical HEAD dot IS it — see `ui.model._resolve_joint`), so a test
+    that edited face point 0 would prove the flag without ever touching a
+    point this window offers.
     """
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel
 
     data, rig, _gt = _project_with_rig()
+    data.head_mode = "face"           # the mode the eyes and ears are drawn in
     for f in data.frames:
         for cam in (CAM_LEFT, CAM_RIGHT):
             f.head2d[cam][:] = 100.0
@@ -160,10 +167,14 @@ def test_a_face_only_edit_turns_the_frames_dot_purple(qapp, tmp_path):
     model.set_frame(1)
     assert win.timeline.status(1) == "green"
 
-    nose = NUM_JOINTS + 0
-    model.set_joint_2d(CAM_LEFT, nose, 140.0, 160.0)
+    eye = NUM_JOINTS + 1              # left eye: face point 1
+    handle = win.cam_left.view._face[1]
+    assert handle.isVisible() and handle.joint_id == eye, \
+        "this face point is not one the user can drag"
+    model.set_joint_2d(CAM_LEFT, eye, 140.0, 160.0)
 
     assert data.frames[1].has_corrections()
+    assert data.frames[1].head_corrected[CAM_LEFT][1]
     assert not data.frames[1].corrected[CAM_LEFT].any(), "a FACE edit only"
     assert win.timeline.status(1) == "corrected"
 
@@ -179,7 +190,7 @@ def test_a_reopened_project_shows_its_face_corrections_too(qapp):
     from pose3d.ui.timeline import Timeline
 
     data, _rig, _gt = _project_with_rig()
-    data.frames[2].set_head_kp(CAM_RIGHT, 0, 10.0, 20.0, corrected=True)
+    data.frames[2].set_head_kp(CAM_RIGHT, 4, 10.0, 20.0, corrected=True)
 
     strip = Timeline()
     strip.populate(data.frames, load_thumb=None)
