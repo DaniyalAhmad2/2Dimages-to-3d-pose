@@ -390,6 +390,78 @@ def test_a_re_detect_that_could_not_read_a_photo_says_so(tmp_path):
     assert any(project.frames[2].frame_id in m for m in said), said
 
 
+def _take_of_placeholders(tmp_path):
+    """A calibrated take every one of whose photos is a 0-byte file.
+
+    OneDrive evicts a FOLDER, not a file, so this — not one bad photo — is
+    the shape the client is most likely to hit.
+    """
+    data, rig, _gt = _project_with_rig()
+    for i, f in enumerate(data.frames):
+        for cam, stem in ((CAM_LEFT, "l"), (CAM_RIGHT, "r")):
+            p = tmp_path / f"{stem}{i}.png"
+            p.write_bytes(b"")
+            f.images[cam] = str(p)
+    return data, rig
+
+
+def test_a_face_re_detect_that_read_nothing_blames_the_files(tmp_path):
+    """Not the build. `detect_project` stages nothing when no photo opens, so
+    `wrote` is 0 — the same 0 a detector with no face model returns — and the
+    early return told the user "This build's detector does not produce face
+    points", which is a sentence about the wrong thing entirely. The photos
+    were never opened, so the detector was never even asked.
+    """
+    from pose3d.imageio import read_image
+    from pose3d.ui.model import ProjectModel
+
+    data, rig = _take_of_placeholders(tmp_path)
+    model = ProjectModel(data, rig)
+    said = []
+    model.statusMessage.connect(said.append)
+
+    model.redetect_head(_FlatDetector(), read_image)
+
+    joined = " ".join(said)
+    assert "could not be read" in joined, said
+    assert data.frames[0].frame_id in joined, said
+    assert "0 bytes" in joined, said
+    assert "does not produce face points" not in joined, said
+
+
+class _NoFaceDetector(_FlatDetector):
+    """A build whose detector has no face model — the real `wrote == 0`."""
+
+    def detect(self, image_bgr):
+        from pose3d.detect.base import Detection
+        return Detection(xy=np.zeros((NUM_JOINTS, 2)),
+                         scores=np.ones(NUM_JOINTS))
+
+
+def test_a_build_with_no_face_model_is_still_named_as_the_reason(tmp_path):
+    """…and when photos DID open and the detector still gave nothing, the
+    build is the reason and must still be named — including when some other
+    photo was unreadable, where both facts are true at once."""
+    from pose3d.imageio import read_image
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, _gt = _project_with_rig()
+    lefts, rights = _photo_pairs(tmp_path / "src", n=len(data.frames))
+    for f, lp, rp in zip(data.frames, lefts, rights):
+        f.images = {CAM_LEFT: lp, CAM_RIGHT: rp}
+
+    model = ProjectModel(data, rig)
+    said = []
+    model.statusMessage.connect(said.append)
+
+    model.redetect_head(_NoFaceDetector(), read_image)
+
+    joined = " ".join(said)
+    assert "does not produce face points" in joined, said
+    # ...and the one photo that could not be read is not swept under it
+    assert data.frames[2].frame_id in joined, said
+
+
 def test_a_loader_that_returns_none_is_skipped_by_detection_too(tmp_path):
     """`cv2.imread` answers None where `read_image` raises, and the tools and
     `pose3d.quality` still pass a plain `cv2.imread`."""

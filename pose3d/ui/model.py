@@ -579,14 +579,27 @@ class ProjectModel(QObject):
                                fields="head", on_progress=on_progress,
                                cancelled=cancelled, skipped=unread)
         if not wrote:
-            # A build whose detector has no face points (the manual detector,
-            # or an RTMPose bundle without the face model) writes nothing —
-            # saying "re-detected" here would be a success message for work
-            # that did not happen, and the head would go on riding the neck.
+            # Nothing was written — and "the detector has none to give" is
+            # only ONE of the two reasons for that. The other is that no
+            # photo opened, so the detector was never asked: OneDrive evicts
+            # a FOLDER, not a file, which makes a take of 0-byte placeholders
+            # the likelier shape, and blaming the build for it sends the user
+            # to reinstall over a file problem.
+            asked = len(CAMERAS) * len(self.project.frames) - len(unread)
+            note = summarise_unreadable(
+                unread, "so those views were never looked at")
+            if asked <= 0:
+                self.statusMessage.emit(
+                    f"No face points could be re-detected. {note}")
+                return
+            # The detector WAS asked at least once and gave nothing back, so
+            # the build is the reason — but any photo that also failed to
+            # open is a second, separate fact and is not swept under it.
             self.statusMessage.emit(
                 "This build's detector does not produce face points (the nose, "
                 "the eyes and the ears), so nothing was changed — the head "
-                "keeps its nose-pitch estimate")
+                "keeps its nose-pitch estimate"
+                + (f". {note}" if note else ""))
             return
         # the same gate the batch recompute applies, from the same take-wide
         # threshold: a re-detect must not leave face points a recompute would
