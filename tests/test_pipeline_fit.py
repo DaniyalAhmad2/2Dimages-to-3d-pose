@@ -386,6 +386,104 @@ def test_redetect_keeps_corrections():
     assert np.allclose(f.kp2d[CAM_LEFT][free], detector_xy[free])
 
 
+def _midpoint(f, cam, parents):
+    a, b = parents
+    return 0.5 * (f.kp2d[cam][int(a)] + f.kp2d[cam][int(b)])
+
+
+def test_redetect_re_derives_the_neck_of_a_kept_shoulder(layout):
+    """A re-detect keeps the corrected shoulder, so the NECK must follow it.
+
+    `keep = frame.corrected[cam]` protects the joints the user dragged, and
+    NECK is not one of them — it is the midpoint of two of them. So the
+    detector's own NECK (the midpoint of the shoulders the user REJECTED) was
+    written back over the synced one, leaving the take triangulated and
+    bone-fitted from a neck half the correction away from the shoulders it is
+    defined by, under a status line reading "hand-corrected points were kept".
+    """
+    data, rig = _take(n=2, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(0)
+    f = model.frame()
+    detector = _ShiftedDetector(f.kp2d[CAM_LEFT])   # disagrees by 40 px
+
+    xy = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.LEFT_SHOULDER),
+                       float(xy[0]) + 100.0, float(xy[1]))
+    kept = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)].copy()
+
+    model.redetect_all(detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)], kept)
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][int(Joint.NECK)],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)))
+
+
+def test_redetect_keeps_a_hand_placed_derived_joint(layout):
+    """A NECK the user placed by hand is a correction like any other: it
+    outranks both the detector and the midpoint rule."""
+    data, rig = _take(n=2, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(0)
+    f = model.frame()
+    detector = _ShiftedDetector(f.kp2d[CAM_LEFT])
+
+    neck = f.kp2d[CAM_LEFT][int(Joint.NECK)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.NECK),
+                       float(neck[0]) + 17.0, float(neck[1]) - 9.0)
+    placed = f.kp2d[CAM_LEFT][int(Joint.NECK)].copy()
+
+    model.redetect_all(detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.NECK)], placed)
+    assert f.corrected[CAM_LEFT][int(Joint.NECK)]
+
+
+def test_a_batch_recompute_re_derives_the_derived_joints(layout):
+    """The midpoint rule is the project's, not the drag path's.
+
+    `_sync_derived` runs only from the live re-solve, which is skipped with
+    "Auto Recalculate 3D" off (and before a project is calibrated). The batch
+    path then triangulated and bone-fitted a NECK the user could see was 41 px
+    away from the shoulders they had just moved, and saved that 2D.
+    """
+    data, rig = _take(n=3, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.auto_recalc = False
+    model.set_frame(1)
+    f = model.frame()
+
+    for parent in (Joint.LEFT_SHOULDER, Joint.LEFT_HIP):
+        xy = f.kp2d[CAM_LEFT][int(parent)]
+        model.set_joint_2d(CAM_LEFT, int(parent), float(xy[0]) - 80.0,
+                           float(xy[1]) + 20.0)
+
+    model.recompute_all()
+
+    for derived, parents in ((Joint.NECK, (Joint.LEFT_SHOULDER,
+                                           Joint.RIGHT_SHOULDER)),
+                             (Joint.PELVIS, (Joint.LEFT_HIP,
+                                             Joint.RIGHT_HIP))):
+        assert np.allclose(f.kp2d[CAM_LEFT][int(derived)],
+                           _midpoint(f, CAM_LEFT, parents)), derived.name
+
+
+def test_a_batch_recompute_keeps_a_hand_placed_derived_joint(layout):
+    data, rig = _take(n=3, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    f = model.frame()
+    neck = f.kp2d[CAM_LEFT][int(Joint.NECK)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.NECK),
+                       float(neck[0]) + 12.0, float(neck[1]) + 6.0)
+    placed = f.kp2d[CAM_LEFT][int(Joint.NECK)].copy()
+
+    model.recompute_all()
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.NECK)], placed)
+
+
 def test_redetect_can_be_asked_to_overwrite_corrections():
     from pose3d.pipeline import detect_project
 

@@ -23,7 +23,7 @@ from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
     CalibratedRig, Cancelled, bone_length_targets, cross_view_rejection,
-    face_protect, fill_frame_gaps, fit_frame, gated_kp2d,
+    derive_midpoint, face_protect, fill_frame_gaps, fit_frame, gated_kp2d,
     per_image_allowances, revalidate_joint, triangulate_face,
 )
 
@@ -235,9 +235,15 @@ class ProjectModel(QObject):
         if cancelled is not None and cancelled():
             raise Cancelled()
         from pose3d.pipeline import (
-            fit_project, rejection_note, triangulate_project)
+            derive_midpoints, fit_project, rejection_note, triangulate_project)
         self._bone_targets = None
         write_note = ""
+        # before anything is triangulated: a derived joint is the midpoint of
+        # two others, and a drag made with auto-recalc off (or before the
+        # project was calibrated) never went through the live re-solve that
+        # keeps it there. Reconstructing from a NECK that contradicts the
+        # shoulders is reconstructing from a pose the user can see is wrong.
+        derive_midpoints(self.project)
         _report(on_progress, "Re-triangulating every frame…")
         dropped = triangulate_project(self.project, self.rig)
         smoothing = self.project.smoothing
@@ -682,21 +688,12 @@ class ProjectModel(QObject):
         if derived is None or Joint(derived) not in derived_joints(
                 self.project.keypoint_model):
             return []
-        a, b = _DERIVED_FROM[derived]
-        if f.corrected[cam][derived]:
-            return []
-        pa, pb = f.kp2d[cam][a], f.kp2d[cam][b]
-        if np.isnan(pa).any() or np.isnan(pb).any():
-            return []
-        f.kp2d[cam][derived] = (pa + pb) / 2.0
-        # nanmin, not min: min(nan, 0.5) is nan while min(0.5, nan) is 0.5, so
-        # a plain min made the derived point's confidence depend on which
-        # parent happens to be listed first. Both parents unscored leaves it
-        # NaN — the 2D above is real either way.
-        pair = np.array([f.scores[cam][a], f.scores[cam][b]], float)
-        f.scores[cam][derived] = (float(np.nanmin(pair))
-                                  if np.isfinite(pair).any() else np.nan)
-        return [derived]
+        # `pipeline.derive_midpoint` is THE rule — the same call the batch
+        # paths make (`pipeline.derive_midpoints`), so a drag and a re-detect
+        # cannot put the neck in two different places. It declines a derived
+        # point the user has placed by hand, and one whose parents are not
+        # both present.
+        return [derived] if derive_midpoint(f, cam, derived) else []
 
     def _retriangulate(self, f, joint: int) -> None:
         # THE CROSS-VIEW GATE APPLIES HERE TOO, or the live re-solve and the
