@@ -1107,6 +1107,17 @@ def _body_height(poses: np.ndarray) -> float:
     return float(np.median(spans)) if spans else float("nan")
 
 
+# A length in one of these is a fact about the CAMERA, not about the scene: a
+# lens, a sensor or a pixel is the same size whatever the world is scaled to,
+# so scaling one would be as wrong as scaling a reprojection residual. No
+# calibration report holds such a key today — this is here because the report
+# grows and the unit suffix alone cannot tell the two kinds of millimetre
+# apart: `export.blender_export` already writes `lens_mm`/`sensor_mm` for each
+# camera, and the day that pair is recorded as provenance the rescale must not
+# quietly enlarge the lens.
+_NOT_A_WORLD_LENGTH = ("lens", "sensor", "focal", "pixel")
+
+
 def _rescale_report(report: dict, factor: float) -> None:
     """Scale every metric length a calibration report records, in place.
 
@@ -1117,7 +1128,13 @@ def _rescale_report(report: dict, factor: float) -> None:
     `max_centre_mm` reporting a camera wobble measured at the old scale. A
     key's suffix is what says it is a length: `_m` (metres) and `_mm`
     (millimetres) scale; `_px`, `_deg` and every count do not, because a
-    similarity changes no image measurement and no angle.
+    similarity changes no image measurement and no angle. `_NOT_A_WORLD_LENGTH`
+    is the exception the suffix cannot see — a camera's own dimensions.
+
+    Nested dicts are walked; LISTS are not, because no length in the report
+    lives in one (`world_up` is a direction, `image_size` is in pixels, and
+    `tags_admitted` is a list of ids). A list of world lengths would need a
+    rule for what it contains, which is a decision for whoever adds one.
 
     `moved` is re-taken from the scaled displacement: it is a verdict about a
     length against `resolve.MOTION_WARN_MM`, so leaving it as it was would
@@ -1131,7 +1148,8 @@ def _rescale_report(report: dict, factor: float) -> None:
             _rescale_report(value, factor)
         elif (isinstance(value, (int, float)) and not isinstance(value, bool)
                 and isinstance(key, str)
-                and (key.endswith("_m") or key.endswith("_mm"))):
+                and (key.endswith("_m") or key.endswith("_mm"))
+                and not any(w in key.lower() for w in _NOT_A_WORLD_LENGTH)):
             report[key] = float(value) * factor
     if report.get("max_centre_mm") is not None:
         rot = report.get("max_rotation_deg") or 0.0

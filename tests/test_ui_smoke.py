@@ -558,6 +558,10 @@ def test_setting_the_scale_rescales_every_stored_length(qapp, tmp_path):
                         "max_centre_mm": None, "moved": None}},
         "residual_rms_px": {CAM_LEFT: 0.4, CAM_RIGHT: 0.5},
         "convergence_deg": 33.0,
+        # a length that is a fact about the CAMERA, not about the scene:
+        # `blender_export` already writes this pair for each camera, and a
+        # world scale must no more touch it than it touches a pixel
+        "camera_lens": {CAM_LEFT: {"lens_mm": 35.0, "sensor_mm": 36.0}},
         "world_tag_id": 15}))
 
     model = ProjectModel(data, rig, project_dir=str(tmp_path))
@@ -583,6 +587,8 @@ def test_setting_the_scale_rescales_every_stored_length(qapp, tmp_path):
     # ...and everything a similarity cannot touch is left exactly as it was
     assert report["residual_rms_px"] == {CAM_LEFT: 0.4, CAM_RIGHT: 0.5}
     assert report["convergence_deg"] == 33.0
+    assert report["camera_lens"][CAM_LEFT] == {"lens_mm": 35.0,
+                                               "sensor_mm": 36.0}
     assert report["branch_pair_scores"]["L0R0"]["relpose_spread_deg"] == 1.5
     assert report["world_tag_id"] == 15
 
