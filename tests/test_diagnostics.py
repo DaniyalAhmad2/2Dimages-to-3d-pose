@@ -346,6 +346,100 @@ def test_the_zip_readme_does_not_ask_for_a_calibration_the_client_has_not_got():
     assert "marker size" in steps, "the one calibration input he does have"
 
 
+# --- the documents we hand the client, and their source -------------------
+#
+# The getting-started PDF sent on 2026-09-04 existed nowhere in this
+# repository: it was written before the UCRT was bundled and before
+# Diagnose.cmd learned to check the bootloader files, so it describes neither
+# the failure the client is seeing nor the diagnostic we now ask him for — and
+# there was no source to correct. `docs/client/` is that source.
+
+CLIENT_DIR = ROOT / "docs" / "client"
+GUIDE_SOURCE = CLIENT_DIR / "content.json"
+RELEASE_NOTES = CLIENT_DIR / "RELEASE_NOTES_v1.md"
+
+
+def _guide_text() -> str:
+    """Every line of prose in the guide, flattened — what the client reads."""
+    import json
+
+    content = json.loads(GUIDE_SOURCE.read_text(encoding="utf-8"))
+    out = [content["title"], content["subtitle"], content.get("intro", "")]
+    for section in content["sections"]:
+        out.append(section["heading"])
+        for block in section["blocks"]:
+            out += [v for v in (block.get("p"), block.get("sub")) if v]
+            out += block.get("bullets", []) + block.get("steps", [])
+    return "\n".join(out)
+
+
+def test_the_getting_started_guide_has_a_source_in_the_repository():
+    """A document only the client has is a document we cannot correct."""
+    assert GUIDE_SOURCE.is_file(), "the guide's content"
+    assert (CLIENT_DIR / "build.js").is_file(), "what renders it"
+    assert (CLIENT_DIR / "README.md").is_file(), "how to render it"
+    assert "node build.js" in (CLIENT_DIR / "README.md").read_text(
+        encoding="utf-8")
+    assert _guide_text().strip(), "the guide parses and has prose in it"
+
+
+def test_the_guide_asks_for_the_marker_size_in_centimetres():
+    """It is the one number the client must type, and the box he types it into
+    is centimetres."""
+    marker_lines = [line for line in _guide_text().splitlines()
+                    if "marker size" in line.lower()
+                    or "Bigger is better" in line]
+    assert marker_lines, "the guide never mentions the marker size"
+    for line in marker_lines:
+        assert "centimetre" in line.lower(), line
+    assert "for example 8" in _guide_text(), "a worked number, not a unit note"
+
+
+def test_the_guide_does_not_pin_the_download_to_one_build():
+    """It names the build the client is to download, and a guide that says
+    "build-17" is wrong the moment the resubmission build is published."""
+    text = _guide_text()
+    assert "newest release" in text
+    assert "build-17" not in text
+
+
+def test_the_guide_still_tells_him_to_unblock_the_download():
+    assert "Unblock" in _guide_text()
+
+
+#: Every problem the client raised, and the phrase the release note answers it
+#: with. One line each, in his words rather than ours — this is the document
+#: that goes back with the resubmission.
+CLIENT_COMPLAINTS = {
+    "P1 left/right inverted": "left and right",
+    "P3 forward lean": "lean",
+    "P3 clipping below the floor": "floor",
+    "P5 export did not match the images": "export",
+    "P6 distorted preview": "distort",
+    "P8/P10 head and neck": "head and neck",
+    "P11 joint handles too small": "handle",
+    "P11 arrow keys": "arrow key",
+    "P4 missing joints cannot be placed": "missing joint",
+    "save and reopen a project": "reopen",
+    "P12/P13 python312.dll launch error": "python312.dll",
+    "P13 path too long": "path",
+    "corrections kept across sessions": "correction",
+    "marker size in centimetres": "centimetre",
+}
+
+
+def test_the_release_note_answers_every_complaint_the_client_made():
+    text = RELEASE_NOTES.read_text(encoding="utf-8").lower()
+    for complaint, phrase in CLIENT_COMPLAINTS.items():
+        assert phrase in text, complaint
+
+
+def test_the_release_note_leaves_the_build_number_for_the_build():
+    """The build that carries these fixes does not exist yet; a number written
+    here before it is published is a number that will be wrong."""
+    assert "[build NN]" in RELEASE_NOTES.read_text(encoding="utf-8")
+
+
 def test_the_bundle_script_ships_the_fallback():
     """A file only in the repository is no use to the client."""
     assert "Diagnose.cmd" in (
