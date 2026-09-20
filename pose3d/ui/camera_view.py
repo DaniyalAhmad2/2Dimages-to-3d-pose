@@ -61,13 +61,18 @@ RAG_COLORS = {
     # rejected a hollow ring.
     "rejected": COL_PURPLE,
     # the detector found nothing here at all, so this handle is a PLACEHOLDER
-    # the user drags onto the limb, not a point anything saw. Grey, the same
-    # colour as "unmeasured", because it is the same fact taken one step
-    # further — no 3D, and not even a 2D keypoint — and NOT red: red is
-    # "measured, and badly", a band of the accuracy scale, and this joint has
-    # no measurement to be bad (the reasoning "rejected" is purple for).
-    # The dashes are what separate it from "unmeasured".
-    "missing": COL_GREY,
+    # the user drags onto the limb, not a point anything saw. RED, which the
+    # accuracy bands otherwise own, for two reasons: it is the colour the
+    # timeline legend already gives the word "Missing", the client's own
+    # vocabulary for this; and this is the one state whose entire point is
+    # that he must FIND it on the photograph, which grey on a photograph
+    # loses. It cannot be confused with a red band — that is a filled dot,
+    # this is a DASHED ring, and no other state is dashed. (The argument the
+    # file makes for painting "rejected" purple rather than red does not
+    # reach here: a rejected joint has two measurements that disagree and is
+    # the geometry's problem, while this one has no measurement at all and
+    # nothing but the user can fix it.)
+    "missing": COL_RED,
 }
 
 # States drawn as a hollow ring rather than a filled dot: none of them is a
@@ -248,7 +253,15 @@ class CameraView(QGraphicsView):
             self._pixmap_item.setPixmap(pm)
         if not pm.isNull():
             self._scene.setSceneRect(QRectF(pm.rect()))
-            self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+            # …but only while the view is still the one WE chose. A frame
+            # step reloads the image, and re-fitting here threw away the
+            # user's zoom and pan every single time — so correcting the same
+            # joint across ten frames meant zooming and panning ten times.
+            # `_zoomed` is the flag that already means "the user has taken
+            # the view over"; `resizeEvent` and the Fit button honour it too.
+            if not self._zoomed:
+                self.fitInView(self._pixmap_item,
+                               Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_pose(self, xy: np.ndarray, scores: np.ndarray,
                  corrected: np.ndarray | None = None,

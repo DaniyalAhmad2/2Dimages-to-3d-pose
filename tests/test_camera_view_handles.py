@@ -282,3 +282,32 @@ def test_the_joints_toggle_still_only_hides_and_unhides(qapp, tmp_path):
     v.set_show_joints(True)
     assert v._joints[3].isVisible() and v._joints[3].is_placeholder
     assert all(it.isVisible() for it in v._joints)
+
+
+# --- 3. a frame step no longer throws the user's zoom away ---------------
+
+def test_a_frame_step_keeps_the_zoom_and_pan(qapp, tmp_path):
+    """`set_image` re-fitted on every frame, so the client had to zoom and
+    pan again for each frame he corrected — the other half of the 2026-08-16
+    complaint. `_zoomed` already means "the user has taken the view over"."""
+    v = _client_view(tmp_path)
+    v.set_pose(_xy(), _scores())
+    v.zoom(6.0)
+    zoomed = v.transform().m11()
+
+    v.set_image(str(tmp_path / "left.png"))          # what a frame step does
+
+    assert v.transform().m11() == pytest.approx(zoomed)
+
+
+def test_a_view_the_user_has_not_touched_still_fits_the_photograph(
+        qapp, tmp_path):
+    v = _client_view(tmp_path)
+    fitted = v.transform().m11()
+    v.set_image(str(tmp_path / "left.png"))
+    assert v.transform().m11() == pytest.approx(fitted)
+
+    v.zoom(6.0)
+    v.fit()                                          # the Fit button
+    v.set_image(str(tmp_path / "left.png"))
+    assert v.transform().m11() == pytest.approx(fitted)
