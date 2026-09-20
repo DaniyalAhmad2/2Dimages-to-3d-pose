@@ -313,20 +313,19 @@ def report_placement(ch, up, valid, out) -> None:
     the export, so the gap is zero by construction and the number below says
     what it used to be.
 
-    The seat is `view3d.ground_datum`'s ankle branch, inlined rather than
-    imported: this tool must stay runnable without a Qt/OpenGL stack.
+    The seat is `geometry.placement.ground_datum` — imported, not inlined:
+    that module is pure geometry with no Qt behind it precisely so this tool,
+    `pose3d.quality` and the 3D view cannot drift apart on where the ground is.
     """
-    from pose3d.core.skeleton import Joint
-    drop = ch.ground_drop(up[0], valid[0])
+    from pose3d.geometry.placement import ground_datum
     off = []
     for k in range(len(up)):
         pose, v = up[k], valid[k]
-        _verts, _f, cj = ch.pose_and_joints(np.where(v[:, None], pose, np.nan), v)
+        vpose = np.where(v[:, None], pose, np.nan)
+        verts, _f, cj = ch.pose_and_joints(vpose, v)
         if cj is None:
             continue
-        z = [cj[int(j)][2] for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
-        z = [q for q in z if np.isfinite(q)]
-        seat = (min(z) - drop) if z else float(pose[v][:, 2].min())
+        seat = ground_datum(verts, cj, ch.ground_drop(vpose, v))
         off.append([pose[v][:, 0].mean(), pose[v][:, 1].mean(), seat])
     off = np.asarray(off, float)
     old = float(np.max(off.max(0) - off.min(0)) * ch._scale)

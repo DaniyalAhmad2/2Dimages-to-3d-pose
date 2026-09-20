@@ -436,8 +436,10 @@ def test_a_good_frame_does_not_withdraw_the_take_wide_warning(qapp):
     win = MainWindow(ProjectModel(data, rig))
 
     class Unsizable:
+        rig_h = 1.7
+
         def fit_to_subject(self, poses):
-            return None                      # the case that pulses
+            return None                      # no bone to fit against
 
         def pose_and_joints(self, *a, **k):  # ...but posing works fine
             return np.zeros((4, 3)), np.zeros((1, 3), int), np.zeros((15, 3))
@@ -445,21 +447,25 @@ def test_a_good_frame_does_not_withdraw_the_take_wide_warning(qapp):
         def ground_drop(self, *a, **k):
             return 0.0
 
+    said = "sized from the take's overall height"
     win.view3d._character = Unsizable()
     win.view3d._char_error = ""
     win.view3d.fit_subject(np.stack([gt, gt]))
-    assert "pulse" in win.view3d_error.text()
+    assert said in win.view3d_error.text()
 
     win.view3d._skin(np.zeros((15, 3)))
-    assert "pulse" in win.view3d_error.text(), (
+    assert said in win.view3d_error.text(), (
         "a good frame deleted the take-wide sizing warning")
     assert win.view3d_error.isVisibleTo(win._view3d_card)
 
 
 def test_an_unfittable_character_says_so_instead_of_pulsing(qapp):
-    """`fit_to_subject` returning None drops the rig back on a PER-FRAME
-    height ratio, which pulses the figure over a 37.9 % range on the client's
-    take. It used to return silently."""
+    """`fit_to_subject` returning None used to drop the rig back on a
+    PER-FRAME height ratio, which pulses the figure over a 37.9 % range on the
+    client's take — silently at first, then with a warning. It is now sized
+    once from the take's height instead (`placement.take_scale`, which the
+    export takes too), and the window says which of the two sizings it got."""
+    from pose3d.geometry.placement import SCALE_FROM_HEIGHT_NOTE
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel
 
@@ -467,6 +473,8 @@ def test_an_unfittable_character_says_so_instead_of_pulsing(qapp):
     win = MainWindow(ProjectModel(data, rig))
 
     class Unfittable:
+        rig_h = 1.7
+
         def fit_to_subject(self, poses):
             return None
 
@@ -474,7 +482,7 @@ def test_an_unfittable_character_says_so_instead_of_pulsing(qapp):
     win.view3d._char_error = ""
     win.view3d.fit_subject(np.stack([gt, gt]))
     assert win.view3d_error.isVisibleTo(win._view3d_card)
-    assert "pulse" in win.view3d_error.text()
+    assert win.view3d_error.text() == SCALE_FROM_HEIGHT_NOTE
 
 
 # --- Phase 4: set the scale from a measured distance ------------------------

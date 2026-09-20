@@ -25,9 +25,18 @@ from pyqtgraph import Vector
 from PySide6.QtCore import QTimer, Signal
 from PySide6.QtWidgets import QLabel, QPushButton, QVBoxLayout, QWidget
 
-from pose3d.core.skeleton import BONES, NUM_JOINTS, Joint
+from pose3d.core.skeleton import BONES, NUM_JOINTS
 from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import detect_vertical, upright_matrix
+# The ground rule is pure geometry and lives in `pose3d.geometry.placement`, so
+# that `pose3d.quality` and the fidelity tool — neither of which may import a
+# Qt/OpenGL stack — measure the SAME ground this view draws. Re-exported here
+# under its old name: it was this module's function for two phases and the
+# tests and tools that import it by that path are right to.
+from pose3d.geometry.placement import (  # noqa: F401  (ground_datum re-export)
+    ground_datum, take_floor, take_scale)
+from pose3d.ui.camera_view import HOLLOW_STATES, RAG_COLORS
+from pose3d.ui.model import STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED
 
 GL_UNAVAILABLE_TEXT = (
     "The 3D preview could not start: this machine's graphics driver did not "
@@ -108,28 +117,75 @@ class GLUnavailable(QWidget):
         return self._restart
 
 
-def ground_datum(verts, joints, drop):
-    """View-space z of the ground plane under a posed character.
+def _status_rgba(status: str) -> tuple:
+    """A band key as GL's RGBA, from the 2D overlay's own QColor.
 
-    The SOLE beneath the lower ANKLE, not the lowest mesh vertex. Which vertex
-    is lowest changes from frame to frame — a foot, a knee, a fingertip — so
-    the old rule slid the ground plane about under the figure and it bobbed
-    against the grid by up to 11 % of body height. The ankles are tracked
-    joints, so this datum moves only when the subject does. `drop` is the rig's
-    rest ankle-to-sole height in these same units (`Character.ground_drop`).
-    Falls back to the old rule when neither ankle could be posed.
-
-    The sole is deliberately NOT levelled onto the plane: the shin of this
-    rigid-footed mannequin genuinely tilts 16-86 deg, and flattening the foot
-    would replace a measurement with a convention.
+    `RAG_COLORS` and `HOLLOW_STATES` are IMPORTED from the camera view rather
+    than restated: two copies of a palette desync on one edit and the client's
+    whole complaint is that the two panels disagreed about which joints are
+    flagged. (They are that module's constants and this pass does not own that
+    file, which is the other reason they are imported and not moved.)
     """
-    if joints is not None:
-        z = [joints[int(j)][2]
-             for j in (Joint.LEFT_ANKLE, Joint.RIGHT_ANKLE)]
-        z = [q for q in z if np.isfinite(q)]
-        if z:
-            return float(min(z)) - float(drop)
-    return float(verts[:, 2].min())
+    c = RAG_COLORS.get(status, RAG_COLORS["red"])
+    alpha = View3D.HOLLOW_ALPHA if status in HOLLOW_STATES else 1.0
+    return (c.redF(), c.greenF(), c.blueF(), alpha)
+
+
+def _merge_states(states):
+    """Per-joint state from {camera: [state]} — the worse of the two views.
+
+    A rejection is a fact about the PAIR (the gate writes it to both cameras),
+    and "not measured" beats "ok" for the same reason the residuals take the
+    worse camera: a joint one view could not place is a joint with a problem.
+    """
+    if states is None:
+        return [STATE_OK] * NUM_JOINTS
+    per = list(states.values()) if isinstance(states, dict) else [states]
+    out = []
+    for j in range(NUM_JOINTS):
+        pick = STATE_OK
+        for s in per:
+            if s is None or j >= len(s):
+                continue
+            if s[j] == STATE_REJECTED:
+                pick = s[j]             # the instance: it carries px/gate
+                break
+            if s[j] == STATE_NOT_MEASURED:
+                pick = s[j]
+        out.append(pick)
+    return out
+
+
+def _merge_errors(errors):
+    """Per-joint MEASURED residual from one frame of `ProjectModel._accuracy`."""
+    if errors is None:
+        return np.full(NUM_JOINTS, np.nan)
+    if isinstance(errors, dict):
+        if all(isinstance(v, dict) for v in errors.values()):
+            from pose3d.ui.model import worst_per_joint
+            return np.asarray(worst_per_joint(errors, "measured"), float)
+        stack = [np.asarray(v, float) for v in errors.values()]
+        # fmax, not nanmax: a joint neither view saw gives NaN without the
+        # "all-NaN slice" warning, which is the same rule `worst_per_joint`
+        # uses for the same reason.
+        return np.fmax.reduce(np.stack(stack)) if stack else np.full(
+            NUM_JOINTS, np.nan)
+    return np.asarray(errors, float).ravel()
+
+
+def _merge_flags(flags):
+    """Per-joint boolean from {camera: [bool]}, an array, or None.
+
+    A joint corrected in EITHER view is corrected: the user placed it, and the
+    3D it produced is theirs whichever image they dragged it in.
+    """
+    if flags is None:
+        return np.zeros(NUM_JOINTS, bool)
+    if isinstance(flags, dict):
+        stack = [np.asarray(v, bool) for v in flags.values()]
+        return (np.any(np.stack(stack), axis=0) if stack
+                else np.zeros(NUM_JOINTS, bool))
+    return np.asarray(flags, bool).ravel()
 
 
 class View3D(gl.GLViewWidget):
@@ -144,6 +200,16 @@ class View3D(gl.GLViewWidget):
     BONE_COLOR = (0.95, 0.95, 0.98, 1.0)
     CAPTURE_COLOR = (1.0, 0.72, 0.25, 0.85)    # the measured skeleton
     FILLED_COLOR = (1.0, 0.62, 0.10, 1.0)      # interpolated, not measured
+
+    JOINT_SIZE = 11.0
+    CAPTURE_SIZE = 8.0
+    #: A joint with no measurement of its own, drawn smaller and half-lit. The
+    #: 2D overlay says the same thing with a hollow ring, which a GL point
+    #: sprite cannot draw; size and opacity are what this view has, and the
+    #: distinction has to survive into it or an interpolated joint reads as a
+    #: measured one.
+    HOLLOW_SIZE = 7.5
+    HOLLOW_ALPHA = 0.55
 
     #: The smallest the 3D view may be squeezed to. It lives here rather than
     #: at the call site because it is a fact about the view (a character in a
@@ -174,7 +240,8 @@ class View3D(gl.GLViewWidget):
         # Read off the posed rig rather than from the triangulated points, so
         # the overlay always sits inside the body it belongs to.
         self._scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3)), size=11.0, color=self.JOINT_COLOR, pxMode=True)
+            pos=np.zeros((1, 3)), size=self.JOINT_SIZE,
+            color=self.JOINT_COLOR, pxMode=True)
         self.addItem(self._scatter)
         self._lines = gl.GLLinePlotItem(
             pos=np.zeros((2, 3)), width=2.5, color=self.BONE_COLOR, mode="lines")
@@ -184,7 +251,8 @@ class View3D(gl.GLViewWidget):
         # Kept available so the fit can be judged, in a dimmer colour so it
         # reads as reference rather than as the result.
         self._cap_scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3)), size=8.0, color=self.CAPTURE_COLOR, pxMode=True)
+            pos=np.zeros((1, 3)), size=self.CAPTURE_SIZE,
+            color=self.CAPTURE_COLOR, pxMode=True)
         self._cap_scatter.setVisible(False)
         self.addItem(self._cap_scatter)
         self._cap_lines = gl.GLLinePlotItem(
@@ -204,6 +272,10 @@ class View3D(gl.GLViewWidget):
         self._vaxis = None
         self._vsign = 1.0
         self._R = None                  # world->view rotation (sequence de-tilt)
+        # (states, errors, corrected) as the window holds them for this frame,
+        # or None while nobody has handed any over — see `set_joint_status`.
+        self._status = None
+        self._last_draw = None          # (points, mask, filled) last drawn
         self._char_error = ""           # last message sent to characterError
         self._char_error_source = ""    # which stage put it there
         self._gl_error = ""             # why OpenGL is unusable, if it is
@@ -313,24 +385,19 @@ class View3D(gl.GLViewWidget):
             self._take = raw
             self._place = None
             poses = raw @ self._R.T if self._R is not None else raw
-            scale = self._character.fit_to_subject(poses)
+            _scale, note = take_scale(self._character, poses)
         except Exception as e:
             self._report(f"The character could not be prepared for this take "
                          f"({type(e).__name__}: {e}) — the 3D view is showing "
                          f"the captured skeleton only.", "fit")
             return
-        if scale is None:
-            # No bone in the take was long enough to size the rig against, so
-            # `_frame_scale` falls back to a PER-FRAME height ratio — which
-            # pulses the figure over a 37.9 % range on the client's take.
-            # Silence here is what made that look like the reconstruction
-            # breathing rather than the fit never having happened.
-            self._report(
-                "The character could not be sized to this subject (no bone "
-                "was reconstructed well enough to fit against), so its size "
-                "is re-guessed every frame and the figure will pulse.", "fit")
-        else:
-            self._report("")
+        # `note` is "" when the bone fit worked, which withdraws any previous
+        # one. When it did not, the take is sized from its height instead —
+        # ONE size, by `take_scale`, which the export now takes too, rather
+        # than the per-frame ratio that used to pulse the figure over a 37.9 %
+        # range here while the export shipped the same pulse with no note at
+        # all.
+        self._report(note, "fit")
 
     def _ensure_character(self):
         if self._character is None:
@@ -347,20 +414,25 @@ class View3D(gl.GLViewWidget):
             against the pelvis by up to 5.8 % of body height and quietly
             deleted the subject's travel;
           * vertically, Phase 2's ankle datum — the sole beneath the lower
-            ankle, never the lowest mesh vertex — taken at its LOWEST over the
-            take, so the grid is the ground the subject actually stood on and
-            the figure rises off it when the subject did instead of being
-            re-seated frame by frame (that re-seating was a 34 % of rig height
-            swing the export had no counterpart for).
+            ankle, never the lowest mesh vertex — taken over the take by
+            `placement.take_floor`, so the grid is the ground the subject
+            actually stood on and the figure rises off it when the subject did
+            instead of being re-seated frame by frame (that re-seating was a
+            34 % of rig height swing the export had no counterpart for).
 
-        VISIBLE CONSEQUENCE, on the record: seating on the LOWEST sole the take
-        reaches means the figure touches the grid on exactly one frame and
-        stands above it on the rest — by up to 34.34 % of rig height on the
-        client take, which is the spread of the per-frame seat that used to be
-        applied. That is the honest reading of the data (the subject really
-        was higher on those frames) and it is what makes the preview and the
-        export the same rigid map, but it is a change to what the preview
-        looks like and worth saying out loud rather than discovering.
+        VISIBLE CONSEQUENCE, on the record: the take is seated ONCE, so a frame
+        the subject spent in the air is drawn in the air. What the floor may
+        NOT be is one frame's opinion: seating on `min(seats)` let the single
+        lowest sole of the take decide where the ground was, and every other
+        frame then floated by however far that one dipped — the client's own
+        take spreads 44.6 % of body height between its lowest sole and its
+        highest. `take_floor` therefore discards the lowest tenth of the frames
+        (see its docstring), which on that take moves the floor by 0.70 % of
+        height and leaves 3 frames of 26 below the grid. On this take the hover
+        is mostly REAL — it contains jumps and kicks, and the sole heights are
+        spread continuously rather than clustered with one outlier — so the
+        robust floor is a guard against one bad frame, not a cure for the
+        float; that is worth saying out loud rather than discovering.
 
         (None, 0.0) when the take is not known yet — a single `set_pose` with
         no `fit_subject` still draws, on the old per-frame rule.
@@ -409,10 +481,11 @@ class View3D(gl.GLViewWidget):
                     continue
                 seats.append(ground_datum(verts, cj, ch.ground_drop(vpose, valid)))
                 pelvis.append(take_pelvis_ref(pose[None]))
-            if not seats:
+            floor = take_floor(seats)
+            if floor is None:
                 self._place = (None, 0.0)
                 return self._place
-            offset = np.array([ref[0], ref[1], float(min(seats))])
+            offset = np.array([ref[0], ref[1], floor])
             pel = np.asarray([p for p in pelvis if p is not None], float)
             travel = float(np.linalg.norm(pel.max(0) - pel.min(0))) if len(pel) else 0.0
             self._place = (offset, travel)
@@ -423,6 +496,53 @@ class View3D(gl.GLViewWidget):
                          f"export.", "place")
             self._place = (None, 0.0)
         return self._place
+
+    def _sync_take(self, pose):
+        """Keep the cached take in step with a pose the model has re-solved.
+
+        A correction is not a frame change. `main_window` wires
+        `model.pose3dChanged` straight to `set_pose`, and a drag with Auto
+        Recalculate on rewrites that frame's `fitted3d` and emits it down the
+        same signal — while `fit_subject`, the only thing that refreshes
+        `self._take` and clears `self._place`, is on none of those paths. The
+        view therefore went on seating and sizing the whole take from poses
+        that no longer existed: drag the ankle of the frame that defines the
+        floor and the corrected foot sinks through the grid, with the rest of
+        the take mis-seated, until the user happens to press Recalculate 3D.
+
+        `set_pose` is not told WHICH frame it is drawing, so the frame is
+        identified by the pose itself: a row of the take that matches exactly
+        is this frame arriving unchanged (the ordinary timeline step, which
+        must stay free), and otherwise the nearest row — by how many joints
+        differ in whether they exist at all, then by the largest coordinate
+        difference — is the frame that was just edited. A drag moves one joint
+        a little, so the nearest row IS its own. Two identical frames make the
+        choice between them arbitrary and harmless: every rule built on the
+        take (the floor, the pelvis, the scale) is an aggregate over the
+        frames, so swapping which of two identical rows carries the edit
+        changes none of them.
+        """
+        if self._take is None:
+            return
+        here = np.isfinite(pose).all(1)
+        best, score = None, None
+        for i, row in enumerate(self._take):
+            there = np.isfinite(row).all(1)
+            both = here & there
+            s = (int((here != there).sum()),
+                 float(np.abs(row[both] - pose[both]).max()) if both.any()
+                 else float("inf"))
+            if score is None or s < score:
+                best, score = i, s
+        if score == (0, 0.0):
+            return                      # this frame, unchanged: nothing to do
+        take = np.array(self._take, float)
+        take[best] = pose
+        # Through `fit_subject`, not by clearing `_place` here: a correction
+        # changes the subject's measured bone lengths too, and the export
+        # re-fits from the saved poses when it runs. Re-sizing here is what
+        # keeps the preview the same figure the export will write.
+        self.fit_subject(take)
 
     def _to_view(self, pts):
         """World -> view rotation. Shape-agnostic: used for the canonical
@@ -466,6 +586,7 @@ class View3D(gl.GLViewWidget):
         if not valid.any():
             self._clear()
             return
+        self._sync_take(pose3d)
 
         if self._R is None and self._vaxis is None:
             self._vaxis, self._vsign = self._detect_vertical(pose3d, valid)
@@ -518,19 +639,25 @@ class View3D(gl.GLViewWidget):
 
         # primary overlay: the character's OWN joints, which by construction lie
         # inside the mesh. Falls back to the captured points if there's no rig.
+        #
+        # The character's joints, NOT the capture, are also what carries the
+        # banding: a joint the cross-view gate refused has no 3D of its own
+        # (it is NaN in `v` and absent from the capture overlay), while the rig
+        # still poses the limb — so this is the only overlay that can mark it
+        # at all, which is exactly the half of the complaint the 2D fix left
+        # open ("a joint that is simply absent, with no marking").
         if cj is not None:
-            self._draw_skeleton(self._scatter, self._lines, cj,
-                                ~np.isnan(cj).any(1), self.JOINT_COLOR, filled)
+            self._last_draw = (cj, ~np.isnan(cj).any(1), filled)
         else:
-            self._draw_skeleton(self._scatter, self._lines, v, valid,
-                                self.JOINT_COLOR, filled)
+            self._last_draw = (v, valid, filled)
+        self._draw_joints()
 
         # Reference overlay: what the cameras actually MEASURED — so a joint
         # that was interpolated across a dropout is simply absent from it,
         # rather than sitting there in the same amber as everything else.
         measured = valid if filled is None else valid & ~np.asarray(filled, bool)
         self._draw_skeleton(self._cap_scatter, self._cap_lines, v, measured,
-                            self.CAPTURE_COLOR)
+                            self.CAPTURE_COLOR, size=self.CAPTURE_SIZE)
         self._set_body(verts, faces)
 
         if not self._framed:
@@ -544,15 +671,90 @@ class View3D(gl.GLViewWidget):
                                    distance=span * 1.9, elevation=12, azimuth=-70)
             self._framed = True
 
+    # --- per-joint status (the same banding the 2D overlays use) ------------
+    def set_joint_status(self, states=None, errors=None, corrected=None):
+        """Band the 3D joints by the numbers the camera panels band theirs by.
+
+        The client, 2026-07-26: "you also cant see which joints are flagged as
+        red on either the images on the left or the generated one on the
+        right." The 2D half was delivered and this one was not — every joint
+        in the 3D preview was the same cyan, including the ones whose
+        reconstruction the app itself distrusts.
+
+        Takes what the window already holds for the current frame, in the
+        shapes it holds them in, so no caller has to reduce anything itself:
+
+        * `states` — `ProjectModel.joint_states(idx)`, i.e. {camera: [state]},
+          or one already-merged list;
+        * `errors` — one frame of `ProjectModel._accuracy`, i.e.
+          {camera: {"measured": [...], "delivered": [...]}}, or one array of
+          per-joint residuals;
+        * `corrected` — `Frame.corrected`, i.e. {camera: [bool]}, or one array.
+
+        Two cameras, one joint, so the two views are merged the way the rest
+        of the app merges them: the WORSE of the two (`worst_per_joint`), never
+        their mean — a joint the left camera places well and the right does not
+        is a joint with a problem, and the mean says it is half a problem.
+
+        It is banded on the MEASURED residual, like the 2D dots and unlike the
+        gauge, so that the same joint is the same colour in both panels. That
+        the two panels agreed is the entire point of the fix; banding this one
+        on the delivered pose would have them disagree by a band on any joint
+        the bone fit moved.
+
+        Passing nothing clears the banding and the skeleton goes back to one
+        colour.
+        """
+        self._status = (None if states is None and errors is None
+                        and corrected is None else (states, errors, corrected))
+        self._draw_joints()
+
+    def _joint_statuses(self, filled=None):
+        """One band key per joint, or None when there is nothing to band by."""
+        if self._status is None:
+            return None
+        from pose3d.ui.panels import joint_status
+        states, errors, corrected = self._status
+        state = _merge_states(states)
+        err = _merge_errors(errors)
+        cor = _merge_flags(corrected)
+        fil = _merge_flags(filled)
+        return [joint_status(state[j], err[j], fil[j], cor[j])
+                for j in range(NUM_JOINTS)]
+
+    def _draw_joints(self):
+        """(Re)draw the character overlay with whatever status is current.
+
+        Its own method because the pose and the banding arrive on two
+        different signals (`pose3dChanged` and `accuracyChanged`) and nothing
+        orders them: whichever lands second must colour what the first drew,
+        or the view would show one frame's poses in the previous frame's
+        colours until something else moved.
+        """
+        if self._last_draw is None:
+            return
+        pts, mask, filled = self._last_draw
+        self._draw_skeleton(self._scatter, self._lines, pts, mask,
+                            self.JOINT_COLOR, filled,
+                            status=self._joint_statuses(filled),
+                            size=self.JOINT_SIZE)
+
     @classmethod
     def _draw_skeleton(cls, scatter, lines, pts, valid, base_color=None,
-                       filled=None):
+                       filled=None, status=None, size=None):
         idx = np.flatnonzero(valid)
-        if idx.size and base_color is not None:
+        if idx.size and status is not None:
+            colors = np.array([_status_rgba(status[int(j)]) for j in idx],
+                              float)
+            sizes = np.array([cls.HOLLOW_SIZE if status[int(j)] in HOLLOW_STATES
+                              else cls.JOINT_SIZE for j in idx], float)
+            scatter.setData(pos=pts[idx], color=colors, size=sizes)
+        elif idx.size and base_color is not None:
             colors = np.tile(np.asarray(base_color, float), (idx.size, 1))
             if filled is not None:
                 colors[np.asarray(filled, bool)[idx]] = cls.FILLED_COLOR
-            scatter.setData(pos=pts[idx], color=colors)
+            kw = {} if size is None else {"size": float(size)}
+            scatter.setData(pos=pts[idx], color=colors, **kw)
         else:
             scatter.setData(pos=pts[idx] if idx.size else np.zeros((1, 3)))
         seg = []
@@ -624,6 +826,7 @@ class View3D(gl.GLViewWidget):
         self._body.setVisible(self._show_body and active)
 
     def _clear(self):
+        self._last_draw = None          # nothing on screen to re-colour
         for s, l in ((self._scatter, self._lines),
                      (self._cap_scatter, self._cap_lines)):
             s.setData(pos=np.zeros((1, 3)))

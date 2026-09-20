@@ -106,6 +106,54 @@ def acc_label(pct: float) -> str:
     return _BAND_LABELS[acc_band(pct)]
 
 
+def joint_status(state=None, err=float("nan"), filled=False,
+                 corrected=False) -> str:
+    """One joint's band key, from everything that decides it.
+
+    The rule the camera views' dots are drawn by, stated once and in a module
+    with no widget in it, so the 3D preview can band its joints by the SAME
+    answer instead of a second copy that drifts. That the two panels disagreed
+    at all is the client's oldest open complaint (2026-07-26: "you also cant
+    see which joints are flagged as red on either the images on the left or
+    the generated one on the right").
+
+    The order is the whole rule and it is deliberate:
+
+    * a joint the cross-view gate REJECTED has no measurement to be good or
+      bad, so it is never banded — it is its own state;
+    * neither is one with no 3D at all ("not measured" is a different fact
+      from "measured, and badly", and banding it by the detector's confidence
+      is how a joint the pipeline never triangulated came out green);
+    * otherwise the accuracy decides, through `acc_band` — the single source
+      of banding;
+    * and the last two words are what the joint IS rather than how well it was
+      measured: an interpolated joint is not a measurement of this frame, and
+      a hand-placed one is the user overruling the geometry. They come last
+      because they overrule the band, not the other way round.
+
+    `state` is `pose3d.ui.model`'s per-joint state; `err` the MEASURED
+    residual as a fraction of the figure's height (NaN when there is none).
+    """
+    # Imported here rather than at the top: `pose3d.ui.model` drags in the
+    # whole pipeline, and this module is also imported for the banding
+    # arithmetic alone (the legend, the timeline, the tests). The states
+    # themselves are model's to define — two copies of three string constants
+    # desync on a typo with nothing to catch it.
+    from pose3d.ui.model import STATE_NOT_MEASURED, STATE_REJECTED
+
+    if state == STATE_REJECTED:
+        status = "rejected"
+    elif state == STATE_NOT_MEASURED or not np.isfinite(err):
+        status = "unmeasured"
+    else:
+        status = acc_band(accuracy_pct(err))
+    if filled:
+        status = "filled"
+    if corrected:
+        status = "corrected"
+    return status
+
+
 def _section(title: str) -> QLabel:
     lab = QLabel(title)
     lab.setObjectName("sectionHeader")
@@ -577,8 +625,19 @@ class Sidebar(QWidget):
         self.row_res.set_value(res)
 
     def set_calibrated(self, ok: bool, warnings=()):
+        """The calibration headline, and the lines under it.
+
+        A line is a PROBLEM or a note (`calib.quality.is_problem`), and only a
+        problem may turn the headline amber. Every line this app produces for
+        the client's own rig — lenses estimated from the photo size, two
+        cameras of different resolutions, a marker tag at an arbitrary
+        rotation — is a note: the import worked, and saying "with problems"
+        over three of them is how a correct run came out looking broken.
+        """
+        from pose3d.calib.quality import is_problem
         warnings = list(warnings)
-        if ok and warnings:
+        problems = [w for w in warnings if is_problem(w)]
+        if ok and problems:
             self.calib_status.setText("⚠ Calibrated (with problems)")
             self.calib_status.setStyleSheet("color:#e0a33a;")
         else:
@@ -588,6 +647,10 @@ class Sidebar(QWidget):
         self.calib_warn.setText("\n\n".join(f"• {w}" for w in warnings))
         self.calib_warn.setToolTip("\n\n".join(warnings))
         self.calib_warn.setVisible(bool(warnings))
+        # ...and notes are not painted in the warning amber either: the colour
+        # is the first thing read and it must agree with the headline.
+        self.calib_warn.setStyleSheet(
+            f"color:{'#e0a33a' if problems else '#8a91a3'}; font-size:11px;")
 
     def show_levelling_note(self, on: bool, source: str = "subject",
                             spread_deg: float | None = None,

@@ -162,10 +162,12 @@ def _headless_view(poses):
     v._show_body = True
     v._char_error = ""
     v._char_error_source = ""
+    v._status = None
+    v._last_draw = None
     v.drawn = {}
 
     def _draw_skeleton(scatter, lines, pts, valid, base_color=None,
-                       filled=None):
+                       filled=None, status=None, size=None):
         v.drawn[scatter] = (np.asarray(pts, float).copy(),
                             np.asarray(valid, bool).copy())
 
@@ -261,6 +263,273 @@ def test_the_view_and_the_export_place_the_figure_the_same_way():
     resid = expected - seen * ch._scale
     assert np.abs(resid - resid.mean(0)).max() <= 1e-6 * ch.rig_h, \
         f"view and export disagree by {np.abs(resid - resid.mean(0)).max():.6f} rig units"
+
+
+# --- the floor the take is seated on ---------------------------------------
+
+def test_the_floor_is_a_low_quantile_of_the_per_frame_seats():
+    """The rule itself, without a character in the way.
+
+    A take's floor is the lowest sole the subject reached EXCEPT the lowest
+    tenth of its frames, so one bad frame cannot decide where the ground is —
+    and it is an order statistic, never an interpolation between two frames, so
+    the floor is always a height some frame actually stood at.
+    """
+    from pose3d.geometry.placement import take_floor
+    assert take_floor([]) is None
+    assert take_floor([0.5]) == 0.5
+    assert take_floor([-3.0] + [0.0] * 9) == 0.0        # one dip in ten
+    assert take_floor([-3.0, -3.0] + [0.0] * 18) == 0.0  # two in twenty
+    assert take_floor([-3.0, -1.0] + [0.0] * 8) == -1.0  # only one is spared
+    assert take_floor([-3.0, 0.0]) == -3.0   # two frames: nothing to be robust on
+    assert take_floor([float("nan"), 1.0, 1.0]) == 1.0   # a NaN is not a seat
+
+
+def _standing_take(n=10, dip=0.0, dip_frame=None, jump=0.0, jump_frame=None):
+    """One standing pose, repeated, with at most one frame moved vertically.
+
+    `dip` and `jump` are fractions of body height. A take like this is the
+    controlled version of what the seat rule has to survive: the subject stood
+    still, and ONE frame's ankle came out low (a dropped reconstruction, a foot
+    the detector put through the floor) or high (a jump).
+    """
+    from tests.synth import sample_skeleton_3d
+    base = sample_skeleton_3d()
+    h = float(np.ptp(base[:, 2]))
+    out = []
+    for i in range(n):
+        p = base.copy()
+        if dip_frame is not None and i == dip_frame:
+            p[:, 2] -= dip * h
+        if jump_frame is not None and i == jump_frame:
+            p[:, 2] += jump * h
+        out.append(p)
+    return np.stack(out)
+
+
+def _sole_above_grid_pct(view, poses):
+    """Per frame: the gap between the character's sole and the grid, % of height.
+
+    Read off what `set_pose` DRAWS — the character's own ankle joint, less the
+    rig's rest ankle-to-sole drop — because that is the gap the client sees
+    between the feet and the grid, and it is the number his complaint is about.
+    """
+    ch = view._character
+    height = float(np.median([_z_extent(p) for p in poses]))
+    out = []
+    for pose in poses:
+        view.set_pose(pose)
+        cj = view.drawn["char"][0]
+        valid = ~np.isnan(pose).any(1)
+        z = min(float(cj[int(Joint.LEFT_ANKLE), 2]),
+                float(cj[int(Joint.RIGHT_ANKLE), 2]))
+        out.append((z - ch.ground_drop(pose, valid)) / height * 100.0)
+    return np.asarray(out)
+
+
+@needs_character()
+def test_one_dipping_frame_does_not_lift_the_rest_of_the_take():
+    """Seating the take on its single LOWEST sole is one frame's opinion.
+
+    The client complained the figure clipped through the floor; the fix for it
+    seated the whole take on the lowest sole the take reaches, which leaves
+    every other frame hovering by however far that one frame dipped (34.3 % of
+    body height on his take). One outlying frame may not decide where the floor
+    is: the take is seated on a low QUANTILE of the per-frame soles, so a
+    subject who stood still stands ON the grid.
+    """
+    poses = _standing_take(n=10, dip=0.30, dip_frame=4)
+    view = _headless_view(poses)
+
+    gap = _sole_above_grid_pct(view, poses)
+    standing = np.delete(gap, 4)
+    assert abs(standing).max() <= 2.0, \
+        f"the standing frames hover {standing.max():.1f} % of height above the grid"
+    # ...and the frame that really was lower is still drawn lower, which is the
+    # honest reading of it: the floor is where the subject stood, not where the
+    # worst frame of the reconstruction went.
+    assert gap[4] <= -25.0
+
+
+@needs_character()
+def test_a_jump_still_leaves_the_floor():
+    """The robust floor must not flatten the take onto the grid either."""
+    poses = _standing_take(n=10, jump=0.30, jump_frame=4)
+    view = _headless_view(poses)
+
+    gap = _sole_above_grid_pct(view, poses)
+    assert gap[4] >= 25.0, "the jump was seated back onto the grid"
+    assert abs(np.delete(gap, 4)).max() <= 2.0
+
+
+@needs_character()
+def test_what_the_robust_floor_does_to_the_client_take():
+    """The honest measurement, on the take the complaint is about.
+
+    Measured here, not assumed: the client's 26 frames spread 44.6 % of body
+    height between their lowest sole and their highest, and the distribution
+    is CONTINUOUS — there is no single dipping frame holding the rest up. So
+    the robust floor moves the seat by 0.70 % of height and leaves 3 frames
+    below the grid, and the figure still stands well clear of it on the frames
+    where the subject jumped or kicked. That is the reconstruction reporting
+    what the take contains; the floor rule is a guard against one bad frame,
+    not a cure for a take with real air in it.
+    """
+    poses = fixture_poses()
+    view = _headless_view(poses)
+    gap = _sole_above_grid_pct(view, poses)
+
+    assert int((gap < 0).sum()) == 3          # the lowest tenth, by the rule
+    assert gap.min() > -1.0                   # and barely below: measured -0.73 %
+    assert 8 <= int((np.abs(gap) <= 2.0).sum())   # the standing frames, on it
+    assert gap.max() > 25.0                   # ...and the jump still a jump
+    assert 4.0 < float(np.median(gap)) < 9.0  # measured 6.33 %
+
+
+@needs_character()
+def test_the_view_and_the_export_agree_on_the_client_take():
+    """The binding invariant, on real data rather than a synthetic walk.
+
+    The same similarity check as the synthetic version above — the export is
+    the view through one scale and one constant offset — but over 26
+    photographed frames with dropouts, a jump and a kick in them, which is
+    where a placement rule that is subtly per-frame shows up.
+    """
+    from pose3d.geometry.character import take_pelvis_ref
+    poses = fixture_poses()
+    view = _headless_view(poses)
+    ch = view._character
+    ref = take_pelvis_ref(poses)
+    assert view._take_placement()[0] is not None
+
+    seen, expected = [], []
+    for pose in poses:
+        valid = ~np.isnan(pose).any(1)
+        if not valid.any():
+            continue
+        _mats, al = ch.pose_bone_matrices(pose, valid, None,
+                                          keep_root_motion=True,
+                                          pelvis_ref=ref, return_alignment=True)
+        if al is None:
+            continue
+        rig = ch._joints_from_skin(ch._skin_matrices(pose, valid)[0])
+        exported = (al.transform[:3, :3] @ rig.T).T + al.transform[:3, 3]
+        view.set_pose(pose)
+        drawn = view.drawn["char"][0]
+        for j in range(len(drawn)):
+            if np.isfinite(rig[j]).all() and np.isfinite(drawn[j]).all():
+                seen.append(drawn[j]); expected.append(exported[j])
+
+    resid = np.asarray(expected) - np.asarray(seen) * ch._scale
+    assert np.abs(resid - resid.mean(0)).max() <= 1e-6 * ch.rig_h, \
+        f"view and export disagree by {np.abs(resid - resid.mean(0)).max():.6f}"
+
+
+@needs_character()
+def test_the_view_and_the_metrics_measure_the_same_ground():
+    """One ground rule, called by the view and by `quality.limb_metrics`.
+
+    The rule lived in the Qt widget module, so `pose3d.quality` — which the
+    CLI tools and this suite import without Qt — went on measuring the
+    lowest-mesh-vertex rule the view had replaced, and reported a peak-to-peak
+    "bob" that the take-wide seat means nobody ever sees.
+    """
+    from pose3d.geometry.placement import ground_datum as shared
+    from pose3d.quality import limb_metrics
+    from pose3d.ui.view3d import ground_datum as used_by_the_view
+    assert used_by_the_view is shared
+
+    poses = fixture_poses()
+    view = _headless_view(poses)
+    height = float(np.median([_z_extent(p) for p in poses]))
+    gap = _sole_above_grid_pct(view, poses)
+
+    metric = limb_metrics(view._character, poses, height)["ground_datum_pct"]
+    assert metric["n"] == len(poses)
+    assert np.isclose(metric["median"], float(np.median(gap)), atol=1e-6)
+    assert np.isclose(metric["peak_to_peak"], float(np.ptp(gap)), atol=1e-6)
+
+
+@needs_character()
+def test_a_corrected_frame_re_places_and_re_sizes_the_take():
+    """A drag rewrites one frame's 3D, and the take-wide rules must follow it.
+
+    `_place` is invalidated by `set_orientation`, `fit_subject` and `reframe`,
+    and the live drag path runs none of them: main_window wires
+    `model.pose3dChanged` straight to `set_pose`. So after a correction the
+    view kept seating (and sizing) the figure from poses that no longer exist —
+    drag the ankle of the frame that defines the take's floor and the corrected
+    foot sank through the grid, with the whole take mis-seated, until the user
+    happened to press Recalculate 3D. The cache's own docstring promises
+    "cached until the take or the orientation changes".
+    """
+    poses = _standing_take(n=10)
+    view = _headless_view(poses)
+    place0, _travel0 = view._take_placement()
+    scale0 = view._character._scale
+
+    edited = poses[3].copy()
+    edited[:, 0] += 0.5            # this frame's subject is half a metre over
+    view.set_pose(edited)
+
+    corrected = poses.copy()
+    corrected[3] = edited
+    fresh = _headless_view(corrected)
+    want, _travel = fresh._take_placement()
+    place1, _travel1 = view._take_placement()
+    assert not np.allclose(place1, place0), "the correction changed nothing"
+    assert np.allclose(place1, want), "the take was placed from stale poses"
+    assert np.isclose(view._character._scale, fresh._character._scale)
+    assert scale0 is not None      # the fit had happened before the correction
+
+
+@needs_character()
+def test_a_corrected_frame_re_sizes_the_character_too():
+    """The character's size is a take-wide fit, and it is re-measured too.
+
+    Not only the placement: `fit_to_subject` reads the subject's median bone
+    lengths, and a correction that moves a joint moves them. The export
+    re-fits from the saved poses when it runs, so a preview that kept the old
+    fit would be a different-sized figure from the file the client receives.
+
+    Two frames, because that is the smallest take whose median a single
+    correction can move — with ten, one edited frame leaves the median exactly
+    where it was, which is the fit being robust rather than the fit being
+    stale.
+    """
+    poses = _standing_take(n=2)
+    view = _headless_view(poses)
+    scale0 = view._character._scale
+
+    edited = poses[1] * 1.4
+    view.set_pose(edited)
+
+    corrected = poses.copy()
+    corrected[1] = edited
+    fresh = _headless_view(corrected)
+    assert not np.isclose(view._character._scale, scale0)
+    assert np.isclose(view._character._scale, fresh._character._scale)
+
+
+@needs_character()
+def test_stepping_frames_does_not_re_measure_the_take():
+    """...and the cache still IS a cache.
+
+    Every frame change goes through the same `set_pose`, so a placement that
+    re-measured whenever the pose differed from the last one would re-pose the
+    whole take on every step through the timeline.
+    """
+    poses = _travelling_take()
+    view = _headless_view(poses)
+    view._take_placement()
+    calls = []
+    real = view._character.pose_and_joints
+    view._character.pose_and_joints = lambda *a, **kw: (calls.append(1),
+                                                        real(*a, **kw))[1]
+    for pose in poses:
+        view.set_pose(pose)
+    assert len(calls) == len(poses), \
+        "stepping the timeline re-measured the take"
 
 
 @needs_character()

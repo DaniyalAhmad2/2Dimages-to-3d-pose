@@ -34,6 +34,17 @@ ANSWERS = """for i in range(3):
 print("POSE3D_EXPORT_OK", flush=True)
 """
 
+# ...and one whose OUTPUT ends while the process does not: a Windows crash
+# where WerFault holds the process open after its handles are closed, or a
+# Blender that closes stdout before a hung FBX/ffmpeg teardown. The read loop
+# sees EOF and leaves; what happens next used to be an unbounded wait.
+# (30 s, not 300: a failing run should cost the suite half a minute.)
+CLOSES_AND_HANGS = """import os, sys, time
+print("Blender 5.1.1 starting", flush=True)
+os.close(1); os.close(2)
+time.sleep(30)
+"""
+
 
 def _script(tmp_path, body, name="fake_blender.py"):
     path = tmp_path / name
@@ -159,6 +170,48 @@ def test_the_launch_defaults_are_unchanged_for_todays_callers(tmp_path,
         character=None, blender="blender")
     assert res.ok
     assert procs[0].returncode == 0
+
+
+def test_a_child_that_closes_its_pipe_but_never_exits_is_stopped(tmp_path,
+                                                                 monkeypatch):
+    """EOF is not exit, and the reap after it had no deadline of its own.
+
+    The GUI export runs with `timeout=None, idle_timeout=300`, so `left` came
+    out None and the worker thread blocked in `proc.wait(None)` for ever —
+    behind a window-modal progress dialog whose Cancel sets a flag that
+    nothing past this point read. The same "hung Blender with nothing to kill
+    it" this module's rewrite removed, moved from the read to the wait.
+    """
+    procs = _spy(monkeypatch, _script(tmp_path, CLOSES_AND_HANGS))
+
+    started = time.monotonic()
+    res = blender_export.export_animation(
+        _poses(), tmp_path / "out", name="w", render_video=False,
+        character=None, blender="blender", idle_timeout=2, timeout=None)
+    elapsed = time.monotonic() - started
+
+    assert res.reason == "blender_timeout", res.reason
+    assert elapsed < 20, f"waited {elapsed:.1f}s on a 2s idle deadline"
+    assert procs[0].returncode is not None, "the child was never reaped"
+    if os.name == "posix":
+        assert procs[0].returncode < 0, "the child was never killed"
+    assert "Blender 5.1.1 starting" in res.stdout
+
+
+def test_a_cancel_after_the_pipe_closes_is_still_noticed(tmp_path, monkeypatch):
+    """Cancel is the GUI's real guard, so it has to reach past EOF too."""
+    procs = _spy(monkeypatch, _script(tmp_path, CLOSES_AND_HANGS))
+
+    started = time.monotonic()
+    res = blender_export.export_animation(
+        _poses(), tmp_path / "out", name="wc", render_video=False,
+        character=None, blender="blender", idle_timeout=600, timeout=None,
+        cancelled=lambda: time.monotonic() - started > 1)
+    elapsed = time.monotonic() - started
+
+    assert res.reason == "blender_cancelled", res.reason
+    assert elapsed < 20, f"the cancel took {elapsed:.1f}s to be noticed"
+    assert procs[0].returncode is not None
 
 
 @pytest.mark.parametrize("reason", ["blender_timeout", "blender_cancelled"])
