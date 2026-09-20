@@ -168,7 +168,10 @@ still fails, because it repairs the system copies too.
 The milestone was rejected on a client who still could not open the app, with seven earlier
 complaints he had never confirmed as fixed. This pass closes the Priority 1 list and the
 Priority 2 items that answer a complaint, in five isolated worktrees with one owner per file,
-and ships as ONE resubmission build. Rulings, each with what it costs if it is wrong:
+and ships as ONE resubmission build. Rulings, each with what it costs if it is wrong. Where a
+ruling governs work owned by another task of this pass, it records the DECISION and the reason,
+not the state of the code — those tasks are implemented in parallel, and the wording is settled
+against the delivered behaviour once they merge:
 
 - **The marker size box is centimetres** (label "ArUco marker size (cm)", default 5.00, range
   0.5–200, two decimals), converted to metres where the dialog reads it, so `project.json`,
@@ -181,23 +184,24 @@ and ships as ONE resubmission build. Rulings, each with what it costs if it is w
   he has never asked for it in the thread. It is listed in the release note as still to come,
   with the ruler photograph that would settle the figure's true size. Cost if wrong: he opens the
   FBX expecting centimetres and finds rig units — which is what the note tells him.
-- **Reusing the main window when a second project is imported stays deferred** to the UI/UX
-  audit. The leaked old window is now closed properly, so nothing is left behind; what remains is
-  that Import opens a new window rather than reusing the open one. Cost if wrong: a second window
-  the client closes.
-- **The floor is a robust datum, not the lowest point.** The ground is taken from the take as a
-  whole rather than from whichever foot dips furthest in a frame, so one bad ankle cannot push the
-  whole character down through the floor or bob it against it. Cost if wrong: a take genuinely
-  captured off the ground sits at a small constant offset, visible and correctable.
-- **"Calibrated (with problems)" is reworded, and one warning is hidden.** The nominal-up warning
-  is not shown when the recorded vertical is in use — it is a statement about a fallback that did
-  not happen — and the other two become plainly-worded notes rather than problems, because a
-  non-technical client reading "problems" on a calibration that is fine stops there. Cost if
-  wrong: a wording change.
-- **Included in this pass** (Priority 2 items that answer a complaint): undo on the wrong frame,
-  re-detect and batch NECK/PELVIS, set-scale rescale off the GUI thread, confidence colouring in
-  the 3D view, floor hover, the calibration wording above, skipping 0-byte images, the timeline
-  highlight and Show filter, the export/preview framing mismatch, and the drag placement cache.
+- **Ruling: reusing the main window when a second project is imported is deferred** to the UI/UX
+  audit (the user's earlier decision). What this pass is to do instead is close the leaked old
+  window properly so nothing is left behind; Import opening a new window rather than reusing the
+  open one is accepted for this build. Cost if wrong: a second window the client closes.
+- **Ruling: the floor datum is to be a robust low percentile of the take's per-frame ankle
+  heights, not the single lowest frame**, so one bad ankle cannot push the whole character down
+  through the floor or bob it against the ground. Cost if wrong: a take genuinely captured off
+  the ground sits at a small constant offset, visible and correctable.
+- **Ruling: "Calibrated (with problems)" is to be reworded, and one warning suppressed.** The
+  nominal-up warning is not to be shown while the recorded vertical is in use — it is a statement
+  about a fallback that did not happen — and the other two are to be reworded in plain language
+  and presented as notes rather than problems, because a non-technical client who reads
+  "problems" on a calibration that is fine stops there. Cost if wrong: a wording change.
+- **Ruling: the Priority 2 items taken into this pass** are the ones that answer a complaint —
+  undo on the wrong frame, re-detect and batch NECK/PELVIS, set-scale rescale off the GUI thread,
+  confidence colouring in the 3D view, floor hover, the calibration wording above, skipping
+  0-byte images, the timeline highlight and Show filter, the export/preview framing mismatch,
+  and the drag placement cache.
   **Excluded:** window reuse and metric export, both above.
 - **The install instructions are one set of steps in two files.** `README.md` and the zip's
   `README.txt` carry the same three steps in the same order — unblock the download, extract to
