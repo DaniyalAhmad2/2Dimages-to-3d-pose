@@ -98,6 +98,38 @@ def _export_status(line: str) -> str:
     return ""
 
 
+def _export_targets(out, name):
+    """Every file one export writes into the chosen folder.
+
+    Each is the project name plus a fixed suffix, so a second export of the
+    same take into the same folder writes exactly these paths again — which
+    is why a stopped run has to be able to say which of them are its own and
+    which are the previous delivery. `_frames.json` is here for completeness:
+    `blender_job` writes it only for the stepped schedule, which this export
+    does not ask for, and listing a file that is never there costs one stat.
+    """
+    from pathlib import Path
+    return [Path(out) / f"{name}{suffix}"
+            for suffix in (".bvh", ".fbx", ".mp4", "_camera.mp4",
+                           "_poses.json", "_frames.json")]
+
+
+def _file_identity(path):
+    """(mtime, size) for a file, or None when it is not there.
+
+    Enough to tell "this run wrote it" from "it was already here": any
+    rewrite moves the mtime, and carrying the size too keeps a same-tick
+    rewrite of a different length from reading as untouched. Erring towards
+    "untouched" is the safe direction — it leaves a file alone rather than
+    deleting a delivery the export never opened.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 class MainWindow(QMainWindow):
     #: The top bar's height. Fixed, and the one part of the window that
     #: genuinely cannot shrink, so the small-screen test measures it from here
@@ -176,6 +208,7 @@ class MainWindow(QMainWindow):
         self._fs_active = False
         self._fs_split = self._fs_side = None
         self._migration_banner = None
+        self._job_running = False        # see `_busy` / `_run_job`
 
         self._wire()
         self._load_model()
@@ -195,14 +228,47 @@ class MainWindow(QMainWindow):
         self.saved_label = QLabel("✓ Project Saved"); self.saved_label.setObjectName("savedLabel")
         lay.addWidget(self.saved_label)
         lay.addStretch(1)
+        self.btn_open = QPushButton("Open Project")
+        self.btn_open.setToolTip("Open a project you saved earlier — its "
+                                 "images, corrections and calibration exactly "
+                                 "as you left them")
+        # Only on the empty window a client meets after double-clicking the
+        # exe, where Import Images was the one thing on offer and re-running
+        # detection over images they had already corrected was the only way
+        # back in. With a project open, File ▸ Open Project… is the route and
+        # the dashboard's top bar stays as it was designed.
+        self.btn_open.setVisible(not self.model.project_dir)
         self.btn_import = QPushButton("⬆  Import Images")
         self.btn_export = QPushButton("⬇  Export Results")
+        lay.addWidget(self.btn_open)
         lay.addWidget(self.btn_import); lay.addWidget(self.btn_export)
         return bar
 
     def _build_menus(self):
-        """Two menu actions: the migration path for a project made before face
-        keypoints existed, and the report we ask the client to send us."""
+        """File, Tools and Help.
+
+        File is the door back into a saved take. Until it existed the only
+        way to reopen one was a command-line argument, on a product whose
+        premise is a one-click executable: a client who closed the app had no
+        route to yesterday's corrections at all, while the status bar advised
+        a "Save As" that was never built.
+        """
+        from PySide6.QtGui import QKeySequence
+
+        file_menu = self.menuBar().addMenu("&File")
+        act = file_menu.addAction("Open Project…")
+        act.setShortcut(QKeySequence.StandardKey.Open)
+        act.setToolTip("Open a project folder saved earlier")
+        act.triggered.connect(self._on_open_project)
+        # Held on self: a QMenu wrapper that Python collects takes the menu
+        # (and its actions) with it.
+        self._recent_menu = file_menu.addMenu("Recent Projects")
+        # Off by default, so the full path each entry carries would never be
+        # shown and two takes with the same folder name would be one label.
+        self._recent_menu.setToolTipsVisible(True)
+        self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        self._fill_recent_menu()
+
         tools = self.menuBar().addMenu("&Tools")
         act = tools.addAction("Re-detect face points only")
         act.setToolTip("Detect the nose and face points again so the "
@@ -346,6 +412,7 @@ class MainWindow(QMainWindow):
         # a freshly opened project as having unsaved changes
         self.head_combo.currentIndexChanged.connect(self._on_head_mode_changed)
 
+        self.btn_open.clicked.connect(self._on_open_project)
         self.btn_import.clicked.connect(self._on_import)
         self.btn_export.clicked.connect(self._on_export)
         self.sidebar.runDetection.connect(self._on_run_detection)
@@ -403,16 +470,28 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_set_scale(self, real_height_m: float):
-        from PySide6.QtWidgets import QApplication
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            applied = self.model.set_scale_from_height(real_height_m)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if applied is None:
+        """Rescale the calibration so the subject comes out as measured.
+
+        A job like the others, and for the same reason: this rewrites the
+        calibration folder and then re-triangulates and re-fits every frame,
+        which under nothing but a wait cursor is the "Not Responding" the
+        worker module exists to remove. No Cancel — like the recompute it
+        wraps, the rescale is one answer about the whole take.
+        """
+        if self._busy():
             return
-        self._apply_view_orientation()   # the character is sized to the take
-        self._refresh_views(); self._refresh_timeline_status()
+
+        def job(report, cancelled):
+            report(0, 0, "Rescaling the calibration and recomputing the take…")
+            return self.model.set_scale_from_height(real_height_m)
+
+        with self.model.quiet():
+            applied = self._run_job("Set scale", job, cancellable=False)
+        if self._job_stopped(applied, "Setting the scale"):
+            return
+        if applied is None:
+            return                       # nothing to scale; the model said why
+        self._refresh_after_job()        # re-fits the character to the take
         self._refresh_calibration_status()
         self._mark_unsaved()
 
@@ -490,6 +569,35 @@ class MainWindow(QMainWindow):
         self._refresh_quality()
         self._refresh_history()
 
+    def _busy(self) -> bool:
+        """True when a job is already running — and it says so.
+
+        Every long operation runs a nested event loop, so a click queued
+        behind a progress dialog (or behind the modal box a failure opens)
+        arrives while the first job is still alive. Without this, a second
+        Export started into the same folder while the first was being
+        cancelled, and a second detection ran against the same ProjectData —
+        the one thing that would corrupt a take rather than merely annoy.
+        """
+        if self._job_running:
+            self.statusBar().showMessage("A job is still running", 6000)
+            return True
+        return False
+
+    def _run_job(self, title: str, fn, cancellable: bool = True):
+        """`worker.run_job`, with the flag `_busy` reads.
+
+        Set and cleared HERE rather than in each slot: five slots each
+        remembering to clear it on every exit — including the ones a failure
+        takes — is five chances to lock the window for the rest of the
+        session.
+        """
+        self._job_running = True
+        try:
+            return run_job(self, title, fn, cancellable=cancellable)
+        finally:
+            self._job_running = False
+
     def _job_stopped(self, res, what: str) -> bool:
         """True when a job did not finish, having said so.
 
@@ -507,6 +615,8 @@ class MainWindow(QMainWindow):
     def _on_run_detection(self):
         from pose3d.geometry.character import (
             default_head_source, set_default_head_source)
+        if self._busy():
+            return
         det = self._ensure_detector()
         if det is None:
             return
@@ -520,10 +630,10 @@ class MainWindow(QMainWindow):
         # replaced with them, and nothing may be posed under the old convention.
         self._adopt_head_source(det)
         with self.model.quiet():
-            res = run_job(self, "Detection", lambda report, cancelled:
-                          self.model.redetect_all(det, self.load_image,
-                                                  on_progress=report,
-                                                  cancelled=cancelled))
+            res = self._run_job("Detection", lambda report, cancelled:
+                                self.model.redetect_all(det, self.load_image,
+                                                        on_progress=report,
+                                                        cancelled=cancelled))
         if self._job_stopped(res, "Detection"):
             # Every way this run can stop before `detect_project` commits — the
             # cancel, an unreadable image, a detector that throws — leaves the
@@ -556,6 +666,8 @@ class MainWindow(QMainWindow):
         this process at all.
         """
         from pose3d import diagnostics
+        if self._busy():
+            return
 
         def job(report, cancelled):
             report(0, 0, "Running the diagnostics…")
@@ -568,11 +680,25 @@ class MainWindow(QMainWindow):
                                                      cancelled=cancelled)
             if stopped == "cancelled":
                 raise Cancelled()
-            return text
+            return text, stopped
 
-        text = run_job(self, "Diagnostics", job)
-        if isinstance(text, Exception):
+        res = self._run_job("Diagnostics", job)
+        if isinstance(res, Exception):
             return                       # cancelled, or already reported
+        text, stopped = res
+        if stopped == "timeout":
+            # `run_in_child` has three outcomes and only "cancelled" was read,
+            # so a child killed at its 20-minute deadline had its half-written
+            # transcript shown — and saved — exactly like a complete one. The
+            # difference is the one fact that would redirect the whole
+            # investigation: a machine where the self-test genuinely stops at
+            # a section, versus one too slow to reach the rest.
+            text = ("*** THIS REPORT IS INCOMPLETE ***\n"
+                    "The diagnostics run was stopped at its deadline, so it "
+                    "breaks off part-way through. What is below is as far as "
+                    "it got; the sections after that were never run. Taking "
+                    "this long is itself worth telling us about. The saved "
+                    "file holds the same partial report.\n\n" + text)
         # The child writes the file itself, as `--diagnose` does; naming it
         # only when it is really there keeps the dialog from pointing at a
         # path a read-only install refused to create.
@@ -581,14 +707,16 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_redetect_head(self):
+        if self._busy():
+            return
         det = self._ensure_detector()
         if det is None:
             return
         with self.model.quiet():
-            res = run_job(self, "Face re-detect", lambda report, cancelled:
-                          self.model.redetect_head(det, self.load_image,
-                                                   on_progress=report,
-                                                   cancelled=cancelled))
+            res = self._run_job("Face re-detect", lambda report, cancelled:
+                                self.model.redetect_head(det, self.load_image,
+                                                         on_progress=report,
+                                                         cancelled=cancelled))
         if self._job_stopped(res, "The face re-detect"):
             return
         self._refresh_after_job()
@@ -617,15 +745,17 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_recalibrate(self):
+        if self._busy():
+            return
         # No Cancel: the triangulation and the bone fit are ONE answer about
         # the whole take, and a button that could only abort before the work
         # started would be the same dead control the export used to have. So
         # `cancelled` is not passed on either — with no button behind it, it
         # is a flag that can never become True.
         with self.model.quiet():
-            res = run_job(self, "Recompute 3D", lambda report, cancelled:
-                          self.model.recompute_all(on_progress=report),
-                          cancellable=False)
+            res = self._run_job("Recompute 3D", lambda report, cancelled:
+                                self.model.recompute_all(on_progress=report),
+                                cancellable=False)
         if self._job_stopped(res, "The recompute"):
             return
         self._refresh_after_job()
@@ -708,16 +838,102 @@ class MainWindow(QMainWindow):
         # failure inside a slot becomes a dialog, and it prints the traceback
         # to the log as this used to.
         from pose3d.ui.import_dialog import ImportDialog
+        # Guarded like the job slots even though the jobs are the dialog's
+        # own: opened from inside an outer job it would nest a second
+        # `run_job` (and a second detector) under the first, and finish by
+        # swapping this window out from under it.
+        if self._busy():
+            return None
         return self._run_import_dialog(ImportDialog(self))
+
+    def _fill_recent_menu(self):
+        """(Re)build File ▸ Recent Projects from what is on disk right now.
+
+        Rebuilt on every show rather than cached, because the list is only
+        useful while it is true: a project moved or deleted since the last
+        session is dropped by `app.recent_projects` and never offered.
+        """
+        from pathlib import Path
+
+        from pose3d import app
+        self._recent_menu.clear()
+        folders = app.recent_projects()
+        for folder in folders:
+            act = self._recent_menu.addAction(Path(folder).name or folder)
+            act.setToolTip(folder)       # two takes can share a folder name
+            act.triggered.connect(
+                lambda checked=False, f=folder: self._open_project_folder(f))
+        if not folders:
+            act = self._recent_menu.addAction("Nothing opened yet")
+            act.setEnabled(False)
+
+    @guarded
+    def _on_open_project(self):
+        """File ▸ Open Project… — pick a saved project folder and open it."""
+        from pose3d import app
+        from pose3d.ui import filedialog
+        root = app.projects_root()
+        folder = filedialog.existing_directory(
+            self, "Open a Pose3D project",
+            str(root) if root.is_dir() else filedialog.writable_dir())
+        if folder:
+            self._open_project_folder(folder)
+
+    @guarded
+    def _open_project_folder(self, folder):
+        """Open `folder` in this window's place, or say why it cannot be.
+
+        Guarded in its own right: the Recent Projects entries call it from
+        their own `triggered` slots, where an exception would otherwise be
+        swallowed by Qt and the click would look ignored.
+        """
+        from pose3d import app
+        if not app.is_project_folder(folder):
+            guard.report_error(
+                self, "Not a Pose3D project",
+                f"There is no saved project in:\n{folder}\n\n"
+                f"A project folder is the one the app made when you imported "
+                f"the images: it contains project.json, an images folder and "
+                f"a calibration folder. Look under {app.projects_root()}.")
+            return
+        if self.open_callback is None:   # embedded, or a window built by hand
+            self.statusBar().showMessage(
+                f"This window cannot open another project ({folder})", 8000)
+            return
+        self._hand_over_to(self.open_callback(folder))
 
     def _run_import_dialog(self, dlg):
         if dlg.exec() and dlg.result_folder:
             if self.open_callback is not None:
-                self.open_callback(dlg.result_folder)   # opens a fresh window
-                self.close()
+                # opens a fresh window; this one steps aside for it
+                self._hand_over_to(self.open_callback(dlg.result_folder))
             else:
                 self.statusBar().showMessage(
                     f"Imported to {dlg.result_folder}", 8000)
+
+    def _hand_over_to(self, new_window):
+        """Let go of this window now that `new_window` has taken its place.
+
+        Reusing the window instead of swapping it is deferred by ruling, so
+        the swap stays — but the old window has to actually go. `app._WINDOWS`
+        holds a reference for the life of the process and nothing removed it,
+        so each import (and now each Open) left a whole MainWindow and its
+        ProjectModel behind, and `close()` alone only hid it.
+
+        The geometry goes across with it: the replacement opens at the
+        designed size, and a client who had maximised the window or sized it
+        to their laptop watched that undone by finishing an import.
+        """
+        if new_window is None:
+            return                       # nothing took over: stay where we are
+        new_window.restoreGeometry(self.saveGeometry())
+        self.close()
+        from pose3d import app
+        try:
+            app._WINDOWS.remove(self)
+        except ValueError:
+            pass                         # never registered (tests, embedding)
+        self.deleteLater()
 
     @guarded
     def _on_export(self):
@@ -725,6 +941,8 @@ class MainWindow(QMainWindow):
         from pose3d.ui import filedialog
         import numpy as np
         from pose3d.core.skeleton import NUM_JOINTS
+        if self._busy():
+            return
         frames = self.model.project.frames
         # How many 3D joints actually RECONSTRUCTED, on average — a joint the
         # gap fill interpolated is posed and exported, but it is not something
@@ -812,17 +1030,19 @@ class MainWindow(QMainWindow):
                                     # button that now really does kill Blender.
                                     timeout=None, idle_timeout=300)
 
+        # What is in the folder NOW, before this export writes anything: the
+        # BVH and the FBX go to disk before the long video render a Cancel
+        # usually interrupts, so "nothing was written" was said over real
+        # files — and over the previous export of the same name.
+        before = {p: _file_identity(p) for p in _export_targets(out, name)}
+
         # Cancel really does stop it now: the export polls `cancelled` and
         # kills the Blender child, which is why the button is here at all.
-        res = run_job(self, "Export", job)
+        res = self._run_job("Export", job)
         if isinstance(res, Exception):
             return                       # already reported through guard
-        if res.reason == "blender_cancelled":
-            # the pose document was written before Blender was launched; a
-            # cancelled export leaves nothing of itself behind
-            from pathlib import Path
-            (Path(out) / f"{name}_poses.json").unlink(missing_ok=True)
-            self._on_status("Export cancelled")
+        if res.reason in ("blender_cancelled", "blender_timeout"):
+            self._report_stopped_export(out, name, before, res)
             return
         if res.ok:
             items = [
@@ -846,6 +1066,53 @@ class MainWindow(QMainWindow):
             guard.report_error(
                 self, "Export failed",
                 res.message or (res.stderr or res.stdout or "")[-1500:])
+
+    def _report_stopped_export(self, out, name, before, res):
+        """Undo what a stopped export wrote, and say exactly what that was.
+
+        `blender_job` writes the BVH and the FBX and only then renders the
+        videos, and Cancel (or the idle deadline) kills the child the instant
+        it fires — minutes into a render on the client's laptop. So the
+        folder holds complete .bvh/.fbx files, a truncated .mp4, and whatever
+        of the previous delivery they overwrote, while `_failure` reports
+        `bvh=None, fbx=None, mp4=None` and the app said "nothing was
+        changed". A truncated FBX sitting under the name of a good one is the
+        worst thing this folder can hold, and the app was asserting it was
+        not there.
+
+        Only files this run created or modified are removed: one of the same
+        name that the export never opened is the user's previous delivery,
+        and deleting it would make Cancel more destructive than the bug.
+        """
+        removed, kept = [], []
+        for path in _export_targets(out, name):
+            now = _file_identity(path)
+            if now is None or now == before.get(path):
+                continue                 # not there, or as we found it
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError:
+                kept.append(path.name)   # locked, or a read-only folder
+
+        cancelled = res.reason == "blender_cancelled"
+        what = ("Export cancelled" if cancelled
+                else "The export was stopped at its deadline")
+        note = (f"{what} — removed the partly written files it had left "
+                f"behind: {', '.join(removed)}" if removed else
+                f"{what} — nothing was written")
+        self._on_status(note)
+        if cancelled and not kept:
+            return                       # the user asked for this; no dialog
+        body = note
+        if kept:
+            body += ("\n\nThese were written by the stopped export and could "
+                     "not be removed, so they are NOT a finished delivery — "
+                     "check them before you use them:\n\n"
+                     + "\n".join(kept))
+        if not cancelled and res.message:
+            body = f"{res.message}\n\n{body}"
+        guard.report_error(self, "Export stopped", body)
 
     def _left_camera(self):
         """The LEFT camera's intrinsics + pose, or None.

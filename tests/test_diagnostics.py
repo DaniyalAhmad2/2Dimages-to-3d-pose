@@ -801,6 +801,33 @@ def test_a_cancelled_diagnostics_run_says_nothing_and_shows_nothing(
     assert recorded_errors == []
 
 
+def test_a_timed_out_diagnostics_report_is_shown_as_partial(
+        qapp, monkeypatch, recorded_errors):
+    """`run_in_child` has three outcomes — finished, cancelled, timeout — and
+    only the cancel was read, so a child killed at its 20-minute deadline had
+    its half-written transcript shown and saved exactly like a complete one.
+
+    That is the one fact that would redirect the whole investigation: a
+    machine where the self-test genuinely stops at a section reads identically
+    to one merely too slow to reach the rest.
+    """
+    win = _window(qapp)
+    monkeypatch.setattr(diagnostics, "run_in_child",
+                        lambda on_line=None, cancelled=None: ("half a\n",
+                                                              "timeout"))
+    shown = []
+    monkeypatch.setattr(diagnostics, "show_report",
+                        lambda parent, text, path=None: shown.append(text))
+
+    win._on_diagnostics()
+
+    assert shown, "the partial report is still worth reading"
+    assert "half a" in shown[0], "the partial transcript was thrown away"
+    assert "INCOMPLETE" in shown[0]
+    assert "deadline" in shown[0]
+    assert recorded_errors == []
+
+
 def test_diagnose_cmd_checks_the_bootloader_files_without_any_python():
     """`Pose3D-diagnose.exe` is a Python program: when python312.dll will not
     load it dies with the very dialog it was asked to explain. So the batch

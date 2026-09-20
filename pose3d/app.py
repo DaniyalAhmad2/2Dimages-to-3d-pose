@@ -143,10 +143,91 @@ def _load_rig(calib_dir: Path):
     return load_rig_with_reason(calib_dir)[0]
 
 
+# --- Recent Projects -------------------------------------------------------
+#
+# The app's only persistent setting, in QSettings("Pose3D", "Pose3D") — the
+# registry on Windows, ~/.config/Pose3D/Pose3D.conf elsewhere — under one key:
+#
+#     recent/projects   list[str]: project folders, most recent first
+#
+# Deliberately not a file inside a project folder: a list of OTHER projects
+# has no business in one of them, and it would be lost the moment a project
+# is moved, which is exactly when the list earns its keep.
+RECENT_KEY = "recent/projects"
+RECENT_MAX = 8
+
+
+def projects_root() -> Path:
+    """Where the import writes new projects, and so where Open starts.
+
+    The same default `ImportDialog` uses for its output folder — changing one
+    without the other would have Open looking somewhere Import never writes.
+    """
+    return Path.home() / "pose3d_projects"
+
+
+def settings():
+    """The app's QSettings. One function so a test can hand back its own."""
+    from PySide6.QtCore import QSettings
+    return QSettings("Pose3D", "Pose3D")
+
+
+def is_project_folder(folder) -> bool:
+    """Does this folder hold a project the app can open?
+
+    `project.json` is what `load_project` reads, so it is the honest test —
+    and it is the difference between opening a take and opening an empty
+    window titled "No project loaded" over a folder of images.
+    """
+    from pose3d.core.io_project import PROJECT_JSON
+    try:
+        return bool(folder) and (Path(folder) / PROJECT_JSON).is_file()
+    except (OSError, TypeError, ValueError):
+        return False               # a path this OS will not even look at
+
+
+def recent_projects() -> list[str]:
+    """The folders opened before, most recent first.
+
+    Filtered on every read rather than on write: a project can be moved,
+    renamed or deleted between two sessions, and an entry that opens nothing
+    is worse than no entry.
+    """
+    raw = settings().value(RECENT_KEY)
+    if isinstance(raw, str):
+        raw = [raw]                # QSettings hands a one-item list back bare
+    out, seen = [], set()
+    for folder in raw or []:
+        folder = str(folder)
+        if folder in seen or not is_project_folder(folder):
+            continue
+        seen.add(folder)
+        out.append(folder)
+    return out[:RECENT_MAX]
+
+
+def remember_project(folder) -> None:
+    """Record a folder as the most recently opened project.
+
+    Called for every successful open — which is every import too, since the
+    import opens what it just made through this same route.
+    """
+    if not is_project_folder(folder):
+        return                     # the empty startup window is not a project
+    folder = str(Path(folder))
+    # The de-duplication and the cap are belt and braces: `recent_projects`
+    # above has already applied both to what it read back, so a store written
+    # only through here cannot violate either. They are kept for a store
+    # written by an older build, or edited by hand.
+    rest = [f for f in recent_projects() if str(Path(f)) != folder]
+    settings().setValue(RECENT_KEY, [folder, *rest][:RECENT_MAX])
+
+
 def open_project_window(project_folder: str | None):
     """Build a model + MainWindow for a project folder and show it."""
     from pose3d.ui.main_window import MainWindow
     model = build_model(project_folder)
+    remember_project(project_folder)
     win = MainWindow(model, open_callback=open_project_window)
     _WINDOWS.append(win)
     # In the container the app IS the desktop, so fill the virtual screen rather
