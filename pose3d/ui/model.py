@@ -60,19 +60,17 @@ class RejectedState(str):
         return self
 
 
-# Joints a layout does not measure but derives as the midpoint of two it does.
-# Dragging a shoulder therefore has to move the neck with it, or the pose keeps
-# a neck the user can see is in the wrong place and the bone fit is solved
-# against a contradiction. WHICH joints those are is per project and comes from
-# `skeleton.derived_joints`; this is only the parent pairing, which is the same
-# under both layouts.
-_DERIVED_FROM: dict[int, tuple[int, int]] = {
-    int(joint): (int(a), int(b))
-    for joint, (a, b) in DERIVED_MIDPOINT_PARENTS.items()
-}
+# Which derived joint each PARENT defines — the drag path's question, since
+# what a drag knows is the joint that moved. Dragging a shoulder has to move
+# the neck with it, or the pose keeps a neck the user can see is in the wrong
+# place and the bone fit is solved against a contradiction. WHICH joints are
+# derived is per project and comes from `skeleton.derived_joints`; where the
+# midpoint goes is `pipeline.derive_midpoint`, the one rule the batch paths
+# run too.
 _DERIVED_OF: dict[int, int] = {
-    parent: derived
-    for derived, parents in _DERIVED_FROM.items() for parent in parents
+    int(parent): int(derived)
+    for derived, parents in DERIVED_MIDPOINT_PARENTS.items()
+    for parent in parents
 }
 
 
