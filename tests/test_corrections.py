@@ -124,7 +124,8 @@ def test_corrections_from_an_earlier_session_survive_the_next_save(tmp_path):
     stored = load_project(tmp_path).corrections
     assert [c.joint for c in stored] == [0, 1, 2, 5]
     assert [c.cam for c in stored] == [CAM_LEFT] * 3 + [CAM_RIGHT]
-    assert "4" in said[-1], f"the status did not report the total: {said[-1]}"
+    # the exact sentence: "4" alone also matches a tmp_path with a 4 in it
+    assert said[-1].startswith("Saved 4 corrections to "), said[-1]
 
 
 def test_saving_twice_stores_each_correction_once(tmp_path):

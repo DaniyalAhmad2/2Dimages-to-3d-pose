@@ -620,8 +620,11 @@ class ProjectModel(QObject):
             # `frames_by_id[e.frame_id]`; re-solving whatever is on screen
             # instead left the edited frame holding 3D built from 2D that no
             # longer exists (and re-gated the displayed frame for nothing).
+            # indexed, not `.get`: a missing id is a broken invariant, and
+            # falling back to the displayed frame would silently re-solve the
+            # wrong one — the defect this argument exists to fix.
             self._resolve_joint(e.joint, e.cam,
-                                self.stack.frames_by_id.get(e.frame_id))
+                                self.stack.frames_by_id[e.frame_id])
             self._emit(self.joint2dChanged, e.cam, e.joint)
         self._emit(self.historyChanged)
 
@@ -629,8 +632,11 @@ class ProjectModel(QObject):
         e = self.stack.redo()
         if e is not None:
             self._quality = None
+            # indexed, not `.get`: a missing id is a broken invariant, and
+            # falling back to the displayed frame would silently re-solve the
+            # wrong one — the defect this argument exists to fix.
             self._resolve_joint(e.joint, e.cam,
-                                self.stack.frames_by_id.get(e.frame_id))
+                                self.stack.frames_by_id[e.frame_id])
             self._emit(self.joint2dChanged, e.cam, e.joint)
         self._emit(self.historyChanged)
 
