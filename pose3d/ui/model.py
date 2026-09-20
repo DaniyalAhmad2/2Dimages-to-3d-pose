@@ -106,6 +106,7 @@ class ProjectModel(QObject):
         self.migration_note = ""
         self._stored_fitted3d = None
         self._stored_filled = None
+        self._stored_derived2d = None
         self._stored_version = None
         # bone targets for the live re-solve: the median of every bone over the
         # whole take, which is O(frames x bones) to measure and cannot change
@@ -191,11 +192,18 @@ class ProjectModel(QObject):
         # (and, where the new fill invented one the old pose has a hole at,
         # fails the export's own invariant check).
         stored_filled = np.stack([np.asarray(f.filled, bool) for f in p.frames])
+        # and the 2D the recompute is allowed to MOVE: it re-derives NECK and
+        # PELVIS from their parents, so on a legacy take whose stored neck
+        # contradicts its shoulders the migration changes a keypoint. The
+        # restore has to be an exact revert or saving after it would store the
+        # previous build's pose beside 2D it was never built from.
+        stored_2d = self._derived_2d()
         self._stored_version = p.pipeline_version
         self.recompute_all()
         p.pipeline_version = PIPELINE_VERSION
         self._stored_fitted3d = stored
         self._stored_filled = stored_filled
+        self._stored_derived2d = stored_2d
         now = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
         self.migration_note = (_recompute_note(stored, now)
                                + _head_hint(p)).strip()
@@ -214,6 +222,7 @@ class ProjectModel(QObject):
             # invariant the export checks (and aborts on), and the 3D view
             # draws a flagged joint as interpolated rather than measured.
             f.filled = np.asarray(filled, bool) & np.isfinite(pose).all(1)
+        self._restore_derived_2d()
         self._stored_fitted3d = None
         self._stored_filled = None
         self._bone_targets = None
@@ -231,6 +240,35 @@ class ProjectModel(QObject):
             "Restored the pose stored by the previous build. Recalculate 3D "
             "to go back to the corrected one.")
         return True
+
+    def _derived_2d(self) -> tuple[list[int], list[dict]]:
+        """A copy of the 2D the midpoint re-derivation may move.
+
+        Only the derived joints (this project's — `skeleton.derived_joints`),
+        in both views, with their scores: that is the whole of what
+        `pipeline.derive_midpoints` writes. `corrected` is deliberately NOT
+        copied, because the re-derivation never touches it — it declines a
+        hand-placed point outright — and `rejected`/`pose3d`/`fitted3d` are
+        re-derived from scratch by any recompute, so they are not this
+        method's to keep either.
+        """
+        joints = sorted(int(j)
+                        for j in derived_joints(self.project.keypoint_model))
+        return joints, [
+            {c: (np.array(f.kp2d[c][joints], copy=True),
+                 np.array(f.scores[c][joints], copy=True)) for c in CAMERAS}
+            for f in self.project.frames]
+
+    def _restore_derived_2d(self) -> None:
+        """Put that 2D back, so a restore is an exact revert."""
+        if self._stored_derived2d is None:
+            return
+        joints, per_frame = self._stored_derived2d
+        for f, snap in zip(self.project.frames, per_frame):
+            for cam, (xy, scores) in snap.items():
+                f.kp2d[cam][joints] = xy
+                f.scores[cam][joints] = scores
+        self._stored_derived2d = None
 
     # --- whole-project recompute / detection / save ---
     def recompute_all(self, on_progress=None, cancelled=None) -> None:

@@ -732,6 +732,39 @@ def test_restoring_the_stored_pose_restores_its_fill_flags():
                     & np.isnan(f.fitted3d).any(1)).any()
 
 
+def test_restoring_the_stored_pose_puts_back_the_2d_the_migration_moved():
+    """A restore must be an EXACT revert, 2D included.
+
+    The recompute on open re-derives NECK/PELVIS from their parents, so a
+    legacy take whose stored neck contradicts its shoulders has a keypoint
+    MOVED by the migration. "Restore stored pose" puts the previous build's
+    pose back and re-stamps the project legacy — so if the 2D stayed
+    re-derived, saving then stored the old pose beside 2D it was never built
+    from, and the correction the user declined had happened anyway.
+    """
+    data, rig = _take(n=4)
+    neck = int(Joint.NECK)
+    data.frames[1].kp2d[CAM_LEFT][neck] += (40.0, 0.0)   # as a legacy file may
+    data.frames[1].scores[CAM_LEFT][neck] = 0.4          # hold it
+    data.pipeline_version = 0
+    was2d = [{c: f.kp2d[c].copy() for c in CAMERAS} for f in data.frames]
+    was_scores = [{c: f.scores[c].copy() for c in CAMERAS} for f in data.frames]
+
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    assert not np.allclose(data.frames[1].kp2d[CAM_LEFT][neck],
+                           was2d[1][CAM_LEFT][neck]), \
+        "the migration must be the thing that moved it"
+
+    assert model.restore_stored_pose()
+
+    for f, xy, sc in zip(data.frames, was2d, was_scores):
+        for cam in CAMERAS:
+            assert np.array_equal(f.kp2d[cam], xy[cam], equal_nan=True), \
+                f"{f.frame_id} {cam}: the restore left the migrated 2D"
+            assert np.array_equal(f.scores[cam], sc[cam], equal_nan=True)
+
+
 def test_a_project_with_no_calibration_is_left_alone():
     """Recomputing needs a rig. Without one the stored pose is untouched and
     the user is told why, rather than silently getting nothing.
