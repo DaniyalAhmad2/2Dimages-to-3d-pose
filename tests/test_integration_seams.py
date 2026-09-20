@@ -457,6 +457,46 @@ def test_a_rescale_re_takes_the_verdict_from_the_scaled_displacement():
     assert report["moved"] is False
 
 
+# --------------------------------------------------------------------------
+# Seam 11 — the total-failure message contradicted itself
+# --------------------------------------------------------------------------
+
+def test_a_calibration_that_read_nothing_does_not_claim_it_used_the_rest(
+        tmp_path):
+    """"…the calibration used the rest" is the sentence for a take that lost
+    a pair. On the branch where NO pair could be read there is no rest, and
+    the message said both things in a row."""
+    from pose3d.calib.resolve import resolve_calibration
+    from pose3d.core.importer import build_project
+    from pose3d.imageio import read_image
+
+    lefts, rights = _photo_pairs(tmp_path / "src", n=3, blank_pair=0)
+    for p in lefts + rights:
+        open(p, "wb").close()
+    project = build_project(lefts, rights, name="t",
+                            copy_into=tmp_path / "proj")
+
+    res = resolve_calibration(project, read_image, marker_length=0.05)
+
+    assert not res.ok
+    assert "no image pair could be read" in res.message.lower()
+    assert "used the rest" not in res.message
+    assert "none could be used" in res.message
+    assert project.frames[0].frame_id in res.message
+
+
+def test_a_calibration_that_lost_one_pair_still_says_it_used_the_rest(
+        tmp_path):
+    """…and the ordinary sentence is unchanged."""
+    from pose3d.calib.resolve import summarise_skipped
+
+    note = summarise_skipped([{"frame": "0007", "camera": CAM_LEFT,
+                               "reason": "0 bytes"}])
+    assert note.startswith(" ")          # appended to a finished sentence
+    assert "the calibration used the rest" in note
+    assert "0007" in note
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),

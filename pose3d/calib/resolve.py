@@ -824,8 +824,12 @@ def resolve_calibration(
                 "No image pair could be read, so the cameras' image size — "
                 "which is what an uncalibrated take estimates the lenses "
                 "from — is not known. Check that the photos are on this "
-                "machine and not online-only placeholders."
-                + summarise_skipped(probed), skipped=probed)
+                "machine and not online-only placeholders. "
+                # NOT `summarise_skipped`: its sentence ends "the calibration
+                # used the rest", and on this branch there is no rest — the
+                # message said both things one after the other.
+                + summarise_unreadable(probed, "none could be used"),
+                skipped=probed)
         img_l, img_r = pair
         intr_left = intr_left or _approx_intrinsics(img_l)
         intr_right = intr_right or _approx_intrinsics(img_r)
