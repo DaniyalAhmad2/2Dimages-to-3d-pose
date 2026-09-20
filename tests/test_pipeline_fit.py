@@ -661,6 +661,50 @@ def test_the_stored_pose_can_be_restored_in_session():
     assert not model.restore_stored_pose()      # nothing left to restore
 
 
+def test_restoring_the_stored_pose_restores_its_fill_flags():
+    """`Frame.filled` describes the pose it is stored beside, so a restore has
+    to take it back with the pose.
+
+    The recompute on open rewrites every flag from the NEW triangulation. The
+    banner's "Restore stored pose" then put the previous build's pose back and
+    left those flags, so the 3D view drew hollow "interpolated" rings on
+    joints the restored pose measured — and worse, a joint the new fill
+    invented is a hole in the restored pose, which trips the export's own
+    invariant check (`filled & ~valid` -> "fill_flags_disagree") and aborts the
+    whole export of a pose the user deliberately asked for.
+    """
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5)
+    data.frames[2].kp2d[CAM_LEFT][j] = np.nan      # one view loses the wrist
+    data.frames[2].scores[CAM_LEFT][j] = 0.0
+    triangulate_project(data, rig)
+    fit_project(data)
+    assert data.frames[2].filled[j], "today's fill must invent it"
+
+    # what the previous build's file holds: a hole there, and no fill flags at
+    # all (the key did not exist, so it loads all-False)
+    stored = [f.fitted3d.copy() for f in data.frames]
+    stored[2][j] = np.nan
+    for f, pose in zip(data.frames, stored):
+        f.fitted3d = pose.copy()
+        f.filled[:] = False
+    data.pipeline_version = 0
+
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    assert data.frames[2].filled[j], "the recompute re-invented it"
+
+    assert model.restore_stored_pose()
+
+    for f, pose in zip(data.frames, stored):
+        assert np.allclose(f.fitted3d, pose, equal_nan=True)
+        assert not f.filled.any(), "the flags of a pose that is not loaded"
+        # the invariant the export enforces: nothing is flagged interpolated
+        # that the pose does not have
+        assert not (np.asarray(f.filled, bool)
+                    & np.isnan(f.fitted3d).any(1)).any()
+
+
 def test_a_project_with_no_calibration_is_left_alone():
     """Recomputing needs a rig. Without one the stored pose is untouched and
     the user is told why, rather than silently getting nothing.

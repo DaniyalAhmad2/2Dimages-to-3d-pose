@@ -107,6 +107,7 @@ class ProjectModel(QObject):
         # set by upgrade_pipeline() when a legacy project is recomputed on open
         self.migration_note = ""
         self._stored_fitted3d = None
+        self._stored_filled = None
         self._stored_version = None
         # bone targets for the live re-solve: the median of every bone over the
         # whole take, which is O(frames x bones) to measure and cannot change
@@ -186,10 +187,17 @@ class ProjectModel(QObject):
             self.migration_note = (_NO_RIG_NOTE + _head_hint(p)).strip()
             return self.migration_note
         stored = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
+        # the gap-fill flags belong to that pose and the recompute is about to
+        # rewrite them from the new triangulation, so they are stashed with it
+        # — a flag that outlives its pose says a measured joint was invented
+        # (and, where the new fill invented one the old pose has a hole at,
+        # fails the export's own invariant check).
+        stored_filled = np.stack([np.asarray(f.filled, bool) for f in p.frames])
         self._stored_version = p.pipeline_version
         self.recompute_all()
         p.pipeline_version = PIPELINE_VERSION
         self._stored_fitted3d = stored
+        self._stored_filled = stored_filled
         now = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
         self.migration_note = (_recompute_note(stored, now)
                                + _head_hint(p)).strip()
@@ -200,9 +208,16 @@ class ProjectModel(QObject):
         only — nothing was overwritten on disk)."""
         if self._stored_fitted3d is None:
             return False
-        for f, pose in zip(self.project.frames, self._stored_fitted3d):
+        for f, pose, filled in zip(self.project.frames, self._stored_fitted3d,
+                                   self._stored_filled):
             f.fitted3d = pose.copy()
+            # ...and the flags that came with it. `& isfinite` because a flag
+            # may never point at a joint the pose does not have: that is the
+            # invariant the export checks (and aborts on), and the 3D view
+            # draws a flagged joint as interpolated rather than measured.
+            f.filled = np.asarray(filled, bool) & np.isfinite(pose).all(1)
         self._stored_fitted3d = None
+        self._stored_filled = None
         self._bone_targets = None
         self.invalidate_readouts()
         if self._stored_version is not None:
