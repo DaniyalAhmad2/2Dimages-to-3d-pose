@@ -96,7 +96,14 @@ class ProjectModel(QObject):
         self.project_dir = project_dir
         self.current = 0
         self.auto_recalc = True
-        self.stack = CorrectionStack({f.frame_id: f for f in project.frames})
+        # seeded with what the file already holds: the log is the client's
+        # correction history and it accumulates across sessions, so starting it
+        # empty (and then saving it over the stored one) destroyed every
+        # correction made before today. The undo/redo stacks stay empty —
+        # earlier sessions' entries are history, not edits this session may
+        # reverse: the 2D they produced is what the project was loaded with.
+        self.stack = CorrectionStack({f.frame_id: f for f in project.frames},
+                                     log=list(project.corrections))
         # set by upgrade_pipeline() when a legacy project is recomputed on open
         self.migration_note = ""
         self._stored_fitted3d = None
@@ -486,14 +493,21 @@ class ProjectModel(QObject):
             f"correction were left alone")
 
     def save(self) -> None:
-        from pose3d.core.io_project import save_project
+        from pose3d.core.io_project import count_corrections, save_project
+        # the same objects, not copies: `_write_corrections` stamps each one
+        # with the row it now occupies, and the stack goes on holding them, so
+        # the next save recognises them instead of storing them again.
         self.project.corrections = list(self.stack.log)
         if not self.project_dir:
             self.statusMessage.emit("No project folder set — use Save As")
             return
         save_project(self.project, self.project_dir)
+        # the TOTAL in the log, not this session's share of it: the count the
+        # user reads is their answer to "are my corrections still there?", and
+        # reporting the session's own tally is how a save that had just
+        # destroyed 40 of them could report "Saved 1 corrections".
         self.statusMessage.emit(
-            f"Saved {len(self.project.corrections)} corrections to "
+            f"Saved {count_corrections(self.project_dir)} corrections to "
             f"{self.project_dir}")
 
     # --- navigation ---

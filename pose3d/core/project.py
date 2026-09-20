@@ -132,6 +132,13 @@ class Correction:
     old_xy: tuple[float, float]
     new_xy: tuple[float, float]
     ts: str  # ISO timestamp (caller-provided; core stays clock-free)
+    # The row this correction already occupies in corrections.sqlite, or None
+    # for one that has never been written. It is what makes a save an
+    # append-or-replace rather than a rewrite: the log is cumulative across
+    # sessions, so the writer has to be able to tell a correction it has
+    # already stored from a new one. `io_project` sets it on read and stamps
+    # it on the way out.
+    id: int | None = None
 
 
 @dataclass
