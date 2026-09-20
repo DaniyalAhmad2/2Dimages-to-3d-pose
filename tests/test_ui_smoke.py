@@ -1494,24 +1494,47 @@ def test_a_hand_correction_shows_on_the_filmstrip(qapp):
     assert win.timeline.status(3) == "corrected"
 
 
-def test_an_undetected_joint_can_be_placed_and_is_recorded(qapp):
-    """End to end: the detector missed a joint, the user drags the
-    placeholder onto the limb, and the model records a correction — the path
-    that did not exist while an undetected joint was invisible."""
-    from PySide6.QtCore import QPointF
+def test_an_undetected_joint_can_be_placed_and_is_recorded(qapp, tmp_path):
+    """End to end, with a real mouse drag: the detector missed a joint, the
+    user grabs the placeholder and drags it onto the limb, and the model
+    records a correction — the path that did not exist while an undetected
+    joint was invisible and therefore not even hit-tested.
+
+    The drag goes through the scene's own hit test (`_drag_item` asserts the
+    handle is what sits under the cursor), so this fails if the placeholder
+    is drawn but unreachable, which every signal-level test would miss.
+    """
+    from PySide6.QtGui import QColor, QPixmap
+
+    from tests.test_camera_view_handles import _drag_item
+
     win = _keyboard_window(n=3)
+    # the fixture's frames name images that do not exist; give this view a
+    # real one so the overlay has a photograph to be fitted onto
+    pm = QPixmap(1280, 960); pm.fill(QColor(30, 30, 30))
+    path = tmp_path / "left.png"
+    assert pm.save(str(path))
     win.model.set_frame(1)
     gone = 9
     win.model.frame().kp2d[CAM_LEFT][gone] = np.nan
+    win.cam_left.view.set_image(str(path))
     win._refresh_overlays()
 
     item = win.cam_left.view._joints[gone]
     assert item.is_placeholder and item.isVisible()
 
-    item.signals.released.emit(gone, QPointF(640.0, 480.0))
+    # zoom in on it first, as the user would: the synthetic skeleton's joints
+    # are ~45 px apart in a 1280-px frame, so at the fitted scale a
+    # neighbour's handle covers this one and `itemAt` answers the neighbour
+    win.cam_left.view.zoom(4.0)
+    win.cam_left.view.centerOn(item.pos())
+    want = _drag_item(win.cam_left.view, item, dx=20, dy=12)
 
-    assert win.model.frame().corrected[CAM_LEFT][gone]
-    assert not np.isnan(win.model.frame().kp2d[CAM_LEFT][gone]).any()
+    assert win.model.frame().corrected[CAM_LEFT][gone], \
+        "dragging the placeholder recorded no correction"
+    placed = win.model.frame().kp2d[CAM_LEFT][gone]
+    assert not np.isnan(placed).any()
+    assert abs(placed[0] - want.x()) < 2 and abs(placed[1] - want.y()) < 2
     assert not win.cam_left.view._joints[gone].is_placeholder, \
         "a placed joint must render as an ordinary corrected handle"
 

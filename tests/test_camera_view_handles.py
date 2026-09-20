@@ -64,6 +64,32 @@ def _client_view(tmp_path, w=500, h=700):
     return v
 
 
+def _drag_item(view, item, dx=40, dy=25):
+    """Press on `item`, drag it by (dx, dy) VIEWPORT px and release.
+
+    Through the scene's own hit test and Qt's own drag handling, so it only
+    works if the handle really is grabbable where the user sees it. Returns
+    the image point the cursor ended on.
+    """
+    from PySide6.QtGui import QMouseEvent
+    from PySide6.QtWidgets import QApplication
+
+    vp = view.viewport()
+    start = view.mapFromScene(item.pos())
+    end = start + QPoint(dx, dy)
+    assert view.itemAt(start) is item, "nothing grabbable under the cursor"
+
+    def send(kind, pos, buttons):
+        QApplication.sendEvent(vp, QMouseEvent(
+            kind, QPointF(pos), QPointF(vp.mapToGlobal(pos)),
+            Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier))
+
+    send(QMouseEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
+    send(QMouseEvent.Type.MouseMove, end, Qt.MouseButton.LeftButton)
+    send(QMouseEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
+    return view.mapToScene(end)
+
+
 def _on_screen(view, item):
     """The item's bounding box in viewport pixels.
 
@@ -138,8 +164,6 @@ def test_a_near_miss_grabs_the_joint_instead_of_panning(qapp, tmp_path):
 def test_a_real_drag_still_reports_image_coordinates(qapp, tmp_path):
     """The handle is sized in screen pixels; the POSITION it reports is still
     the joint's position in the photograph, which is what the model stores."""
-    from PySide6.QtGui import QMouseEvent
-
     v = _client_view(tmp_path)
     v.show()
     v.set_pose(_xy(), _scores())
@@ -147,20 +171,8 @@ def test_a_real_drag_still_reports_image_coordinates(qapp, tmp_path):
     v.jointDragged.connect(lambda cam, j, p: seen.append((cam, j, p)))
 
     item = v._joints[5]
-    vp = v.viewport()
-    start = v.mapFromScene(item.pos())
-    end = start + QPoint(40, 25)
+    want = _drag_item(v, item)
 
-    def send(kind, pos, buttons):
-        qapp.sendEvent(vp, QMouseEvent(
-            kind, QPointF(pos), QPointF(vp.mapToGlobal(pos)),
-            Qt.MouseButton.LeftButton, buttons, Qt.KeyboardModifier.NoModifier))
-
-    send(QMouseEvent.Type.MouseButtonPress, start, Qt.MouseButton.LeftButton)
-    send(QMouseEvent.Type.MouseMove, end, Qt.MouseButton.LeftButton)
-    send(QMouseEvent.Type.MouseButtonRelease, end, Qt.MouseButton.NoButton)
-
-    want = v.mapToScene(end)
     assert len(seen) == 1, "the drag must commit exactly once, on mouse-up"
     cam, jid, pos = seen[0]
     assert (cam, jid) == ("left", 5)
@@ -315,3 +327,31 @@ def test_a_view_the_user_has_not_touched_still_fits_the_photograph(
     v.fit()                                          # the Fit button
     v.set_image(str(tmp_path / "left.png"))
     assert v.transform().m11() == pytest.approx(fitted)
+
+
+def test_a_placeholder_can_actually_be_GRABBED_and_dragged(qapp, tmp_path):
+    """Not just wired: hit-tested.
+
+    The other placeholder tests emit `released` themselves, which proves the
+    signal path and nothing about whether the user can reach the item. A
+    hollow brush, a `shape()` override or a stray z-value could make the
+    placeholder unclickable with every one of them still green — and an
+    unclickable placeholder is the original bug wearing a ring.
+    """
+    v = _client_view(tmp_path)
+    v.show()
+    v.set_pose(_xy(), _scores())
+    gone = 5
+    missing = _xy(); missing[gone] = np.nan
+    v.set_pose(missing, _scores())
+    seen = []
+    v.jointDragged.connect(lambda cam, j, p: seen.append((cam, j, p)))
+
+    item = v._joints[gone]
+    assert item.is_placeholder
+    want = _drag_item(v, item)          # asserts the handle is under the cursor
+
+    assert len(seen) == 1, "dragging the placeholder committed nothing"
+    cam, jid, pos = seen[0]
+    assert (cam, jid) == ("left", gone)
+    assert abs(pos.x() - want.x()) < 2 and abs(pos.y() - want.y()) < 2
