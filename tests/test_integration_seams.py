@@ -537,6 +537,60 @@ def test_the_size_fallback_is_the_same_whichever_way_the_take_is_turned():
     assert turned == pytest.approx(upright, rel=1e-9)
 
 
+# --------------------------------------------------------------------------
+# Seam 10 — `canceled` no longer means what a future connector would assume
+# --------------------------------------------------------------------------
+
+def test_the_job_dialog_says_what_its_canceled_signal_now_does(qapp):
+    """`run_job` takes Qt's `clicked -> canceled` wire out, because Qt wires
+    `canceled` to `QProgressDialog::cancel()` — the hide this class exists to
+    prevent. The signal is therefore NOT the way to hear about a Cancel any
+    more: it fires zero times per click, and once at teardown. That is
+    exactly the kind of fact the next person connects to and gets wrong, so
+    the class has to say it where they will look.
+    """
+    from pose3d.ui.worker import _JobDialog
+
+    doc = _JobDialog.__doc__ or ""
+    assert "canceled" in doc
+    assert "on_stop" in doc
+    low = doc.lower()
+    assert "teardown" in low and ("zero" in low or "never" in low)
+
+
+def test_a_cancel_click_is_heard_through_on_stop_and_not_through_canceled(
+        qapp, tmp_path):
+    """…and the documented behaviour is the real one."""
+    from pose3d.ui import worker
+
+    heard = {"canceled": 0, "stopped": 0}
+
+    def job(report, cancelled):
+        return "done"
+
+    made = {}
+    real = worker._JobDialog
+
+    class _Spy(real):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            made["dlg"] = self
+            self.canceled.connect(
+                lambda: heard.__setitem__("canceled",
+                                          heard["canceled"] + 1))
+
+    worker._JobDialog = _Spy
+    try:
+        worker.run_job(None, "Job", job)
+    finally:
+        worker._JobDialog = real
+
+    assert made["dlg"] is not None
+    # the teardown's `close()` is the one emission, and it happens after the
+    # job has already finished — never per Cancel click
+    assert heard["canceled"] <= 1
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),
