@@ -245,6 +245,84 @@ def test_one_undo_reverses_the_derived_joint_too(layout):
     assert np.allclose(f.fitted3d, before3d, atol=1e-9)
 
 
+def test_undo_re_solves_the_frame_THE_EDIT_belongs_to(layout):
+    """Ctrl+Z after scrubbing away must repair the frame that was edited.
+
+    `CorrectionStack.undo` puts the 2D back into the edit's own frame, but the
+    re-solve ran on `self.frame()` — whatever is on screen now. So the edited
+    frame kept 3D built from 2D that no longer exists (and the displayed frame
+    was re-gated and re-fitted for nothing), until a full Recalculate 3D; the
+    stale pose is what the 3D view, the timeline and the export read.
+    """
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    edited, elsewhere = data.frames[1], data.frames[3]
+    was2d = edited.kp2d[CAM_LEFT][j].copy()
+    was_pose, was_fit = edited.pose3d.copy(), edited.fitted3d.copy()
+
+    model.set_joint_2d(CAM_LEFT, j, float(was2d[0]) + 45.0,
+                       float(was2d[1]) + 20.0)
+    assert not np.allclose(edited.pose3d[j], was_pose[j])
+
+    model.set_frame(3)                       # the user scrubs away
+    untouched = elsewhere.fitted3d.copy()
+    model.undo()
+
+    assert np.allclose(edited.kp2d[CAM_LEFT][j], was2d)
+    assert np.allclose(edited.pose3d, was_pose, atol=1e-9, equal_nan=True), \
+        "the edited frame kept 3D built from the reverted 2D"
+    assert np.allclose(edited.fitted3d, was_fit, atol=1e-9, equal_nan=True)
+    assert np.allclose(elsewhere.fitted3d, untouched, atol=1e-9,
+                       equal_nan=True), "the displayed frame was re-fitted"
+
+
+def test_redo_re_solves_the_frame_THE_EDIT_belongs_to(layout):
+    """Symmetric: a redo issued from another frame must re-apply the edit's
+    own frame, not re-solve the one being looked at."""
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    edited = data.frames[1]
+    xy = edited.kp2d[CAM_LEFT][j].copy()
+
+    model.set_joint_2d(CAM_LEFT, j, float(xy[0]) + 45.0, float(xy[1]) + 20.0)
+    dragged_pose = edited.pose3d.copy()
+    dragged_fit = edited.fitted3d.copy()
+    model.undo()
+
+    model.set_frame(4)                       # ...and redo from somewhere else
+    model.redo()
+
+    assert np.allclose(edited.pose3d, dragged_pose, atol=1e-9, equal_nan=True)
+    assert np.allclose(edited.fitted3d, dragged_fit, atol=1e-9, equal_nan=True)
+
+
+def test_undo_and_redo_drop_the_quality_measured_from_the_2d_they_moved():
+    """`set_joint_2d` drops the cached take-wide quality because "the numbers
+    now describe a 2D that no longer exists". Undo and redo move the very same
+    2D, so the sidebar went on reporting the bone-length spread, epipolar
+    block and symmetry notes of a correction the user had just removed."""
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=3)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    f = model.frame()
+    clean = model.quality().epipolar["max_px"]
+
+    xy = f.kp2d[CAM_LEFT][j]
+    model.set_joint_2d(CAM_LEFT, j, float(xy[0]) + 40.0, float(xy[1]) + 40.0)
+    dragged = model.quality().epipolar["max_px"]      # what a refresh caches
+    assert dragged > clean
+
+    model.undo()
+    assert model.quality().epipolar["max_px"] == pytest.approx(clean)
+    model.redo()
+    assert model.quality().epipolar["max_px"] == pytest.approx(dragged)
+
+
 def test_a_hand_placed_derived_joint_is_not_overwritten(layout):
     """A correction outranks the derivation: if the user put the neck
     somewhere, dragging a shoulder must not move it back."""

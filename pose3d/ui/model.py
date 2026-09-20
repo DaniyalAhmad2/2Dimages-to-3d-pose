@@ -544,32 +544,51 @@ class ProjectModel(QObject):
     def undo(self) -> None:
         e = self.stack.undo()
         if e is not None:
-            self._resolve_joint(e.joint, e.cam)
+            # the take-wide numbers describe the 2D this just moved: dropped
+            # for the same reason `set_joint_2d` drops them, or the sidebar
+            # goes on reporting the correction the user has removed
+            self._quality = None
+            # ON THE EDIT'S OWN FRAME. The stack put the 2D back into
+            # `frames_by_id[e.frame_id]`; re-solving whatever is on screen
+            # instead left the edited frame holding 3D built from 2D that no
+            # longer exists (and re-gated the displayed frame for nothing).
+            self._resolve_joint(e.joint, e.cam,
+                                self.stack.frames_by_id.get(e.frame_id))
             self._emit(self.joint2dChanged, e.cam, e.joint)
         self._emit(self.historyChanged)
 
     def redo(self) -> None:
         e = self.stack.redo()
         if e is not None:
-            self._resolve_joint(e.joint, e.cam)
+            self._quality = None
+            self._resolve_joint(e.joint, e.cam,
+                                self.stack.frames_by_id.get(e.frame_id))
             self._emit(self.joint2dChanged, e.cam, e.joint)
         self._emit(self.historyChanged)
 
     # --- geometry ---
-    def _resolve_joint(self, joint: int, cam: str) -> None:
-        """Re-triangulate one edited point and re-fit this frame.
+    def _resolve_joint(self, joint: int, cam: str, frame=None) -> None:
+        """Re-triangulate one edited point and re-fit the frame it belongs to.
 
         `joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
         (the camera views and the correction stack share this convention).
         `cam` is the view whose 2D was edited; a derived joint is re-derived
         in that view only, since that is the only one whose parents moved.
+
+        `frame` is the frame the edit belongs to, which is the DISPLAYED frame
+        for a drag but not for an undo issued after scrubbing elsewhere — the
+        stack reverts the 2D of the frame the edit was made on, so that is the
+        frame whose 3D has to follow. The redraw signals still carry the
+        DISPLAYED frame's pose: it is what the views are showing, and the
+        re-solve can change it even when the edit was elsewhere (the fill of a
+        neighbouring frame reads this one's `pose3d`).
         """
         if self.rig is None:
             return
         # measured BEFORE the edit, so a drag and its undo fit against the
         # same targets and land in the same place
         self._targets()
-        f = self.frame()
+        f = self.frame() if frame is None else frame
         if joint >= NUM_JOINTS:
             # THE CROSS-VIEW GATE APPLIES HERE TOO, exactly as it does to a
             # dragged canonical joint in `_retriangulate`: one helper, so a
@@ -582,8 +601,7 @@ class ProjectModel(QObject):
             # face points have no bones and never change the character's
             # dimensions: no re-fit, just re-orient the rigid neck+head chain
             # (the nose turns it in both modes, the ears only in Face mode)
-            self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
-            self._emit(self.accuracyChanged, self._accuracy(self.current))
+            self._emit_current_pose()
             return
         if joint == HEAD_JOINT and self._head_is_the_nose():
             # Under the nose convention the canonical HEAD and the nose face
@@ -615,7 +633,19 @@ class ProjectModel(QObject):
         for j in touched:
             self._retriangulate(f, j)
         self._refit_frame(f)
-        self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
+        self._emit_current_pose()
+
+    def _emit_current_pose(self) -> None:
+        """Redraw what the user is LOOKING at, after a re-solve.
+
+        The frame that was re-solved is not always the displayed one (an undo
+        after scrubbing away), and the views draw the displayed frame — so
+        these two signals carry it, whichever frame the edit belonged to. It
+        may have moved even when the edit was elsewhere: `_refit_frame`
+        re-fits a neighbour whose gap fill reads the edited frame's `pose3d`.
+        """
+        cur = self.frame()
+        self._emit(self.pose3dChanged, cur.fitted3d, cur.head3d, cur.filled)
         self._emit(self.accuracyChanged, self._accuracy(self.current))
 
     def _head_is_the_nose(self) -> bool:
