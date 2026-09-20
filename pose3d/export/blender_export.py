@@ -69,6 +69,12 @@ FAILURE_MESSAGES = {
 _POLL_S = 0.25
 # How long each escalation of _stop is given before the next one.
 _STOP_GRACE_S = 5
+# How long a child that has CLOSED ITS OUTPUT is given to exit, when the
+# caller asked for no deadline of any kind. It has nothing left to say, so
+# this is not the "an FBX bake can be quiet for five minutes" case the idle
+# deadline is kept off for — but it is still generous, because the only
+# purpose it serves is that the app cannot hang for ever.
+_REAP_GRACE_S = 300
 
 
 def _stop(proc) -> None:
@@ -170,13 +176,39 @@ def _pump(proc, chunks: list, on_line, timeout, idle_timeout, cancelled) -> str:
             pass
 
     if not stopped:
-        left = None if timeout is None else max(
-            1.0, timeout - (time.monotonic() - started))
-        try:
-            proc.wait(timeout=left)   # reap; EOF is not quite exit
-        except subprocess.TimeoutExpired:
-            _stop(proc)
-            stopped = "timeout"
+        # Reap: EOF is not quite exit. It used to be an unbounded
+        # `proc.wait(None)` on the GUI's own settings (`timeout=None`), which
+        # is the module's original bug — a hung Blender with nothing to kill
+        # it — moved from the read to the wait: a Windows crash where WerFault
+        # holds the process open after its handles are closed, or a Blender
+        # that closes stdout before a hung FBX/ffmpeg teardown, and the worker
+        # thread blocks for ever behind a modal dialog whose Cancel sets a
+        # flag nothing reads any more.
+        #
+        # So the same three clocks as the loop above, around a bounded wait:
+        # the overall deadline, the caller's cancel, and — since a child that
+        # has closed its pipe will never say anything again — the idle
+        # deadline, counted from EOF. `_REAP_GRACE_S` is the backstop for a
+        # caller that set neither; it is generous, because the point is that
+        # "for ever" is not a length of time.
+        eof = time.monotonic()
+        grace = idle_timeout if idle_timeout is not None else _REAP_GRACE_S
+        while True:
+            try:
+                proc.wait(timeout=_POLL_S)
+                break
+            except subprocess.TimeoutExpired:
+                pass
+            now = time.monotonic()
+            if cancelled is not None and cancelled():
+                stopped = "cancelled"
+            elif timeout is not None and now - started > timeout:
+                stopped = "timeout"
+            elif now - eof > grace:
+                stopped = "timeout"
+            if stopped:
+                _stop(proc)
+                break
     return stopped
 
 
