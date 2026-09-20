@@ -162,10 +162,12 @@ def _headless_view(poses):
     v._show_body = True
     v._char_error = ""
     v._char_error_source = ""
+    v._status = None
+    v._last_draw = None
     v.drawn = {}
 
     def _draw_skeleton(scatter, lines, pts, valid, base_color=None,
-                       filled=None):
+                       filled=None, status=None, size=None):
         v.drawn[scatter] = (np.asarray(pts, float).copy(),
                             np.asarray(valid, bool).copy())
 

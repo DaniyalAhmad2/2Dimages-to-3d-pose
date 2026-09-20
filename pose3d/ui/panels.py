@@ -106,6 +106,54 @@ def acc_label(pct: float) -> str:
     return _BAND_LABELS[acc_band(pct)]
 
 
+def joint_status(state=None, err=float("nan"), filled=False,
+                 corrected=False) -> str:
+    """One joint's band key, from everything that decides it.
+
+    The rule the camera views' dots are drawn by, stated once and in a module
+    with no widget in it, so the 3D preview can band its joints by the SAME
+    answer instead of a second copy that drifts. That the two panels disagreed
+    at all is the client's oldest open complaint (2026-07-26: "you also cant
+    see which joints are flagged as red on either the images on the left or
+    the generated one on the right").
+
+    The order is the whole rule and it is deliberate:
+
+    * a joint the cross-view gate REJECTED has no measurement to be good or
+      bad, so it is never banded — it is its own state;
+    * neither is one with no 3D at all ("not measured" is a different fact
+      from "measured, and badly", and banding it by the detector's confidence
+      is how a joint the pipeline never triangulated came out green);
+    * otherwise the accuracy decides, through `acc_band` — the single source
+      of banding;
+    * and the last two words are what the joint IS rather than how well it was
+      measured: an interpolated joint is not a measurement of this frame, and
+      a hand-placed one is the user overruling the geometry. They come last
+      because they overrule the band, not the other way round.
+
+    `state` is `pose3d.ui.model`'s per-joint state; `err` the MEASURED
+    residual as a fraction of the figure's height (NaN when there is none).
+    """
+    # Imported here rather than at the top: `pose3d.ui.model` drags in the
+    # whole pipeline, and this module is also imported for the banding
+    # arithmetic alone (the legend, the timeline, the tests). The states
+    # themselves are model's to define — two copies of three string constants
+    # desync on a typo with nothing to catch it.
+    from pose3d.ui.model import STATE_NOT_MEASURED, STATE_REJECTED
+
+    if state == STATE_REJECTED:
+        status = "rejected"
+    elif state == STATE_NOT_MEASURED or not np.isfinite(err):
+        status = "unmeasured"
+    else:
+        status = acc_band(accuracy_pct(err))
+    if filled:
+        status = "filled"
+    if corrected:
+        status = "corrected"
+    return status
+
+
 def _section(title: str) -> QLabel:
     lab = QLabel(title)
     lab.setObjectName("sectionHeader")

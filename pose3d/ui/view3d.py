@@ -34,6 +34,8 @@ from pose3d.geometry.orient import detect_vertical, upright_matrix
 # under its old name: it was this module's function for two phases and the
 # tests and tools that import it by that path are right to.
 from pose3d.geometry.placement import ground_datum, take_floor  # noqa: F401
+from pose3d.ui.camera_view import HOLLOW_STATES, RAG_COLORS
+from pose3d.ui.model import STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED
 
 GL_UNAVAILABLE_TEXT = (
     "The 3D preview could not start: this machine's graphics driver did not "
@@ -114,6 +116,77 @@ class GLUnavailable(QWidget):
         return self._restart
 
 
+def _status_rgba(status: str) -> tuple:
+    """A band key as GL's RGBA, from the 2D overlay's own QColor.
+
+    `RAG_COLORS` and `HOLLOW_STATES` are IMPORTED from the camera view rather
+    than restated: two copies of a palette desync on one edit and the client's
+    whole complaint is that the two panels disagreed about which joints are
+    flagged. (They are that module's constants and this pass does not own that
+    file, which is the other reason they are imported and not moved.)
+    """
+    c = RAG_COLORS.get(status, RAG_COLORS["red"])
+    alpha = View3D.HOLLOW_ALPHA if status in HOLLOW_STATES else 1.0
+    return (c.redF(), c.greenF(), c.blueF(), alpha)
+
+
+def _merge_states(states):
+    """Per-joint state from {camera: [state]} — the worse of the two views.
+
+    A rejection is a fact about the PAIR (the gate writes it to both cameras),
+    and "not measured" beats "ok" for the same reason the residuals take the
+    worse camera: a joint one view could not place is a joint with a problem.
+    """
+    if states is None:
+        return [STATE_OK] * NUM_JOINTS
+    per = list(states.values()) if isinstance(states, dict) else [states]
+    out = []
+    for j in range(NUM_JOINTS):
+        pick = STATE_OK
+        for s in per:
+            if s is None or j >= len(s):
+                continue
+            if s[j] == STATE_REJECTED:
+                pick = s[j]             # the instance: it carries px/gate
+                break
+            if s[j] == STATE_NOT_MEASURED:
+                pick = s[j]
+        out.append(pick)
+    return out
+
+
+def _merge_errors(errors):
+    """Per-joint MEASURED residual from one frame of `ProjectModel._accuracy`."""
+    if errors is None:
+        return np.full(NUM_JOINTS, np.nan)
+    if isinstance(errors, dict):
+        if all(isinstance(v, dict) for v in errors.values()):
+            from pose3d.ui.model import worst_per_joint
+            return np.asarray(worst_per_joint(errors, "measured"), float)
+        stack = [np.asarray(v, float) for v in errors.values()]
+        # fmax, not nanmax: a joint neither view saw gives NaN without the
+        # "all-NaN slice" warning, which is the same rule `worst_per_joint`
+        # uses for the same reason.
+        return np.fmax.reduce(np.stack(stack)) if stack else np.full(
+            NUM_JOINTS, np.nan)
+    return np.asarray(errors, float).ravel()
+
+
+def _merge_flags(flags):
+    """Per-joint boolean from {camera: [bool]}, an array, or None.
+
+    A joint corrected in EITHER view is corrected: the user placed it, and the
+    3D it produced is theirs whichever image they dragged it in.
+    """
+    if flags is None:
+        return np.zeros(NUM_JOINTS, bool)
+    if isinstance(flags, dict):
+        stack = [np.asarray(v, bool) for v in flags.values()]
+        return (np.any(np.stack(stack), axis=0) if stack
+                else np.zeros(NUM_JOINTS, bool))
+    return np.asarray(flags, bool).ravel()
+
+
 class View3D(gl.GLViewWidget):
     # Anything that stops the character being posed for a reason OTHER than
     # "this frame has no hips". A missing rig asset, a corrupt .npz, a bad
@@ -126,6 +199,16 @@ class View3D(gl.GLViewWidget):
     BONE_COLOR = (0.95, 0.95, 0.98, 1.0)
     CAPTURE_COLOR = (1.0, 0.72, 0.25, 0.85)    # the measured skeleton
     FILLED_COLOR = (1.0, 0.62, 0.10, 1.0)      # interpolated, not measured
+
+    JOINT_SIZE = 11.0
+    CAPTURE_SIZE = 8.0
+    #: A joint with no measurement of its own, drawn smaller and half-lit. The
+    #: 2D overlay says the same thing with a hollow ring, which a GL point
+    #: sprite cannot draw; size and opacity are what this view has, and the
+    #: distinction has to survive into it or an interpolated joint reads as a
+    #: measured one.
+    HOLLOW_SIZE = 7.5
+    HOLLOW_ALPHA = 0.55
 
     #: The smallest the 3D view may be squeezed to. It lives here rather than
     #: at the call site because it is a fact about the view (a character in a
@@ -156,7 +239,8 @@ class View3D(gl.GLViewWidget):
         # Read off the posed rig rather than from the triangulated points, so
         # the overlay always sits inside the body it belongs to.
         self._scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3)), size=11.0, color=self.JOINT_COLOR, pxMode=True)
+            pos=np.zeros((1, 3)), size=self.JOINT_SIZE,
+            color=self.JOINT_COLOR, pxMode=True)
         self.addItem(self._scatter)
         self._lines = gl.GLLinePlotItem(
             pos=np.zeros((2, 3)), width=2.5, color=self.BONE_COLOR, mode="lines")
@@ -166,7 +250,8 @@ class View3D(gl.GLViewWidget):
         # Kept available so the fit can be judged, in a dimmer colour so it
         # reads as reference rather than as the result.
         self._cap_scatter = gl.GLScatterPlotItem(
-            pos=np.zeros((1, 3)), size=8.0, color=self.CAPTURE_COLOR, pxMode=True)
+            pos=np.zeros((1, 3)), size=self.CAPTURE_SIZE,
+            color=self.CAPTURE_COLOR, pxMode=True)
         self._cap_scatter.setVisible(False)
         self.addItem(self._cap_scatter)
         self._cap_lines = gl.GLLinePlotItem(
@@ -186,6 +271,10 @@ class View3D(gl.GLViewWidget):
         self._vaxis = None
         self._vsign = 1.0
         self._R = None                  # world->view rotation (sequence de-tilt)
+        # (states, errors, corrected) as the window holds them for this frame,
+        # or None while nobody has handed any over — see `set_joint_status`.
+        self._status = None
+        self._last_draw = None          # (points, mask, filled) last drawn
         self._char_error = ""           # last message sent to characterError
         self._char_error_source = ""    # which stage put it there
         self._gl_error = ""             # why OpenGL is unusable, if it is
@@ -554,19 +643,25 @@ class View3D(gl.GLViewWidget):
 
         # primary overlay: the character's OWN joints, which by construction lie
         # inside the mesh. Falls back to the captured points if there's no rig.
+        #
+        # The character's joints, NOT the capture, are also what carries the
+        # banding: a joint the cross-view gate refused has no 3D of its own
+        # (it is NaN in `v` and absent from the capture overlay), while the rig
+        # still poses the limb — so this is the only overlay that can mark it
+        # at all, which is exactly the half of the complaint the 2D fix left
+        # open ("a joint that is simply absent, with no marking").
         if cj is not None:
-            self._draw_skeleton(self._scatter, self._lines, cj,
-                                ~np.isnan(cj).any(1), self.JOINT_COLOR, filled)
+            self._last_draw = (cj, ~np.isnan(cj).any(1), filled)
         else:
-            self._draw_skeleton(self._scatter, self._lines, v, valid,
-                                self.JOINT_COLOR, filled)
+            self._last_draw = (v, valid, filled)
+        self._draw_joints()
 
         # Reference overlay: what the cameras actually MEASURED — so a joint
         # that was interpolated across a dropout is simply absent from it,
         # rather than sitting there in the same amber as everything else.
         measured = valid if filled is None else valid & ~np.asarray(filled, bool)
         self._draw_skeleton(self._cap_scatter, self._cap_lines, v, measured,
-                            self.CAPTURE_COLOR)
+                            self.CAPTURE_COLOR, size=self.CAPTURE_SIZE)
         self._set_body(verts, faces)
 
         if not self._framed:
@@ -580,15 +675,90 @@ class View3D(gl.GLViewWidget):
                                    distance=span * 1.9, elevation=12, azimuth=-70)
             self._framed = True
 
+    # --- per-joint status (the same banding the 2D overlays use) ------------
+    def set_joint_status(self, states=None, errors=None, corrected=None):
+        """Band the 3D joints by the numbers the camera panels band theirs by.
+
+        The client, 2026-07-26: "you also cant see which joints are flagged as
+        red on either the images on the left or the generated one on the
+        right." The 2D half was delivered and this one was not — every joint
+        in the 3D preview was the same cyan, including the ones whose
+        reconstruction the app itself distrusts.
+
+        Takes what the window already holds for the current frame, in the
+        shapes it holds them in, so no caller has to reduce anything itself:
+
+        * `states` — `ProjectModel.joint_states(idx)`, i.e. {camera: [state]},
+          or one already-merged list;
+        * `errors` — one frame of `ProjectModel._accuracy`, i.e.
+          {camera: {"measured": [...], "delivered": [...]}}, or one array of
+          per-joint residuals;
+        * `corrected` — `Frame.corrected`, i.e. {camera: [bool]}, or one array.
+
+        Two cameras, one joint, so the two views are merged the way the rest
+        of the app merges them: the WORSE of the two (`worst_per_joint`), never
+        their mean — a joint the left camera places well and the right does not
+        is a joint with a problem, and the mean says it is half a problem.
+
+        It is banded on the MEASURED residual, like the 2D dots and unlike the
+        gauge, so that the same joint is the same colour in both panels. That
+        the two panels agreed is the entire point of the fix; banding this one
+        on the delivered pose would have them disagree by a band on any joint
+        the bone fit moved.
+
+        Passing nothing clears the banding and the skeleton goes back to one
+        colour.
+        """
+        self._status = (None if states is None and errors is None
+                        and corrected is None else (states, errors, corrected))
+        self._draw_joints()
+
+    def _joint_statuses(self, filled=None):
+        """One band key per joint, or None when there is nothing to band by."""
+        if self._status is None:
+            return None
+        from pose3d.ui.panels import joint_status
+        states, errors, corrected = self._status
+        state = _merge_states(states)
+        err = _merge_errors(errors)
+        cor = _merge_flags(corrected)
+        fil = _merge_flags(filled)
+        return [joint_status(state[j], err[j], fil[j], cor[j])
+                for j in range(NUM_JOINTS)]
+
+    def _draw_joints(self):
+        """(Re)draw the character overlay with whatever status is current.
+
+        Its own method because the pose and the banding arrive on two
+        different signals (`pose3dChanged` and `accuracyChanged`) and nothing
+        orders them: whichever lands second must colour what the first drew,
+        or the view would show one frame's poses in the previous frame's
+        colours until something else moved.
+        """
+        if self._last_draw is None:
+            return
+        pts, mask, filled = self._last_draw
+        self._draw_skeleton(self._scatter, self._lines, pts, mask,
+                            self.JOINT_COLOR, filled,
+                            status=self._joint_statuses(filled),
+                            size=self.JOINT_SIZE)
+
     @classmethod
     def _draw_skeleton(cls, scatter, lines, pts, valid, base_color=None,
-                       filled=None):
+                       filled=None, status=None, size=None):
         idx = np.flatnonzero(valid)
-        if idx.size and base_color is not None:
+        if idx.size and status is not None:
+            colors = np.array([_status_rgba(status[int(j)]) for j in idx],
+                              float)
+            sizes = np.array([cls.HOLLOW_SIZE if status[int(j)] in HOLLOW_STATES
+                              else cls.JOINT_SIZE for j in idx], float)
+            scatter.setData(pos=pts[idx], color=colors, size=sizes)
+        elif idx.size and base_color is not None:
             colors = np.tile(np.asarray(base_color, float), (idx.size, 1))
             if filled is not None:
                 colors[np.asarray(filled, bool)[idx]] = cls.FILLED_COLOR
-            scatter.setData(pos=pts[idx], color=colors)
+            kw = {} if size is None else {"size": float(size)}
+            scatter.setData(pos=pts[idx], color=colors, **kw)
         else:
             scatter.setData(pos=pts[idx] if idx.size else np.zeros((1, 3)))
         seg = []
@@ -660,6 +830,7 @@ class View3D(gl.GLViewWidget):
         self._body.setVisible(self._show_body and active)
 
     def _clear(self):
+        self._last_draw = None          # nothing on screen to re-colour
         for s, l in ((self._scatter, self._lines),
                      (self._cap_scatter, self._cap_lines)):
             s.setData(pos=np.zeros((1, 3)))
