@@ -420,6 +420,33 @@ def test_redetect_re_derives_the_neck_of_a_kept_shoulder(layout):
         _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)))
 
 
+def test_detect_project_itself_restores_the_midpoint_rule(layout):
+    """The detection is what breaks the rule, so it is what has to restore it.
+
+    Straight against `detect_project`, with no model and no recompute behind
+    it: every other route to a re-detect (`redetect_all`, `run_full`, an
+    import) would otherwise be relying on its caller to notice, and the take
+    is triangulated from whatever this function leaves in `kp2d`.
+    """
+    from pose3d.pipeline import detect_project
+
+    data, _ = _take(n=2, keypoint_model=layout)
+    f = data.frames[0]
+    detector = _ShiftedDetector(f.kp2d[CAM_LEFT])
+    j = int(Joint.LEFT_SHOULDER)
+    f.set_kp(CAM_LEFT, j, float(f.kp2d[CAM_LEFT][j][0]) + 100.0,
+             float(f.kp2d[CAM_LEFT][j][1]), score=1.0, corrected=True)
+    kept = f.kp2d[CAM_LEFT][j].copy()
+
+    detect_project(data, detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.kp2d[CAM_LEFT][j], kept), "the correction was lost"
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][int(Joint.NECK)],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER))), \
+        "the detector's own NECK — the midpoint of the REJECTED shoulders"
+
+
 def test_redetect_keeps_a_hand_placed_derived_joint(layout):
     """A NECK the user placed by hand is a correction like any other: it
     outranks both the detector and the midpoint rule."""
