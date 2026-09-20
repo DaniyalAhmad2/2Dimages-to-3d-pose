@@ -195,8 +195,9 @@ def test_a_reopened_project_shows_its_face_corrections_too(qapp):
 def _export_dialog_text(qapp, tmp_path, monkeypatch, fit_note):
     """Run `_on_export` against a fake Blender and return what it told the
     user."""
+    from PySide6.QtWidgets import QMessageBox
     from pose3d.export import blender_export
-    from pose3d.ui import filedialog, main_window as mw
+    from pose3d.ui import filedialog
     from pose3d.ui.main_window import MainWindow
     from pose3d.ui.model import ProjectModel
 
@@ -216,7 +217,6 @@ def _export_dialog_text(qapp, tmp_path, monkeypatch, fit_note):
     monkeypatch.setattr(blender_export, "export_animation", fake_export)
 
     shown = []
-    from PySide6.QtWidgets import QMessageBox
     monkeypatch.setattr(QMessageBox, "information",
                         staticmethod(lambda *a, **k: shown.append(a[2])))
 
@@ -463,9 +463,9 @@ def test_a_rescale_re_takes_the_verdict_from_the_scaled_displacement():
 
 def test_a_calibration_that_read_nothing_does_not_claim_it_used_the_rest(
         tmp_path):
-    """"…the calibration used the rest" is the sentence for a take that lost
-    a pair. On the branch where NO pair could be read there is no rest, and
-    the message said both things in a row."""
+    """The clause "…the calibration used the rest" is the sentence for a take
+    that lost a pair. On the branch where NO pair could be read there is no
+    rest, and the message said both things one after the other."""
     from pose3d.calib.resolve import resolve_calibration
     from pose3d.core.importer import build_project
     from pose3d.imageio import read_image
@@ -485,8 +485,7 @@ def test_a_calibration_that_read_nothing_does_not_claim_it_used_the_rest(
     assert project.frames[0].frame_id in res.message
 
 
-def test_a_calibration_that_lost_one_pair_still_says_it_used_the_rest(
-        tmp_path):
+def test_a_calibration_that_lost_one_pair_still_says_it_used_the_rest():
     """…and the ordinary sentence is unchanged."""
     from pose3d.calib.resolve import summarise_skipped
 
@@ -558,37 +557,57 @@ def test_the_job_dialog_says_what_its_canceled_signal_now_does(qapp):
     assert "teardown" in low and ("zero" in low or "never" in low)
 
 
-def test_a_cancel_click_is_heard_through_on_stop_and_not_through_canceled(
-        qapp, tmp_path):
-    """…and the documented behaviour is the real one."""
+def test_a_real_cancel_click_emits_canceled_zero_times(qapp, monkeypatch,
+                                                       recorded_errors):
+    """…and the documented count is the real one.
+
+    A connector that took `canceled` to mean "the user pressed Cancel" would
+    hear nothing at the moment it happened and then hear it once, later, on a
+    job that had already stopped — which is the worst of both. Pressed here
+    through the REAL button, on a job that keeps running until it is asked to
+    stop.
+    """
+    import time
+
+    from PySide6.QtCore import QTimer
+    from PySide6.QtWidgets import QPushButton
     from pose3d.ui import worker
 
-    heard = {"canceled": 0, "stopped": 0}
-
-    def job(report, cancelled):
-        return "done"
-
-    made = {}
+    dialogs, fired = [], []
     real = worker._JobDialog
 
-    class _Spy(real):
-        def __init__(self, *a, **k):
-            super().__init__(*a, **k)
-            made["dlg"] = self
-            self.canceled.connect(
-                lambda: heard.__setitem__("canceled",
-                                          heard["canceled"] + 1))
+    def make(*a, **kw):
+        dlg = real(*a, **kw)
+        dlg.canceled.connect(lambda: fired.append(time.monotonic()))
+        dialogs.append(dlg)
+        return dlg
 
-    worker._JobDialog = _Spy
-    try:
-        worker.run_job(None, "Job", job)
-    finally:
-        worker._JobDialog = real
+    monkeypatch.setattr(worker, "_JobDialog", make)
 
-    assert made["dlg"] is not None
-    # the teardown's `close()` is the one emission, and it happens after the
-    # job has already finished — never per Cancel click
-    assert heard["canceled"] <= 1
+    def until_cancelled(report, cancelled):
+        deadline = time.monotonic() + 10
+        while not cancelled() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        raise worker.Cancelled()
+
+    def press():
+        if dialogs:
+            dialogs[0].findChild(QPushButton).click()
+            clicked.append(time.monotonic())
+        else:
+            QTimer.singleShot(10, press)
+
+    clicked: list[float] = []
+    QTimer.singleShot(0, press)
+    res = worker.run_job(None, "Detection", until_cancelled)
+
+    assert isinstance(res, worker.Cancelled)
+    assert clicked, "the Cancel button was never pressed"
+    # zero per click, and at most the one at teardown — which is after the
+    # job has already stopped, so it can never be the cancel notification
+    assert len(fired) <= 1
+    assert all(t >= clicked[0] for t in fired)
+    assert recorded_errors == []
 
 
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
