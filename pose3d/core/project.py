@@ -103,6 +103,17 @@ class Frame:
     head_scores: dict[str, np.ndarray] = field(
         default_factory=lambda: {c: _nan_head_scores() for c in CAMERAS})
     head3d: np.ndarray = field(default_factory=_nan_head_xyz)
+    # `corrected`, for the face points — their own array rather than a borrowed
+    # entry in the body one, because `corrected` is what the cross-view gate
+    # reads (`pipeline.cross_view_rejection`, `face_protect`) and flagging a
+    # BODY joint to record a face edit would change which observations the gate
+    # keeps. Without it a frame whose only hand work was on the face reported
+    # itself uncorrected: its dot stayed green and the timeline's "Corrected"
+    # filter under-reported. False on a project written before it existed,
+    # which is the truthful reading of such a file.
+    head_corrected: dict[str, np.ndarray] = field(
+        default_factory=lambda: {c: np.zeros(NUM_HEAD_KP, bool)
+                                 for c in CAMERAS})
 
     def set_kp(self, cam: str, joint: int, x: float, y: float,
                score: float = 1.0, corrected: bool = False) -> None:
@@ -116,11 +127,30 @@ class Frame:
         self.rejected[cam][joint] = False
 
     def set_head_kp(self, cam: str, k: int, x: float, y: float,
-                    score: float = 1.0) -> None:
-        """Face keypoint k (nose/eyes/ears). No corrected flag: face points
-        are never auto-dropped, so there is nothing to protect them from."""
+                    score: float = 1.0, corrected: bool = False) -> None:
+        """Face keypoint k (nose/eyes/ears).
+
+        `corrected` says a human put it there — the same meaning it has for a
+        canonical joint, on the array the face points have of their own
+        (`head_corrected`): the detector does not overwrite it on a re-detect,
+        and the frame counts as corrected.
+        """
         self.head2d[cam][k] = (x, y)
         self.head_scores[cam][k] = score
+        self.head_corrected[cam][k] = corrected
+
+    def has_corrections(self, cam: str | None = None) -> bool:
+        """Did a human place any point in this frame (in this view)?
+
+        THE question the frame's dot and the timeline's "Corrected" filter
+        ask, answered in one place because it has two halves — the body
+        joints and the face points keep separate flags, and a caller that
+        knows about only one of them under-reports a frame whose hand work
+        was all on the other.
+        """
+        cams = CAMERAS if cam is None else (cam,)
+        return any(bool(self.corrected[c].any())
+                   or bool(self.head_corrected[c].any()) for c in cams)
 
 
 @dataclass

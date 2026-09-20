@@ -157,6 +157,10 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             "filled": [bool(v) for v in f.filled],
             "head2d": {c: _arr_to_json(f.head2d[c]) for c in CAMERAS},
             "head_scores": {c: _vec_to_json(f.head_scores[c]) for c in CAMERAS},
+            # the face points' own hand-placed flags: a correction that is not
+            # persisted is a correction the next session overwrites
+            "head_corrected": {c: [bool(v) for v in f.head_corrected[c]]
+                               for c in CAMERAS},
             "head3d": _arr_to_json(f.head3d),
         })
 
@@ -178,6 +182,7 @@ def load_project(folder: str | Path) -> ProjectData:
         # .get for the head keys: projects written before head keypoints
         # existed have none, and must still load.
         head2d, head_sc = fd.get("head2d") or {}, fd.get("head_scores") or {}
+        head_corr = fd.get("head_corrected") or {}
         # A project written before the raw arrays existed has one copy of its
         # 2D and no record of which observations the gate rejected. Back-fill
         # the raw arrays FROM kp2d and leave the mask empty: that is the
@@ -199,6 +204,9 @@ def load_project(folder: str | Path) -> ProjectData:
             fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
             fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
             fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)
+            # absent before the key existed -> nothing was hand-placed, which
+            # is what such a file holds
+            fr.head_corrected[c] = _json_to_flags(head_corr.get(c), NUM_HEAD_KP)
         fr.filled = _json_to_flags(fd.get("filled"))
         fr.pose3d = _json_to_arr(fd["pose3d"], 3)
         fr.fitted3d = _json_to_arr(fd["fitted3d"], 3)

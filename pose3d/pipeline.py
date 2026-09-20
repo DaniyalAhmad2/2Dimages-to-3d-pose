@@ -244,7 +244,16 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             (frame.kp2d_raw[cam], frame.scores_raw[cam],
              frame.kp2d[cam], frame.scores[cam]) = body
         if head is not None:
-            frame.head2d[cam], frame.head_scores[cam] = head
+            # a hand-placed face point is kept exactly as a hand-placed body
+            # joint is: the detector does not overrule the user, and
+            # `redetect_head` reports that every correction was left alone
+            head_xy, head_sc = head
+            keep = (np.asarray(frame.head_corrected[cam], bool)
+                    if respect_corrections else np.zeros(NUM_HEAD_KP, bool))
+            frame.head2d[cam] = np.where(keep[:, None], frame.head2d[cam],
+                                         head_xy)
+            frame.head_scores[cam] = np.where(keep, frame.head_scores[cam],
+                                              head_sc)
     if fields == "all":
         # The merge above is exactly where the midpoint rule breaks: a kept
         # hand correction on a SHOULDER sits beside the detector's own NECK,
