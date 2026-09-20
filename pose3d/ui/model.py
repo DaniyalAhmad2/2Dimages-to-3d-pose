@@ -588,7 +588,7 @@ class ProjectModel(QObject):
             asked = len(CAMERAS) * len(self.project.frames) - len(unread)
             note = summarise_unreadable(
                 unread, "so those views were never looked at")
-            if asked <= 0:
+            if unread and asked <= 0:
                 self.statusMessage.emit(
                     f"No face points could be re-detected. {note}")
                 return
