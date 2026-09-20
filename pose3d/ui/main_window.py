@@ -460,6 +460,15 @@ class MainWindow(QMainWindow):
             per = errors.get(cam, {})
             panel.set_accuracy(per.get("measured"), per.get("delivered"),
                                states.get(cam))
+        # ...and the 3D preview bands its joints by the same three inputs, so
+        # one joint is one colour whichever panel it is looked at in (the
+        # client's 2026-07-26 complaint). View3D does the merging itself.
+        # HERE and not beside `pose3dChanged`: the banding needs the residuals,
+        # and this is the signal that carries them — the pose and the colours
+        # arrive separately and `View3D._draw_joints` re-draws for whichever
+        # lands second.
+        self.view3d.set_joint_status(states, errors,
+                                     self.model.frame().corrected)
 
     def _on_character_error(self, message: str):
         self.view3d_error.setText(message)

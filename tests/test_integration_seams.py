@@ -1,0 +1,108 @@
+"""The seams five parallel tasks left between each other, closed and pinned.
+
+Each task was built, reviewed and merged on its own branch, so every fact that
+crosses two of them — a signal one task emits and another must answer, a rule
+two tasks each stated, a value one returns and another must show — had nobody
+to hold it. These tests are that holder: they assert the JOIN, end to end
+where the join is only observable end to end, so a future edit to either side
+cannot quietly take it apart again.
+"""
+import os
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+import numpy as np
+import pytest
+
+pytest.importorskip("PySide6")
+
+from pose3d.core.project import CAM_LEFT, CAM_RIGHT                # noqa: E402
+from pose3d.core.skeleton import NUM_JOINTS, Joint                 # noqa: E402
+from tests.test_ui_smoke import _project_with_rig                  # noqa: E402
+
+
+@pytest.fixture(scope="module")
+def qapp():
+    from PySide6.QtWidgets import QApplication
+    return QApplication.instance() or QApplication([])
+
+
+# --------------------------------------------------------------------------
+# Seam 1 — the 3D joint colouring T4 built had no hook to reach it
+# --------------------------------------------------------------------------
+
+def _window_with_three_kinds_of_joint(tmp_path):
+    """A window whose current frame holds a corrected, a missing and an
+    ordinary joint — the three cases the client's complaint names."""
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, _gt = _project_with_rig()
+    f = data.frames[0]
+    # missing in BOTH views: no 3D was ever reconstructed for it
+    missing = int(Joint.LEFT_WRIST)
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        f.kp2d[cam][missing] = np.nan
+        f.scores[cam][missing] = np.nan
+    f.pose3d[missing] = np.nan
+    f.fitted3d[missing] = np.nan
+
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    win = MainWindow(model)
+    model.set_frame(0)
+    # a hand correction, made the way the user makes one
+    corrected = int(Joint.RIGHT_KNEE)
+    xy = f.kp2d[CAM_LEFT][corrected]
+    model.set_joint_2d(CAM_LEFT, corrected, float(xy[0]) + 3.0, float(xy[1]))
+    xy = f.kp2d[CAM_RIGHT][corrected]
+    model.set_joint_2d(CAM_RIGHT, corrected, float(xy[0]) + 3.0, float(xy[1]))
+    return win, model, {"missing": missing, "corrected": corrected}
+
+
+def test_the_3d_view_is_banded_by_the_same_rule_as_the_camera_panels(
+        qapp, tmp_path):
+    """The whole point of T4's banding, and it reached nothing.
+
+    `View3D.set_joint_status` was written, tested and merged, and no line in
+    `MainWindow` ever called it — so on the running app every 3D joint stayed
+    one cyan, which is the client's 2026-07-26 complaint verbatim. Asserted
+    against the CAMERA PANEL's own answer for the same joint, not against a
+    copy of the rule.
+    """
+    win, model, j = _window_with_three_kinds_of_joint(tmp_path)
+
+    statuses = win.view3d._joint_statuses(model.frame().filled)
+    assert statuses is not None, "the 3D view was never told the frame's status"
+
+    for joint in range(NUM_JOINTS):
+        left = win.cam_left.view._joint_status(joint)[0]
+        right = win.cam_right.view._joint_status(joint)[0]
+        if left == right:          # the merge has nothing to choose between
+            assert statuses[joint] == left, (
+                f"joint {joint}: 3D says {statuses[joint]!r}, "
+                f"the camera panels say {left!r}")
+
+    assert statuses[j["corrected"]] == "corrected"
+    assert statuses[j["missing"]] == "unmeasured"
+
+
+def test_the_3d_joints_are_actually_drawn_in_those_colours(qapp, tmp_path):
+    """…and the colours reach the scatter, not just the status cache.
+
+    The pose and the banding arrive on two different signals and nothing
+    orders them, so a hook that ran before the pose would leave the drawing
+    uncoloured.
+    """
+    from pose3d.ui.camera_view import RAG_COLORS
+    from pose3d.ui.view3d import _status_rgba
+
+    win, model, j = _window_with_three_kinds_of_joint(tmp_path)
+    colors = np.asarray(win.view3d._scatter.color, float)
+    assert colors.ndim == 2, "the 3D joints were drawn in one flat colour"
+
+    # the overlay draws the joints its own mask keeps, in that order
+    _pts, mask, _filled = win.view3d._last_draw
+    drawn = np.flatnonzero(mask)
+    row = int(np.flatnonzero(drawn == j["corrected"])[0])
+    assert np.allclose(colors[row], _status_rgba("corrected"))
+    assert RAG_COLORS["corrected"].name() != RAG_COLORS["green"].name()
