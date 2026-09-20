@@ -1148,6 +1148,13 @@ def _body_height(poses: np.ndarray) -> float:
 # apart: `export.blender_export` already writes `lens_mm`/`sensor_mm` for each
 # camera, and the day that pair is recorded as provenance the rescale must not
 # quietly enlarge the lens.
+#
+# Matched as a SUBSTRING, which errs toward not scaling: a world length named
+# after the optics (`lens_to_subject_m`, say) would be skipped and stay stale.
+# Neither a word-boundary nor a prefix rule separates that example from
+# `lens_mm` either — only the key's meaning does — so whoever adds such a key
+# should name it for the thing measured rather than for the part it is
+# measured from, or make this set exact-key.
 _NOT_A_WORLD_LENGTH = ("lens", "sensor", "focal", "pixel")
 
 
