@@ -765,6 +765,66 @@ def test_restoring_the_stored_pose_puts_back_the_2d_the_migration_moved():
             assert np.array_equal(f.scores[cam], sc[cam], equal_nan=True)
 
 
+def _migrated_take_with_a_stale_neck(n=4, off=(40.0, 0.0)):
+    """A legacy take whose stored NECK contradicts its shoulders, opened.
+
+    The migration re-derives that neck, which is the one keypoint the restore
+    has to be able to put back — and the banner offering the restore stays up
+    until the user dismisses it, so anything they do in the meantime is real
+    work the restore must not undo.
+    """
+    data, rig = _take(n=n)
+    data.frames[1].kp2d[CAM_LEFT][int(Joint.NECK)] += off
+    data.pipeline_version = 0
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    model.set_frame(1)
+    return model, data, rig
+
+
+def test_a_neck_placed_after_the_migration_survives_the_restore():
+    """(a) The restore is a revert of the MIGRATION, not of the user.
+
+    Reverting every derived joint unconditionally replaced a NECK the user had
+    just placed by hand with the pre-migration value — and because the
+    midpoint rule declines a `corrected` joint, nothing ever re-derived it
+    either: the correction was gone for good, silently, with the flag still
+    claiming it was there.
+    """
+    model, data, _ = _migrated_take_with_a_stale_neck()
+    f, neck = data.frames[1], int(Joint.NECK)
+
+    model.set_joint_2d(CAM_LEFT, neck, 111.0, 222.0)
+
+    assert model.restore_stored_pose()
+    assert tuple(f.kp2d[CAM_LEFT][neck]) == (111.0, 222.0)
+    assert f.corrected[CAM_LEFT][neck], "the flag outlived the correction"
+
+
+def test_a_shoulder_dragged_after_the_migration_keeps_its_neck():
+    """(b) ...and it must not re-create the contradiction it removed.
+
+    The shoulder correction is kept (it is `corrected`), so reverting the neck
+    to the legacy value puts the take back into exactly the
+    neck-contradicting-shoulders state the midpoint rule exists to remove. A
+    derived joint whose parents have moved since follows the parents it has
+    now.
+    """
+    model, data, _ = _migrated_take_with_a_stale_neck()
+    f, neck = data.frames[1], int(Joint.NECK)
+    xy = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.LEFT_SHOULDER),
+                       float(xy[0]) + 60.0, float(xy[1]))
+    kept = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)].copy()
+
+    assert model.restore_stored_pose()
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)], kept)
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][neck],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)))
+
+
 def test_a_project_with_no_calibration_is_left_alone():
     """Recomputing needs a rig. Without one the stored pose is untouched and
     the user is told why, rather than silently getting nothing.

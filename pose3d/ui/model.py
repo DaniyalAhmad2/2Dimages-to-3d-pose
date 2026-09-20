@@ -203,7 +203,9 @@ class ProjectModel(QObject):
         p.pipeline_version = PIPELINE_VERSION
         self._stored_fitted3d = stored
         self._stored_filled = stored_filled
-        self._stored_derived2d = stored_2d
+        # ...and what the migration LEFT, so the restore can tell an untouched
+        # joint from one the user has worked on since (see _restore_derived_2d)
+        self._stored_derived2d = (stored_2d, self._derived_2d())
         now = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
         self.migration_note = (_recompute_note(stored, now)
                                + _head_hint(p)).strip()
@@ -241,33 +243,66 @@ class ProjectModel(QObject):
             "to go back to the corrected one.")
         return True
 
-    def _derived_2d(self) -> tuple[list[int], list[dict]]:
+    def _derived_2d(self) -> tuple[list[tuple[int, list[int]]], list[dict]]:
         """A copy of the 2D the midpoint re-derivation may move.
 
         Only the derived joints (this project's — `skeleton.derived_joints`),
-        in both views, with their scores: that is the whole of what
-        `pipeline.derive_midpoints` writes. `corrected` is deliberately NOT
-        copied, because the re-derivation never touches it — it declines a
-        hand-placed point outright — and `rejected`/`pose3d`/`fitted3d` are
-        re-derived from scratch by any recompute, so they are not this
-        method's to keep either.
+        in both views, with their scores and the two PARENTS that define each:
+        that is the whole of what `pipeline.derive_midpoints` writes, plus what
+        it writes it FROM, which is how the restore can tell whether anything
+        has happened since. `corrected` is deliberately not copied, because the
+        re-derivation never touches it — it declines a hand-placed point
+        outright — and `rejected`/`pose3d`/`fitted3d` are re-derived from
+        scratch by any recompute, so they are not this method's to keep either.
+
+        Taken twice: before the migration (the values to put back) and after it
+        (what the migration left, to compare against).
         """
-        joints = sorted(int(j)
-                        for j in derived_joints(self.project.keypoint_model))
-        return joints, [
-            {c: (np.array(f.kp2d[c][joints], copy=True),
-                 np.array(f.scores[c][joints], copy=True)) for c in CAMERAS}
+        derived = derived_joints(self.project.keypoint_model)
+        pairs = [(int(j), [int(a), int(b)])
+                 for j, (a, b) in DERIVED_MIDPOINT_PARENTS.items()
+                 if j in derived]
+        return pairs, [
+            {c: [(np.array(f.kp2d[c][j], copy=True), float(f.scores[c][j]),
+                  np.array(f.kp2d[c][parents], copy=True))
+                 for j, parents in pairs]
+             for c in CAMERAS}
             for f in self.project.frames]
 
     def _restore_derived_2d(self) -> None:
-        """Put that 2D back, so a restore is an exact revert."""
+        """Put that 2D back — where nothing has superseded it.
+
+        The banner offering the restore stays up until the user dismisses it,
+        so an edit made between the migration and the restore is real work, and
+        a blanket revert destroyed it. Per derived joint, per view:
+
+        * hand-placed since (`corrected`): left alone. A correction outranks
+          both the derivation and the restore — and nothing would ever heal it,
+          since the midpoint rule declines a corrected joint;
+        * its PARENTS have moved since (a shoulder drag, whose correction the
+          restore keeps): re-derived from the parents it has now. Reverting it
+          would put the take back into the very neck-contradicting-shoulders
+          state the midpoint rule exists to remove;
+        * otherwise untouched since the migration derived it, so it goes back
+          to the value the previous build stored — the exact revert.
+        """
         if self._stored_derived2d is None:
             return
-        joints, per_frame = self._stored_derived2d
-        for f, snap in zip(self.project.frames, per_frame):
-            for cam, (xy, scores) in snap.items():
-                f.kp2d[cam][joints] = xy
-                f.scores[cam][joints] = scores
+        (pairs, before), (_, migrated) = self._stored_derived2d
+        for f, was, mig in zip(self.project.frames, before, migrated):
+            for cam in CAMERAS:
+                for k, (joint, parents) in enumerate(pairs):
+                    if f.corrected[cam][joint]:
+                        continue
+                    xy, score, _ = was[cam][k]
+                    mig_xy, _, mig_parents = mig[cam][k]
+                    if not np.array_equal(f.kp2d[cam][parents], mig_parents,
+                                          equal_nan=True):
+                        derive_midpoint(f, cam, joint)
+                    elif np.array_equal(f.kp2d[cam][joint], mig_xy,
+                                        equal_nan=True):
+                        f.kp2d[cam][joint] = xy
+                        f.scores[cam][joint] = score
         self._stored_derived2d = None
 
     # --- whole-project recompute / detection / save ---
