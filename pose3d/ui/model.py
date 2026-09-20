@@ -587,7 +587,7 @@ class ProjectModel(QObject):
             # to reinstall over a file problem.
             asked = len(CAMERAS) * len(self.project.frames) - len(unread)
             note = summarise_unreadable(
-                unread, "so those views were never looked at")
+                unread, "the detector was never asked to look at them")
             if unread and asked <= 0:
                 self.statusMessage.emit(
                     f"No face points could be re-detected. {note}")
