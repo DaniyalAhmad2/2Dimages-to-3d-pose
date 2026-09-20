@@ -387,6 +387,34 @@ def test_a_loader_that_returns_none_is_skipped_by_detection_too(tmp_path):
         (project.frames[1].frame_id, CAM_RIGHT)}
 
 
+# --------------------------------------------------------------------------
+# Seam 6 — the sidebar read the marker back in a unit the box does not use
+# --------------------------------------------------------------------------
+
+def test_the_sidebar_reads_the_marker_back_in_the_unit_it_was_typed_in(qapp):
+    """T5 made the import box centimetres because the client measures with a
+    ruler ("5cm x 5cm Aruco markers"). The sidebar went on printing the
+    stored metres as "50 mm", so the one number the user typed came back in a
+    third unit — and the two rows beside it are already centimetres."""
+    from pose3d.ui.panels import _marker_text
+
+    assert _marker_text({"marker_length_m": 0.05}) == "5.0 cm"
+    assert _marker_text({"marker_length_m": 0.05, "world_tag_id": 15,
+                         "world_frame_id": "0007"}) == \
+        "5.0 cm · tag 15 · frame 0007"
+    assert _marker_text({}) == "—"
+    assert _marker_text({"world_tag_id": 15}) == "tag 15"
+
+
+def test_the_marker_row_uses_the_same_formatting_as_the_rows_beside_it(qapp):
+    """One formatter, so a change of precision cannot leave the three
+    ruler-checkable rows disagreeing."""
+    from pose3d.ui.panels import _cm, _marker_text
+
+    assert _marker_text({"marker_length_m": 0.083}).startswith(_cm(0.083))
+    assert _cm(0.083) == "8.3 cm"
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),
