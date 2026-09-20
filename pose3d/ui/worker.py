@@ -19,7 +19,7 @@ hands it back to the caller without a message box.
 from __future__ import annotations
 
 from PySide6.QtCore import (
-    QCoreApplication, QEventLoop, QObject, Qt, QThread, Signal,
+    QCoreApplication, QEvent, QEventLoop, QObject, Qt, QThread, Signal,
 )
 from PySide6.QtWidgets import QProgressDialog, QPushButton
 
@@ -63,6 +63,72 @@ def _park(*objects: QObject) -> None:
         except RuntimeError:
             continue
         _PARKED.append(obj)
+
+
+class _JobDialog(QProgressDialog):
+    """The progress dialog, with every way of dismissing it taken away.
+
+    A job holds the window until it has really stopped — that is the whole
+    point of the modal dialog — and Qt offers three ways out of a
+    QProgressDialog, each of which used to hand the window back while the
+    worker thread was still running:
+
+    * the **Cancel button**, whose `clicked` Qt wires to `canceled`, which Qt
+      wires to `QProgressDialog::cancel()` — `forceHide` plus `reset()`;
+    * **Esc**, which arrives as a ShortcutOverride and becomes
+      `QDialog::reject()` -> `done()` -> hide. With no Cancel button that
+      happens without `canceled` being emitted at all, so the job is not even
+      asked to stop — and Recompute 3D and Set Scale are exactly the jobs
+      with no Cancel button;
+    * the **title-bar close box**, whose `closeEvent` does emit `canceled`,
+      but whose hide runs AFTER the handler returns, so re-showing from
+      inside it is immediately undone.
+
+    All three end in `on_stop` here, and nothing in this class ever hides the
+    dialog: `run_job`'s teardown does, once, after `loop.exec()` has
+    returned. Accepting the ShortcutOverride is what brings Esc back as an
+    ordinary key press this class can swallow — Qt's documented way to take a
+    shortcut over.
+
+    `_job_running` in MainWindow is not a substitute: it keeps another JOB
+    out, but not a joint edit, a frame change, a save or an Import, and those
+    reach the same ProjectData the worker thread is rewriting.
+    """
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        #: What a dismissal means. `run_job` sets it and clears it in the
+        #: teardown, so one queued behind that teardown reaches nothing.
+        self.on_stop = None
+        #: Only `run_job`'s teardown may close this dialog.
+        self.allow_close = False
+
+    def _stop(self) -> None:
+        if self.on_stop is not None:
+            self.on_stop()
+
+    def event(self, e):
+        if (e.type() == QEvent.Type.ShortcutOverride
+                and e.key() == Qt.Key.Key_Escape):
+            e.accept()              # comes back as a plain KeyPress, below
+            return True
+        return super().event(e)
+
+    def keyPressEvent(self, event):
+        # NOT super() for Escape: QDialog would `reject()` -> `done()` and
+        # hide, which is the release this class exists to prevent.
+        if event.key() == Qt.Key.Key_Escape:
+            event.accept()
+            self._stop()
+            return
+        super().keyPressEvent(event)
+
+    def closeEvent(self, event):
+        if self.allow_close:
+            super().closeEvent(event)
+            return
+        event.ignore()
+        self._stop()
 
 
 class Job(QThread):
@@ -177,7 +243,7 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     # The Cancel button is ours, not the one the constructor would make, so
     # that `_keep_blocking` below can take it away without deleting a widget
     # from inside its own `clicked` emission.
-    dialog = QProgressDialog(title, None, 0, 0, parent)
+    dialog = _JobDialog(title, None, 0, 0, parent)
     cancel_button = QPushButton("Cancel") if cancellable else None
     dialog.setCancelButton(cancel_button)      # None: no button at all
     dialog.setWindowTitle(title)
@@ -206,25 +272,24 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     job.finished.connect(loop.quit)
 
     def _keep_blocking():
-        """Ask the job to stop, and go on blocking the window until it has.
+        """Every way the user has of dismissing this dialog: the button, Esc,
+        the close box.
 
-        `canceled` is emitted by the Cancel button AND by the dialog's own
-        close/Esc path, and Qt's first connection to it is
-        `QProgressDialog::cancel()`, which sets `forceHide` and calls
-        `reset()`. So by the time this runs the dialog is already hidden and
-        out of Qt's modal stack: `QApplication.activeModalWidget()` is None
-        and the window behind takes clicks again — while `loop.exec()` below
-        has not returned and the worker thread is still alive. That gap is
-        seconds wide for an Export (Blender is polled, then killed), and it
-        let a second Export start into the same folder, or a second detection
-        run against the same ProjectData.
+        A job that has been asked to stop does not stop at once — an Export
+        polls `cancelled`, then kills Blender, and that is seconds wide — so
+        the dialog stays up and modal until `loop.exec()` returns, saying it
+        is cancelling. `_JobDialog` is what makes that possible: none of the
+        three paths hides it any more.
 
-        Showing the dialog again puts it straight back in the modal stack, so
-        the window stays blocked until `loop.exec()` returns. The button goes
-        away rather than staying live over a job that has already been asked
-        to stop — hidden and disabled, not deleted: this runs inside its own
-        `clicked` emission, and `setCancelButton(None)` would free the widget
-        Qt is in the middle of.
+        The button goes away rather than staying live over a job that has
+        already been asked to stop — hidden and disabled, not deleted: this
+        runs inside the button's own `clicked` emission, and
+        `setCancelButton(None)` would free the widget Qt is in the middle of.
+
+        With no Cancel button there is nothing to ask: a recompute is one
+        answer about the whole take. The window stays blocked all the same —
+        that is the point — and the label says to wait rather than pretending
+        the job was stopped.
         """
         if cancel_button is not None:
             cancel_button.setEnabled(False)
@@ -233,12 +298,15 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
         dialog.setLabelText(f"{title} — cancelling…" if cancellable
                             else f"{title} — please wait…")
         sink.freeze_label()              # a report in flight must not undo it
-        dialog.show()
 
-    # Connected even when the job cannot be cancelled: there is no button
-    # then, but Esc and the window's close box still reach `canceled`, and
-    # a recompute must not hand the window back mid-take either.
-    dialog.canceled.connect(_keep_blocking)
+    # Esc and the close box, through `_JobDialog`; the button, here. NOT via
+    # `canceled`: Qt wires that signal to `QProgressDialog::cancel()`, whose
+    # whole job is the hide this module exists to prevent, so the wire from
+    # the button to it is taken out and replaced with our own.
+    dialog.on_stop = _keep_blocking
+    if cancel_button is not None:
+        cancel_button.clicked.disconnect()
+        cancel_button.clicked.connect(_keep_blocking)
 
     dialog.show()
     job.start()
@@ -257,14 +325,20 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     job.progress.disconnect()
     job.finished_res.disconnect()
     job.finished.disconnect()
-    # BEFORE `dialog.close()` below, and load-bearing: `closeEvent` emits
-    # `canceled`, so a still-connected `_keep_blocking` would show the dialog
-    # again — over a job that has already finished, with nothing left to close
-    # it.
-    dialog.canceled.disconnect()
+    # The dialog is PARKED, not deleted, so a press or a close queued behind
+    # this teardown is delivered after it. Unwired here, it reaches nothing —
+    # rather than asking a reaped `Job` to stop, or putting the dialog back
+    # on screen over the window this function has just released.
+    dialog.on_stop = None
+    if cancel_button is not None:
+        try:
+            cancel_button.clicked.disconnect()
+        except RuntimeError:
+            pass                       # nothing left connected
     QCoreApplication.removePostedEvents(sink)
     QCoreApplication.removePostedEvents(job)
     QCoreApplication.removePostedEvents(loop)
+    dialog.allow_close = True          # the one hide, and the only one
     dialog.close()
 
     res = sink.result

@@ -131,17 +131,22 @@ def test_a_cancelled_job_is_not_an_error(qapp, recorded_errors):
 
 def test_the_progress_dialogs_cancel_reaches_the_job(qapp, monkeypatch,
                                                      recorded_errors):
-    """The wiring the Cancel button rides on: the dialog's `canceled` signal
-    is the only thing that ever calls `Job.cancel`, and until this test
-    nothing exercised it — every cancel in the suite called `job.cancel()`
-    directly, so a dropped connection would have gone unnoticed."""
+    """The wiring the Cancel button rides on: pressing it is the only thing
+    that ever calls `Job.cancel`, and until this test nothing exercised it —
+    every cancel in the suite called `job.cancel()` directly, so a dropped
+    connection would have gone unnoticed.
+
+    The button, not `canceled`: `run_job` takes Qt's own
+    `clicked -> canceled -> QProgressDialog::cancel()` wire out, because that
+    slot's whole job is to hide the dialog.
+    """
     from PySide6.QtCore import QTimer
 
     from pose3d.ui import worker
 
     dialogs = []
-    real = worker.QProgressDialog
-    monkeypatch.setattr(worker, "QProgressDialog",
+    real = worker._JobDialog
+    monkeypatch.setattr(worker, "_JobDialog",
                         lambda *a, **kw: dialogs.append(real(*a, **kw))
                         or dialogs[-1])
 
@@ -154,8 +159,9 @@ def test_the_progress_dialogs_cancel_reaches_the_job(qapp, monkeypatch,
         raise worker.Cancelled()
 
     def press():
+        from PySide6.QtWidgets import QPushButton
         if dialogs:
-            dialogs[0].canceled.emit()
+            dialogs[0].findChild(QPushButton).click()
         else:
             QTimer.singleShot(10, press)
 
@@ -203,8 +209,8 @@ def test_cancel_keeps_the_window_blocked_until_the_job_has_really_stopped(
     QTest.qWaitForWindowExposed(win, 2000)
 
     dialogs = []
-    real = worker.QProgressDialog
-    monkeypatch.setattr(worker, "QProgressDialog",
+    real = worker._JobDialog
+    monkeypatch.setattr(worker, "_JobDialog",
                         lambda *a, **kw: dialogs.append(real(*a, **kw))
                         or dialogs[-1])
 
@@ -266,6 +272,124 @@ def test_cancel_keeps_the_window_blocked_until_the_job_has_really_stopped(
     win.close()
 
 
+@pytest.mark.parametrize("how", ["escape", "close"])
+@pytest.mark.parametrize("cancellable", [True, False])
+def test_esc_and_the_close_box_cannot_hand_the_window_back(
+        qapp, monkeypatch, recorded_errors, cancellable, how):
+    """The Cancel button is not the only way out of a QProgressDialog.
+
+    Esc reaches the dialog as a ShortcutOverride, and QDialog turns it into
+    `reject()` -> `done()` -> hide — for a job with NO Cancel button that
+    happens without `canceled` being emitted at all, so the job is not even
+    asked to stop. The title-bar close box does emit `canceled`, but QDialog
+    hides AFTER `closeEvent` returns, so re-showing from inside the handler
+    is immediately undone.
+
+    Both left `QApplication.activeModalWidget()` None with the worker thread
+    still running. For Recompute 3D and Set Scale — which have no Cancel
+    button by design — that is the dangerous one: `_job_running` keeps
+    another JOB out, but not a joint edit, a frame change, a save or an
+    Import, while `recompute_all` rewrites `fitted3d` on the worker thread.
+    """
+    from PySide6.QtCore import QPoint, QTimer, Qt
+    from PySide6.QtGui import QCloseEvent, QGuiApplication
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QPushButton)
+
+    from pose3d.ui import worker
+
+    win = QMainWindow()
+    button = QPushButton("start something else")
+    clicks = []
+    button.clicked.connect(lambda: clicks.append(1))
+    win.setCentralWidget(button)
+    win.resize(200, 120)
+    win.show()
+    QTest.qWaitForWindowExposed(win, 2000)
+
+    dialogs, jobs = [], []
+    real_dialog, real_job = worker._JobDialog, worker.Job
+    monkeypatch.setattr(worker, "_JobDialog",
+                        lambda *a, **kw: dialogs.append(real_dialog(*a, **kw))
+                        or dialogs[-1])
+    monkeypatch.setattr(worker, "Job",
+                        lambda *a, **kw: jobs.append(real_job(*a, **kw))
+                        or jobs[-1])
+
+    released = threading.Event()
+
+    def work(report, cancelled):
+        deadline = time.monotonic() + 10
+        while (not cancelled() and not released.is_set()
+               and time.monotonic() < deadline):
+            time.sleep(0.01)
+        time.sleep(0.3)             # still running after the dismissal
+        if cancelled():
+            raise worker.Cancelled()
+        return "done"
+
+    seen = {}
+
+    def drive():
+        if not dialogs:
+            QTimer.singleShot(5, drive)
+            return
+        dialog = dialogs[0]
+        if "dismissed" not in seen:
+            seen["dismissed"] = True
+            assert dialog.windowHandle() is not None, "the dialog never mapped"
+            # As the real dialog stands: the Cancel button is the only
+            # focusable thing on it and Qt gives it focus. That matters —
+            # with the button focused Esc is consumed as a SHORTCUT and never
+            # reaches `keyPressEvent`, which is the path `_JobDialog.event`
+            # is there for. Offscreen, focus only takes once the window is
+            # active.
+            QTest.qWaitForWindowExposed(dialog, 1000)
+            dialog.activateWindow()
+            QTest.qWaitForWindowActive(dialog, 1000)
+            cancel = dialog.findChild(QPushButton)
+            if cancel is not None:
+                cancel.setFocus(Qt.FocusReason.TabFocusReason)
+            seen["focus"] = QApplication.focusWidget()
+            if how == "escape":
+                QTest.keyClick(dialog.windowHandle(), Qt.Key.Key_Escape)
+            else:
+                QApplication.sendEvent(dialog, QCloseEvent())
+            QTimer.singleShot(5, drive)
+            return
+        seen["modal"] = QApplication.activeModalWidget()
+        seen["visible"] = dialog.isVisible()
+        seen["cancel_requested"] = jobs[0].is_cancelled()
+        QTest.mouseClick(win.windowHandle(), Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier,
+                         button.mapTo(win, QPoint(0, 0))
+                         + QPoint(button.width() // 2, button.height() // 2))
+        QGuiApplication.processEvents()
+        seen["clicks"] = len(clicks)
+        released.set()              # let a job nobody could cancel finish
+
+    QTimer.singleShot(0, drive)
+    res = worker.run_job(win, "Recompute 3D", work, cancellable=cancellable)
+
+    if cancellable:
+        assert isinstance(seen.get("focus"), QPushButton), (
+            "the Cancel button did not have focus, so Esc never took the "
+            "shortcut path this test is about")
+    assert seen.get("modal") is not None, (
+        f"{how} released the window with the job still running")
+    assert seen["visible"] is True
+    assert seen["clicks"] == 0, f"a click reached the window after {how}"
+    # a job that CAN be cancelled is asked to stop; one that cannot is not
+    # pretended to have been
+    assert seen["cancel_requested"] is cancellable
+    assert isinstance(res, worker.Cancelled) if cancellable else res == "done"
+    assert recorded_errors == []
+    # and the window is its own again once the job really has stopped
+    assert QApplication.activeModalWidget() is None
+    win.close()
+
+
 def test_a_finished_job_is_retired_by_the_next_one_not_in_its_own_teardown(
         qapp, monkeypatch):
     """`run_job` is called once per detection, re-detect, recompute, export and
@@ -289,8 +413,8 @@ def test_a_finished_job_is_retired_by_the_next_one_not_in_its_own_teardown(
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
 
     made = []
-    real_dialog, real_job = worker.QProgressDialog, worker.Job
-    monkeypatch.setattr(worker, "QProgressDialog",
+    real_dialog, real_job = worker._JobDialog, worker.Job
+    monkeypatch.setattr(worker, "_JobDialog",
                         lambda *a, **kw: made.append(real_dialog(*a, **kw))
                         or made[-1])
     monkeypatch.setattr(worker, "Job",
@@ -431,8 +555,8 @@ def test_the_error_box_opens_only_once_the_job_is_finished_and_unwired(
     from pose3d.ui import guard, worker
 
     made = {}
-    real_dialog, real_job = worker.QProgressDialog, worker.Job
-    monkeypatch.setattr(worker, "QProgressDialog",
+    real_dialog, real_job = worker._JobDialog, worker.Job
+    monkeypatch.setattr(worker, "_JobDialog",
                         lambda *a, **kw: made.setdefault(
                             "dialog", real_dialog(*a, **kw)))
     monkeypatch.setattr(worker, "Job",
