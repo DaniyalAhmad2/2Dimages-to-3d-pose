@@ -186,3 +186,136 @@ def test_a_scale_that_cannot_be_applied_changes_nothing(qapp, monkeypatch):
     win._on_set_scale(-1.0)
 
     assert win.saved_label.text() == "✓ Project Saved"
+
+
+# --- a stopped export tells the truth about the folder ----------------------
+
+def _export_into(monkeypatch, out, writes, reason="blender_cancelled"):
+    """Point the export at `out` and make Blender write `writes` then stop.
+
+    `writes` is {suffix: text}; the real `blender_job` writes the BVH and the
+    FBX before the long video render a Cancel usually interrupts, so this is
+    what is genuinely on disk when `_failure` says nothing was written.
+    """
+    from pathlib import Path
+
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog
+
+    monkeypatch.setattr(filedialog, "existing_directory",
+                        lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+
+    def fake_export(poses, out_dir, name="pose3d", **kw):
+        for suffix, text in writes.items():
+            (Path(out_dir) / f"{name}{suffix}").write_text(text)
+        return blender_export._failure(reason, "Blender was stopped.", 125)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+
+def test_a_cancelled_export_removes_the_files_it_wrote_and_names_them(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    """Blender writes the BVH and the FBX before the video render, and the
+    Cancel lands during that render — minutes wide on the client's laptop. The
+    app used to delete only `<name>_poses.json` and say "nothing was changed"
+    over a complete .bvh and .fbx it had just put on disk, on top of whatever
+    was there from the previous export.
+    """
+    out = tmp_path / "out"
+    out.mkdir()
+    _export_into(monkeypatch, out, {".bvh": "BVH", ".fbx": "FBX",
+                                    "_poses.json": "{}"})
+
+    win = _window()
+    name = win.model.project.name
+    win._on_export()
+
+    assert sorted(p.name for p in out.iterdir()) == []
+    message = win.statusBar().currentMessage()
+    assert "Export cancelled" in message
+    for expected in (f"{name}.bvh", f"{name}.fbx"):
+        assert expected in message, message
+    assert recorded_errors == [], "a cancel is not a failure to report"
+
+
+def test_a_cancelled_export_leaves_an_earlier_delivery_alone(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    """Only what THIS run wrote. A file of the same name that the stopped
+    export never touched is the user's previous delivery, and deleting it
+    would make Cancel more destructive than the bug it fixes."""
+    out = tmp_path / "out"
+    out.mkdir()
+    win = _window()
+    name = win.model.project.name
+    (out / f"{name}.bvh").write_text("YESTERDAY")
+    _export_into(monkeypatch, out, {".fbx": "FBX"})
+
+    win._on_export()
+
+    assert (out / f"{name}.bvh").read_text() == "YESTERDAY"
+    assert not (out / f"{name}.fbx").exists()
+    message = win.statusBar().currentMessage()
+    assert f"{name}.fbx" in message and f"{name}.bvh" not in message, message
+    assert recorded_errors == []
+
+
+def test_an_export_that_wrote_nothing_still_says_nothing_was_written(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    out = tmp_path / "out"
+    out.mkdir()
+    _export_into(monkeypatch, out, {})
+
+    win = _window()
+    win._on_export()
+
+    assert "nothing was written" in win.statusBar().currentMessage()
+    assert recorded_errors == []
+
+
+def test_a_file_that_could_not_be_removed_is_reported_as_written(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    """Windows keeps a file open long enough that a delete fails, and a
+    truncated FBX under the good file's name is the worst thing the folder
+    can hold — so it is named, not silently counted as removed."""
+    from pathlib import Path
+
+    out = tmp_path / "out"
+    out.mkdir()
+    _export_into(monkeypatch, out, {".bvh": "BVH", ".fbx": "FBX"})
+
+    real_unlink = Path.unlink
+
+    def refuse(self, *a, **kw):
+        if self.suffix == ".fbx":
+            raise PermissionError("the file is open in another program")
+        return real_unlink(self, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", refuse)
+
+    win = _window()
+    name = win.model.project.name
+    win._on_export()
+
+    assert (out / f"{name}.fbx").exists(), "the test did not block the delete"
+    assert len(recorded_errors) == 1, recorded_errors
+    title, text = recorded_errors[0]
+    assert f"{name}.fbx" in text and "could not be removed" in text
+    assert f"{name}.bvh" in text, "what WAS removed has to be named too"
+
+
+def test_a_timed_out_export_is_cleaned_up_and_still_reported_as_a_failure(
+        qapp, tmp_path, monkeypatch, recorded_errors):
+    """The idle deadline leaves the same half-written folder as a Cancel, but
+    it is not something the user asked for: it keeps its dialog."""
+    out = tmp_path / "out"
+    out.mkdir()
+    _export_into(monkeypatch, out, {".bvh": "BVH"}, reason="blender_timeout")
+
+    win = _window()
+    name = win.model.project.name
+    win._on_export()
+
+    assert not (out / f"{name}.bvh").exists()
+    assert len(recorded_errors) == 1, recorded_errors
+    assert f"{name}.bvh" in recorded_errors[0][1]

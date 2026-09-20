@@ -98,6 +98,36 @@ def _export_status(line: str) -> str:
     return ""
 
 
+def _export_targets(out, name):
+    """Every file one export writes into the chosen folder.
+
+    All five are the project name plus a fixed suffix, so a second export of
+    the same take into the same folder writes exactly these paths again —
+    which is why a stopped run has to be able to say which of them are its
+    own and which are the previous delivery.
+    """
+    from pathlib import Path
+    return [Path(out) / f"{name}{suffix}"
+            for suffix in (".bvh", ".fbx", ".mp4", "_camera.mp4",
+                           "_poses.json")]
+
+
+def _file_identity(path):
+    """(mtime, size) for a file, or None when it is not there.
+
+    Enough to tell "this run wrote it" from "it was already here": any
+    rewrite moves the mtime, and carrying the size too keeps a same-tick
+    rewrite of a different length from reading as untouched. Erring towards
+    "untouched" is the safe direction — it leaves a file alone rather than
+    deleting a delivery the export never opened.
+    """
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    return (stat.st_mtime_ns, stat.st_size)
+
+
 class MainWindow(QMainWindow):
     #: The top bar's height. Fixed, and the one part of the window that
     #: genuinely cannot shrink, so the small-screen test measures it from here
@@ -842,17 +872,19 @@ class MainWindow(QMainWindow):
                                     # button that now really does kill Blender.
                                     timeout=None, idle_timeout=300)
 
+        # What is in the folder NOW, before this export writes anything: the
+        # BVH and the FBX go to disk before the long video render a Cancel
+        # usually interrupts, so "nothing was written" was said over real
+        # files — and over the previous export of the same name.
+        before = {p: _file_identity(p) for p in _export_targets(out, name)}
+
         # Cancel really does stop it now: the export polls `cancelled` and
         # kills the Blender child, which is why the button is here at all.
         res = self._run_job("Export", job)
         if isinstance(res, Exception):
             return                       # already reported through guard
-        if res.reason == "blender_cancelled":
-            # the pose document was written before Blender was launched; a
-            # cancelled export leaves nothing of itself behind
-            from pathlib import Path
-            (Path(out) / f"{name}_poses.json").unlink(missing_ok=True)
-            self._on_status("Export cancelled")
+        if res.reason in ("blender_cancelled", "blender_timeout"):
+            self._report_stopped_export(out, name, before, res)
             return
         if res.ok:
             items = [
@@ -876,6 +908,53 @@ class MainWindow(QMainWindow):
             guard.report_error(
                 self, "Export failed",
                 res.message or (res.stderr or res.stdout or "")[-1500:])
+
+    def _report_stopped_export(self, out, name, before, res):
+        """Undo what a stopped export wrote, and say exactly what that was.
+
+        `blender_job` writes the BVH and the FBX and only then renders the
+        videos, and Cancel (or the idle deadline) kills the child the instant
+        it fires — minutes into a render on the client's laptop. So the
+        folder holds complete .bvh/.fbx files, a truncated .mp4, and whatever
+        of the previous delivery they overwrote, while `_failure` reports
+        `bvh=None, fbx=None, mp4=None` and the app said "nothing was
+        changed". A truncated FBX sitting under the name of a good one is the
+        worst thing this folder can hold, and the app was asserting it was
+        not there.
+
+        Only files this run created or modified are removed: one of the same
+        name that the export never opened is the user's previous delivery,
+        and deleting it would make Cancel more destructive than the bug.
+        """
+        removed, kept = [], []
+        for path in _export_targets(out, name):
+            now = _file_identity(path)
+            if now is None or now == before.get(path):
+                continue                 # not there, or as we found it
+            try:
+                path.unlink()
+                removed.append(path.name)
+            except OSError:
+                kept.append(path.name)   # locked, or a read-only folder
+
+        cancelled = res.reason == "blender_cancelled"
+        what = ("Export cancelled" if cancelled
+                else "The export was stopped at its deadline")
+        note = (f"{what} — removed the partly written files it had left "
+                f"behind: {', '.join(removed)}" if removed else
+                f"{what} — nothing was written")
+        self._on_status(note)
+        if cancelled and not kept:
+            return                       # the user asked for this; no dialog
+        body = note
+        if kept:
+            body += ("\n\nThese were written by the stopped export and could "
+                     "not be removed, so they are NOT a finished delivery — "
+                     "check them before you use them:\n\n"
+                     + "\n".join(kept))
+        if not cancelled and res.message:
+            body = f"{res.message}\n\n{body}"
+        guard.report_error(self, "Export stopped", body)
 
     def _left_camera(self):
         """The LEFT camera's intrinsics + pose, or None.
