@@ -33,6 +33,15 @@ data/calibration_*.json
 data/demo_project/images/
 data/demo_project/export/*.mp4
 
+# The client guide's build: `npm install docx` in docs/client, and the
+# rendered document. The source is content.json + build.js; the .docx/.pdf are
+# outputs, re-rendered when the text changes, and a stale copy committed here
+# is the very problem docs/client exists to remove.
+docs/client/node_modules/
+docs/client/package-lock.json
+docs/client/Pose3D-Getting-Started.docx
+docs/client/Pose3D-Getting-Started.pdf
+
 # OS
 .DS_Store
 

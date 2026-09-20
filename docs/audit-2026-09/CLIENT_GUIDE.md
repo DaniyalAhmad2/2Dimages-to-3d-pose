@@ -22,8 +22,9 @@ different framing would have produced an empty 3D view.
   lets the software use the row of tags as a "which way is up" reference.
 - **Bigger tags help**: 8–10 cm tags instead of 5 cm give a proportionally better camera
   pose and scale. Print at 100 % and **measure the black square edge to edge with a ruler**;
-  type that number into the "ArUco marker size" box every time. Nothing on disk can tell
-  a 5 cm tag from a 7.5 cm tag — the whole metric scale is that one number.
+  type that number **in centimetres** into the "ArUco marker size (cm)" box every time — an
+  8 cm tag is typed as 8. Nothing on disk can tell a 5 cm tag from a 7.5 cm tag — the whole
+  metric scale is that one number.
 - Put one or two tags **at the figure's own depth** (for example on the table surface
   beside its base), not only on the backdrop behind it. Tags near the subject constrain
   the geometry where it matters.

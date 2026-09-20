@@ -7,6 +7,7 @@ in CI. The tests below are about the two properties that make it worth
 anything: it answers those questions, and it never fails to be produced.
 """
 import os
+import re
 import subprocess
 import sys
 import time
@@ -263,6 +264,244 @@ def test_the_client_is_told_both_places_the_log_can_be():
         text = doc.read_text(encoding="utf-8")
         assert "pose3d-log.txt" in text, doc
         assert "%LOCALAPPDATA%\\Pose3D" in text, doc
+
+
+# --- the install instructions the client actually followed ----------------
+#
+# The client's launch failure is the one the milestone was rejected over, and
+# the two documents below are what steered him into it: README.md sent him to
+# "Desktop or Documents" while the README.txt inside the same zip said the
+# opposite, and neither mentioned unblocking the download in its install steps
+# — Unblock appeared only inside the write-up of the error it prevents, which
+# is a page nobody reads until it is too late. On 2026-09-19 he wrote that he
+# "followed the exact instructions" and still could not open the app.
+
+#: Where each document stops instructing and starts troubleshooting. Anything
+#: after this is read only once something has already gone wrong.
+TROUBLESHOOTING_HEADING = {"README.txt": "If something goes wrong",
+                           "README.md": "## Troubleshooting"}
+
+
+def _install_steps(doc: Path) -> str:
+    """The part of a client document that is followed BEFORE anything fails."""
+    text = doc.read_text(encoding="utf-8")
+    heading = TROUBLESHOOTING_HEADING[doc.name]
+    cut = text.find(heading)
+    assert cut > 0, f"{doc.name}: no {heading!r} section to cut at"
+    return text[:cut]
+
+
+def test_the_install_steps_say_to_unblock_the_downloaded_zip():
+    """Windows tags a downloaded zip, the tag survives extraction, and a
+    tagged `_internal\\` is one of the ways the "Failed to load Python DLL"
+    dialog happens. It has to be step one, not a troubleshooting footnote."""
+    for doc in CLIENT_DOCS:
+        assert "Unblock" in _install_steps(doc), doc
+
+
+def test_both_install_instructions_name_the_same_short_path():
+    """They used to disagree: the zip's README.txt said `C:\\Pose3D`, the
+    repository's README.md said Desktop or Documents. The client can only
+    follow one of them."""
+    for doc in CLIENT_DOCS:
+        assert "C:\\Pose3D" in _install_steps(doc), doc
+
+
+_ONEDRIVE_FOLDER = re.compile(r"(?<!Docker )\bDesktop\b|\bDocuments\b")
+#: What makes naming the folder a warning rather than an instruction.
+_NEGATION = re.compile(r"avoid|\bnot\b|never|\bout of\b|instead of", re.I)
+#: What stops an earlier negation from governing the folder name: a contrast
+#: ("not Program Files, BUT the Desktop") or the end of the sentence it was in.
+_NEGATION_ENDS = re.compile(
+    r"\bbut\b|\bhowever\b|\bthough\b|\bexcept\b|\brather than\b"
+    r"|\binstead\b(?! of)|[.!?](\s|$)", re.I)
+
+
+def _recommends_a_onedrive_folder(line: str) -> bool:
+    """True if this line points the client AT Desktop or Documents.
+
+    Naming them is fine — as the folders to keep out of. So each mention is
+    read against the negation nearest in front of it, and only while that
+    negation still governs: "somewhere writable — Desktop or Documents, not
+    Program Files" has its "not" after the folder names, and "not Program
+    Files, but the Desktop" has a contrast in between. Both send the client to
+    the folder that breaks the app, and both are recommendations here.
+
+    Deliberately strict in one direction: a negation that a line wrap has
+    carried onto the previous line reads as a recommendation and fails the
+    test, which costs a rewording. The other way round would ship the sentence
+    the client followed into a launch failure.
+    """
+    for hit in _ONEDRIVE_FOLDER.finditer(line):
+        before = line[:hit.start()]
+        negations = list(_NEGATION.finditer(before))
+        if not negations:
+            return True
+        if _NEGATION_ENDS.search(before[negations[-1].end():]):
+            return True
+    return False
+
+
+#: The heuristic's own fixtures. The first line is what README.md really said
+#: while the client could not open the app; the second is the "not X, but Y"
+#: shape a whole-line or fixed-window check waves through.
+READS_AS_A_RECOMMENDATION = (
+    "extract it somewhere writable — Desktop or Documents, **not** Program Files —",
+    "Do not put it in Program Files, but the Desktop is fine.",
+    "Do not extract it to C:\\Pose3D. Put it on the Desktop.",
+    "Extract it to Documents.",
+)
+READS_AS_A_WARNING = (
+    "   we test. Do **not** extract to Desktop, Documents or any other folder",
+    "   Do NOT run it from inside the .zip. Avoid Desktop, Documents and anything",
+    "Avoid folders OneDrive syncs (often Desktop and Documents):",
+    "do not put it on the Desktop or in Documents — those are the folders "
+    "OneDrive syncs",
+    "a short path on C: instead of the Desktop",
+    "You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).",
+)
+
+
+def test_the_rule_about_those_folders_reads_the_sentence_the_way_a_client_does():
+    """The install steps are only as good as the check that holds them, so the
+    check is tested on the sentences it exists to tell apart."""
+    for line in READS_AS_A_RECOMMENDATION:
+        assert _recommends_a_onedrive_folder(line), f"let through: {line!r}"
+    for line in READS_AS_A_WARNING:
+        assert not _recommends_a_onedrive_folder(line), f"flagged: {line!r}"
+
+
+def test_neither_document_recommends_the_folders_that_break_it():
+    """Desktop and Documents are the two folders OneDrive syncs by default,
+    where "files on-demand" leaves placeholder stubs instead of the real
+    DLLs."""
+    for doc in CLIENT_DOCS:
+        for line in doc.read_text(encoding="utf-8").splitlines():
+            assert not _recommends_a_onedrive_folder(line), \
+                f"{doc.name}: reads as a recommendation — {line.strip()!r}"
+
+
+def test_both_install_instructions_are_the_same_steps_in_the_same_order():
+    """One order, in both documents: unblock the download, extract it to the
+    short path, then run the exe. Unblocking after extraction does nothing for
+    the files already extracted."""
+    for doc in CLIENT_DOCS:
+        steps = _install_steps(doc)
+        order = [steps.find(s) for s in ("Unblock", "C:\\Pose3D", "Pose3D.exe")]
+        assert -1 not in order, f"{doc.name}: a step is missing {order}"
+        assert order == sorted(order), f"{doc.name}: steps out of order {order}"
+
+
+def test_the_zip_readme_does_not_ask_for_a_calibration_the_client_has_not_got():
+    """Step 2 used to be "Pick the calibration for that camera setup". The
+    client has never been given a calibration file and the bundle has no tool
+    that makes one: the dialog's three Browse buttons are optional, and the
+    one number he must set — the marker size — went unmentioned."""
+    steps = _install_steps(ROOT / "packaging" / "windows" / "README.txt").lower()
+    assert "pick the calibration" not in steps
+    assert "marker size" in steps, "the one calibration input he does have"
+
+
+# --- the documents we hand the client, and their source -------------------
+#
+# The getting-started PDF sent on 2026-09-04 existed nowhere in this
+# repository: it was written before the UCRT was bundled and before
+# Diagnose.cmd learned to check the bootloader files, so it describes neither
+# the failure the client is seeing nor the diagnostic we now ask him for — and
+# there was no source to correct. `docs/client/` is that source.
+
+CLIENT_DIR = ROOT / "docs" / "client"
+GUIDE_SOURCE = CLIENT_DIR / "content.json"
+RELEASE_NOTES = CLIENT_DIR / "RELEASE_NOTES_v1.md"
+
+
+def _guide_text() -> str:
+    """Every line of prose in the guide, flattened — what the client reads."""
+    import json
+
+    content = json.loads(GUIDE_SOURCE.read_text(encoding="utf-8"))
+    out = [content["title"], content["subtitle"], content.get("intro", "")]
+    for section in content["sections"]:
+        out.append(section["heading"])
+        for block in section["blocks"]:
+            out += [v for v in (block.get("p"), block.get("sub")) if v]
+            out += block.get("bullets", []) + block.get("steps", [])
+    return "\n".join(out)
+
+
+def test_the_getting_started_guide_has_a_source_in_the_repository():
+    """A document only the client has is a document we cannot correct."""
+    assert GUIDE_SOURCE.is_file(), "the guide's content"
+    assert (CLIENT_DIR / "build.js").is_file(), "what renders it"
+    assert (CLIENT_DIR / "README.md").is_file(), "how to render it"
+    assert "node build.js" in (CLIENT_DIR / "README.md").read_text(
+        encoding="utf-8")
+    assert _guide_text().strip(), "the guide parses and has prose in it"
+
+
+def test_the_guide_asks_for_the_marker_size_in_centimetres():
+    """It is the one number the client must type, and the box he types it into
+    is centimetres."""
+    marker_lines = [line for line in _guide_text().splitlines()
+                    if "marker size" in line.lower()
+                    or "Bigger is better" in line]
+    assert marker_lines, "the guide never mentions the marker size"
+    for line in marker_lines:
+        assert "centimetre" in line.lower(), line
+    assert "for example 8" in _guide_text(), "a worked number, not a unit note"
+
+
+def test_the_guide_does_not_pin_the_download_to_one_build():
+    """It names the build the client is to download, and a guide that says
+    "build-17" is wrong the moment the resubmission build is published."""
+    text = _guide_text()
+    assert "newest release" in text
+    assert "build-17" not in text
+
+
+def test_the_guide_gives_the_same_install_steps_as_the_two_readmes():
+    """Three documents reach the client — this one, `README.md` and the
+    `README.txt` in the zip — and the launch failure came out of two of them
+    disagreeing. Unblock, then `C:\\Pose3D`, then the exe, in all three."""
+    text = _guide_text()
+    order = [text.find(s) for s in ("Unblock", "C:\\Pose3D", "Pose3D.exe")]
+    assert -1 not in order, f"a step is missing {order}"
+    assert order == sorted(order), f"steps out of order {order}"
+    for line in text.splitlines():
+        assert not _recommends_a_onedrive_folder(line), line
+
+
+#: Every problem the client raised, and the phrase the release note answers it
+#: with. One line each, in his words rather than ours — this is the document
+#: that goes back with the resubmission.
+CLIENT_COMPLAINTS = {
+    "P1 left/right inverted": "left and right",
+    "P3 forward lean": "lean",
+    "P3 clipping below the floor": "floor",
+    "P5 export did not match the images": "export",
+    "P6 distorted preview": "distort",
+    "P8/P10 head and neck": "head and neck",
+    "P11 joint handles too small": "handle",
+    "P11 arrow keys": "arrow key",
+    "P4 missing joints cannot be placed": "missing joint",
+    "save and reopen a project": "reopen",
+    "P12/P13 python312.dll launch error": "python312.dll",
+    "P13 path too long": "path",
+    "corrections kept across sessions": "correction",
+    "marker size in centimetres": "centimetre",
+}
+
+
+def test_the_release_note_answers_every_complaint_the_client_made():
+    text = RELEASE_NOTES.read_text(encoding="utf-8").lower()
+    for complaint, phrase in CLIENT_COMPLAINTS.items():
+        assert phrase in text, complaint
+
+
+def test_the_release_note_leaves_the_build_number_for_the_build():
+    """The build that carries these fixes does not exist yet; a number written
+    here before it is published is a number that will be wrong."""
+    assert "[build NN]" in RELEASE_NOTES.read_text(encoding="utf-8")
 
 
 def test_the_bundle_script_ships_the_fallback():

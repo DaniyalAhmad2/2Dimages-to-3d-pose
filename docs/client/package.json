@@ -1,0 +1,11 @@
+{
+  "name": "pose3d-client-docs",
+  "private": true,
+  "description": "Renders content.json into the client's getting-started document.",
+  "scripts": {
+    "build": "node build.js"
+  },
+  "dependencies": {
+    "docx": "^9.7.1"
+  }
+}

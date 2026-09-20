@@ -1,0 +1,98 @@
+{
+  "title": "Pose3D — Getting Started",
+  "subtitle": "How to install and use the app, set up your cameras for the best results, and what to do if it does not start.  ·  September 2026",
+  "intro": "Pose3D turns two photographs of a posed figure — one from each camera — into a 3D character you can review, correct, and export. This guide walks through installing it, the two ways it can turn the character's head, how to set up your cameras and markers for the most accurate result, and why the earlier version failed on your PC.",
+  "sections": [
+    {
+      "heading": "1.  Download and install",
+      "blocks": [
+        { "steps": [
+          "Open the releases page: https://github.com/DaniyalAhmad2/2Dimages-to-3d-pose/releases  — and under the **newest release** at the top, open the **Assets** section and download **Pose3D-Windows.zip** (about 720 MB).",
+          "Before extracting, right-click the downloaded zip → **Properties** → tick **Unblock** → **OK**. Windows tags downloaded files, and some security settings refuse to load program files that carry the tag.",
+          "Extract the whole zip to a short folder directly on your C: drive, for example **C:\\Pose3D**. Right-click the file, choose **Extract All**, type that folder as the destination, and wait until it finishes completely.",
+          "Do not run the app from inside the zip, do not put it in Program Files, and do not put it on the Desktop or in Documents — those are the folders OneDrive syncs, and its \"files on-demand\" can leave empty placeholders where the app's own files should be.",
+          "Double-click **Pose3D.exe**. The first time, Windows shows a blue screen that says \"Windows protected your PC\". Click **More info**, then **Run anyway**. This appears for any app that is not code-signed. It is not a virus warning, and you only see it once."
+        ] },
+        { "p": "There is nothing else to install, and the app does not need an internet connection." }
+      ]
+    },
+    {
+      "heading": "2.  Why the earlier version would not start, and what changed",
+      "blocks": [
+        { "sub": "The \"python312.dll could not be found\" error" },
+        { "p": "When you ran the earlier version, Windows showed an error saying it could not find **python312.dll**, even though the file was in the folder. Despite its wording, Windows shows that message when a file that python312.dll depends on is missing — in this case a piece of the Microsoft C runtime that Windows is supposed to include, and that turned out to be missing or damaged on your PC. The app itself was not at fault, and neither were you." },
+        { "p": "The same message can also appear when the folder is genuinely incomplete: the zip did not finish extracting, an antivirus program removed a file from the app's **_internal** folder, or the folder was in a OneDrive location where files are downloaded \"on demand\" and can be left as empty placeholders. A \"path too long\" error while extracting is related: Windows refuses very long file paths, so extracting into a deeply nested folder stopped the extraction part-way." },
+        { "sub": "What changed" },
+        { "p": "The app now carries its own copy of that Microsoft runtime inside its folder, so it no longer relies on what your Windows has. The zip is built so its internal paths stay within the Windows limit, every release is automatically extracted and test-run on a clean Windows machine before it is published, and **Diagnose.cmd** now checks the files Windows needs before Python even starts and names any that are missing." },
+        { "sub": "How to run it properly" },
+        { "bullets": [
+          "Extract to a short folder on your C: drive, such as **C:\\Pose3D**, and let the extraction finish completely before opening anything.",
+          "Unblock the zip before extracting (step 2 above) and keep the folder out of OneDrive. A plain folder on C: is safest.",
+          "If your antivirus flags or removes a file from the **_internal** folder, restore it (Windows Security → Protection history), then extract again.",
+          "If it still will not start, double-click **Diagnose.cmd** in the folder and send us the **pose3d-diagnostics.txt** file it creates — it names exactly which file is missing. As a last resort, install Microsoft's one-click runtime installer: https://aka.ms/vs/17/release/vc_redist.x64.exe — then try again."
+        ] }
+      ]
+    },
+    {
+      "heading": "3.  Using the app, step by step",
+      "blocks": [
+        { "steps": [
+          "Click **Import Images** and choose the left-camera photos and the right-camera photos. Name the files so the pairs line up, as you do now (for example 1_01.jpg with 2_01.jpg). The window shows how many pairs it matched.",
+          "Type the tag size in centimetres into **ArUco marker size (cm)** — the black square, measured edge to edge with a ruler, for example 8 for an 8 cm tag. This one number sets the real-world scale of everything. The three calibration file boxes above it are optional: leave them empty and the app works out where the cameras are from the ArUco markers in the photos themselves.",
+          "Give the project a name and click **Process**. The app finds the body points in every photo, works out their 3D positions from the two views, and shows the character in the 3D view.",
+          "Step through the photos with the timeline at the bottom. Where a point is wrong, drag it in either camera view and the 3D character updates as you drag. Click **Save Corrections** when you are happy.",
+          "Choose how the head is turned with the **Head:** box above the 3D view (see the next section).",
+          "Click **Export Results** and choose a folder. You get a BVH file (motion data), an FBX file (the character with its rig), and an MP4 preview video."
+        ] }
+      ]
+    },
+    {
+      "heading": "4.  Two ways to turn the character's head",
+      "blocks": [
+        { "p": "The **Head:** box above the 3D view offers two methods. The choice is saved with the project, and you can switch at any time — the character updates immediately." },
+        { "bullets": [
+          "**Head: nose** — the default. The head stays upright and turns and tilts to follow the single detected nose point. It depends on one strong feature and stays steady.",
+          "**Head: face (nose + ears)** — the head's full facing direction and tilt are taken from the nose and both ears together. This is the better method for a real person. For any photo where the ears are not found, that frame quietly falls back to the nose method."
+        ] },
+        { "sub": "Why the face method does not work well on the mannequin" },
+        { "p": "The point detector was trained on millions of photographs of real people, and it finds ears and eyes by what they look like on a person: the shape and shading of the ear against hair and skin, the dark of the pupil. Your figure's face is smooth and moulded, with no real ear or eye detail, so the detector has to guess where those points are — and it guesses a slightly different spot in every photo." },
+        { "p": "The face method builds the head's orientation from the triangle of the nose and the two ears, so one badly-guessed ear swings the whole head sideways or tips it over. On a head that fills only a small part of the picture, a few pixels of error becomes a large angle. The nose is different: it stands out from the face as a real shape the detector can find reliably even on a mannequin, so the nose method stays accurate where the face method wanders." },
+        { "p": "Rule of thumb: for a mannequin or doll, use **Head: nose**. For a real person, use **Head: face**. In both methods the head keeps its true size — the detected points only turn it, they never stretch it." }
+      ]
+    },
+    {
+      "heading": "5.  Setting up for the best results",
+      "blocks": [
+        { "p": "These come from our measurements on your 26-photo take, ordered by how much each one helps." },
+        { "sub": "Markers (the ArUco tags)" },
+        { "bullets": [
+          "Put **at least two markers where both cameras can see them in every shot**, ideally all four. In your take the right camera saw only one marker in 11 photos and none at all in the other 15, so the whole 3D result rested on a single marker in a single photo.",
+          "Mount markers **flat on stiff card**, not curved over the backdrop, and mount them all the same way up. A marker bent over a curve confuses the position calculation.",
+          "**Bigger is better** — 8 to 10 cm markers instead of 5 cm. Print at 100%, measure the black square with a ruler, and type the size in centimetres into the app every time, for example 8.",
+          "Put one or two markers **at the figure's own depth**, for example on the table beside its base, not only on the backdrop behind it."
+        ] },
+        { "sub": "Cameras" },
+        { "bullets": [
+          "Use the main camera at **1x zoom**, not digital zoom. Your left phone was at 1.26x, which changes the lens geometry the app relies on. Move the phone closer instead.",
+          "**Lock focus and exposure** before the first shot — on most phones, press and hold on the screen until it locks — and do not touch it during the take.",
+          "Keep both phones on tripods and do not touch them between shots.",
+          "Use the **same phone model, or at least the same resolution**, for both cameras. Your right camera had a quarter of the pixels of the left, so it contributed only half the precision."
+        ] },
+        { "sub": "Framing and habits" },
+        { "bullets": [
+          "Make the figure **large in the frame**. It filled about a fifth of the height; filling half the frame roughly halves the error. Move closer while keeping the markers you need in view.",
+          "Keep the two cameras **60 to 90 degrees apart**, at about the figure's height rather than looking steeply down.",
+          "Keep the **nose visible to both cameras** — and with a real person in face mode, both ears too. Keep any clamp or support from crossing the arms or legs in either view.",
+          "Once per take, photograph **one pose twice with nothing changed** (it tells us how steady the detector is on your rig), and take one photo with a **ruler beside the figure** (it settles how big the figure really is)."
+        ] }
+      ]
+    },
+    {
+      "heading": "6.  If something goes wrong",
+      "blocks": [
+        { "p": "Double-click **Diagnose.cmd** in the app's folder. It first checks the files Windows needs before Python starts, then checks the app's parts — its libraries, Blender, the character, the detection models, and the graphics — and writes a report called **pose3d-diagnostics.txt**. Send us that file, along with **pose3d-log.txt** if it exists. Both are saved next to Pose3D.exe; if that folder cannot be written to, they are in **%LOCALAPPDATA%\\Pose3D** (paste that into the File Explorer address bar to open it)." },
+        { "p": "One limit worth knowing: a body point hidden from both cameras at the same time cannot be reconstructed on its own. That is exactly what dragging the point in a camera view is for." }
+      ]
+    }
+  ]
+}

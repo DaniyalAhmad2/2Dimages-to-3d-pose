@@ -161,3 +161,54 @@ same dialog, so it could never have reported this. Cost if wrong: about 1 MB and
 DLLs, and a bundled UCRT older than the client's is what PyInstaller shipped for years. The
 one-click `vc_redist.x64.exe` stays documented as the last resort for a complete folder that
 still fails, because it repairs the system copies too.
+
+
+## The v1 corrections pass, before resubmission (2026-09-21)
+
+The milestone was rejected on a client who still could not open the app, with seven earlier
+complaints he had never confirmed as fixed. This pass closes the Priority 1 list and the
+Priority 2 items that answer a complaint, in five isolated worktrees with one owner per file,
+and ships as ONE resubmission build. Rulings, each with what it costs if it is wrong. Where a
+ruling governs work owned by another task of this pass, it records the DECISION and the reason,
+not the state of the code — those tasks are implemented in parallel, and the wording is settled
+against the delivered behaviour once they merge:
+
+- **The marker size box is centimetres** (label "ArUco marker size (cm)", default 5.00, range
+  0.5–200, two decimals), converted to metres where the dialog reads it, so `project.json`,
+  `calibration/report.json` and every solver below keep the metres they always held. The client
+  measures a printed tag with a ruler and the job brief says "5cm x 5cm"; in metres the box took
+  his typed 8 and silently clamped it to its 2.000 m maximum, putting the whole metric scale out
+  by 25x with nothing on screen to connect it back. Cost if wrong: a two-line revert.
+- **Metric BVH/FBX export stays deferred.** The export is normalised to the character rig's own
+  size, so making it metric changes the scale the client's Blender retarget is set up around, and
+  he has never asked for it in the thread. It is listed in the release note as still to come,
+  with the ruler photograph that would settle the figure's true size. Cost if wrong: he opens the
+  FBX expecting centimetres and finds rig units — which is what the note tells him.
+- **Ruling: reusing the main window when a second project is imported is deferred** to the UI/UX
+  audit (the user's earlier decision). What this pass is to do instead is close the leaked old
+  window properly so nothing is left behind; Import opening a new window rather than reusing the
+  open one is accepted for this build. Cost if wrong: a second window the client closes.
+- **Ruling: the floor datum is to be a robust low percentile of the take's per-frame ankle
+  heights, not the single lowest frame**, so one bad ankle cannot push the whole character down
+  through the floor or bob it against the ground. Cost if wrong: a take genuinely captured off
+  the ground sits at a small constant offset, visible and correctable.
+- **Ruling: "Calibrated (with problems)" is to be reworded, and one warning suppressed.** The
+  nominal-up warning is not to be shown while the recorded vertical is in use — it is a statement
+  about a fallback that did not happen — and the other two are to be reworded in plain language
+  and presented as notes rather than problems, because a non-technical client who reads
+  "problems" on a calibration that is fine stops there. Cost if wrong: a wording change.
+- **Ruling: the Priority 2 items taken into this pass** are the ones that answer a complaint —
+  undo on the wrong frame, re-detect and batch NECK/PELVIS, set-scale rescale off the GUI thread,
+  confidence colouring in the 3D view, floor hover, the calibration wording above, skipping
+  0-byte images, the timeline highlight and Show filter, the export/preview framing mismatch,
+  and the drag placement cache.
+  **Excluded:** window reuse and metric export, both above.
+- **The install instructions are one set of steps in two files.** `README.md` and the zip's
+  `README.txt` carry the same three steps in the same order — unblock the download, extract to
+  `C:\Pose3D`, run `Pose3D.exe` — pinned by the doc tests, because the contradiction between them
+  (one said Desktop or Documents, the other said not to) is what the client followed into the
+  launch failure. Cost if wrong: nothing; the tests fail before he sees it.
+- **The client's getting-started guide has a source in the repository** (`docs/client/`,
+  rendered with `node build.js`). The PDF sent on 2026-09-04 existed only in his inbox and could
+  not be corrected when the build changed. Cost if wrong: a build step outside CI that has to be
+  run by hand when the text changes.

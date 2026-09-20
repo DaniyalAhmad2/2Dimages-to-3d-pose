@@ -105,13 +105,23 @@ class ImportDialog(QDialog):
         self.intr_l = _FilePicker("file", "Intrinsics (*.json)")
         self.intr_r = _FilePicker("file", "Intrinsics (*.json)")
         self.extr = _FilePicker("file", "Extrinsics (*.json)")
+        # Centimetres, not metres: the client measures the printed tag with a
+        # ruler, the job brief says "5cm x 5cm Aruco markers", and every guide
+        # we sent told him to type that number in. In metres the same box took
+        # a typed 8 and silently clamped it to its 2.000 m maximum — the whole
+        # metric scale 25x too large, with nothing on screen saying so. The
+        # value is divided by 100 where it is read (`_run_phases`), so the
+        # project and the calibration report keep the metres they always held.
         self.marker = QDoubleSpinBox()
-        self.marker.setDecimals(3); self.marker.setRange(0.005, 2.0)
-        self.marker.setValue(0.05); self.marker.setSuffix(" m")
+        self.marker.setDecimals(2); self.marker.setRange(0.5, 200.0)
+        self.marker.setValue(5.00); self.marker.setSuffix(" cm")
+        marker_hint = QLabel("the black square, edge to edge")
+        marker_hint.setStyleSheet("color:#8a91a3; font-size:11px;")
         cform.addRow("Left intrinsics:", self.intr_l)
         cform.addRow("Right intrinsics:", self.intr_r)
         cform.addRow("Extrinsics:", self.extr)
-        cform.addRow("ArUco marker size:", self.marker)
+        cform.addRow("ArUco marker size (cm):", self.marker)
+        cform.addRow("", marker_hint)
         root.addWidget(cal_box)
 
         # --- project ---
@@ -192,7 +202,10 @@ class ImportDialog(QDialog):
         # every widget this import needs, read once and here — see the
         # docstring
         name = self.name.text()
-        marker_length = float(self.marker.value())
+        # the box is centimetres (see the widget); everything below this line,
+        # `project.marker_length` and `calibration/report.json` included, is
+        # metres and always has been
+        marker_length = float(self.marker.value()) / 100.0
         smooth = self.smooth_check.isChecked()
         # `safe_name`, not `replace(" ", "_")`: a colon or a question mark in
         # the typed name is a folder Windows refuses to create, and the
