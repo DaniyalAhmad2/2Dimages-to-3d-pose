@@ -521,6 +521,10 @@ def test_the_recent_menu_offers_what_was_opened_and_opens_it(
 
     entries = [a for a in win._recent_menu.actions() if a.isEnabled()]
     assert [a.toolTip() for a in entries] == folders[::-1]
+    # the label is the folder name, so the full path in the tooltip is the
+    # only thing telling two same-named takes apart — and a QMenu shows no
+    # tooltips at all unless asked
+    assert win._recent_menu.toolTipsVisible()
     entries[0].trigger()
     assert opened == [folders[-1]]
     assert isinstance(entries[0], QAction)

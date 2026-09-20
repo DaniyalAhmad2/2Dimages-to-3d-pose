@@ -263,6 +263,9 @@ class MainWindow(QMainWindow):
         # Held on self: a QMenu wrapper that Python collects takes the menu
         # (and its actions) with it.
         self._recent_menu = file_menu.addMenu("Recent Projects")
+        # Off by default, so the full path each entry carries would never be
+        # shown and two takes with the same folder name would be one label.
+        self._recent_menu.setToolTipsVisible(True)
         self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
         self._fill_recent_menu()
 
