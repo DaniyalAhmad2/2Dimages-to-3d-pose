@@ -538,14 +538,24 @@ class ProjectModel(QObject):
         if detector is None:
             self.statusMessage.emit("No detector available in this build")
             return
-        from pose3d.pipeline import detect_project
+        from pose3d.pipeline import detect_project, summarise_unreadable
         self.statusMessage.emit("Running detection…")
+        # A photo the detector could not open costs that view of that frame
+        # and no more (`pipeline.read_frame_image`) — but never silently: it
+        # used to RAISE, so Run Detection at least failed loudly, and a
+        # "Detection complete" over a view nobody looked at is worse than the
+        # raise was.
+        unread: list[dict] = []
         detect_project(self.project, detector, load_image,
-                       on_progress=on_progress, cancelled=cancelled)
+                       on_progress=on_progress, cancelled=cancelled,
+                       skipped=unread)
         self.recompute_all(on_progress=on_progress)   # take-wide readouts too
+        note = summarise_unreadable(
+            unread, "those views keep the 2D they already had")
         self.statusMessage.emit(
             f"Detection complete ({len(self.project.frames)} frames); "
-            f"hand-corrected points were kept")
+            f"hand-corrected points were kept"
+            + (f". {note}" if note else ""))
 
     def redetect_head(self, detector, load_image,
                       on_progress=None, cancelled=None) -> None:
@@ -562,11 +572,12 @@ class ProjectModel(QObject):
         if self.rig is None:
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
-        from pose3d.pipeline import detect_project
+        from pose3d.pipeline import detect_project, summarise_unreadable
         self.statusMessage.emit("Re-detecting the nose and face points…")
+        unread: list[dict] = []          # see `redetect_all`: never silent
         wrote = detect_project(self.project, detector, load_image,
                                fields="head", on_progress=on_progress,
-                               cancelled=cancelled)
+                               cancelled=cancelled, skipped=unread)
         if not wrote:
             # A build whose detector has no face points (the manual detector,
             # or an RTMPose bundle without the face model) writes nothing —
@@ -590,10 +601,13 @@ class ProjectModel(QObject):
             triangulate_face(f, self.rig, epi_thr, F, allow,
                              face_protect(f, self.project.head_source))
         self.set_frame(self.current)
+        note = summarise_unreadable(
+            unread, "those views keep the face points they already had")
         self.statusMessage.emit(
             f"Nose and face points re-detected on "
             f"{len(self.project.frames)} frames; the body pose and every "
-            f"correction were left alone")
+            f"correction were left alone"
+            + (f". {note}" if note else ""))
 
     def save(self) -> None:
         from pose3d.core.io_project import count_corrections, save_project

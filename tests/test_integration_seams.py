@@ -364,6 +364,32 @@ def test_detect_project_records_the_pairs_it_could_not_read(tmp_path):
     assert "0 bytes" in skipped[0]["reason"]
 
 
+def test_a_re_detect_that_could_not_read_a_photo_says_so(tmp_path):
+    """A skip must never be SILENT.
+
+    Before the fix an unreadable photo raised, and Run Detection at least
+    failed loudly. Now it is skipped — and the re-detect would otherwise
+    report "Detection complete (4 frames); hand-corrected points were kept"
+    over a frame whose view it never looked at, which is the failure mode the
+    raise was protecting against.
+    """
+    from pose3d.core.importer import build_project
+    from pose3d.imageio import read_image
+    from pose3d.ui.model import ProjectModel
+
+    lefts, rights = _photo_pairs(tmp_path / "src")
+    project = build_project(lefts, rights, name="t",
+                            copy_into=tmp_path / "proj")
+    model = ProjectModel(project, None)
+    said = []
+    model.statusMessage.connect(said.append)
+
+    model.redetect_all(_FlatDetector(), read_image)
+
+    assert any("could not be read" in m for m in said), said
+    assert any(project.frames[2].frame_id in m for m in said), said
+
+
 def test_a_loader_that_returns_none_is_skipped_by_detection_too(tmp_path):
     """`cv2.imread` answers None where `read_image` raises, and the tools and
     `pose3d.quality` still pass a plain `cv2.imread`."""
