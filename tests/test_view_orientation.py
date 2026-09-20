@@ -386,6 +386,88 @@ def test_the_view_and_the_metrics_measure_the_same_ground():
 
 
 @needs_character()
+def test_a_corrected_frame_re_places_and_re_sizes_the_take():
+    """A drag rewrites one frame's 3D, and the take-wide rules must follow it.
+
+    `_place` is invalidated by `set_orientation`, `fit_subject` and `reframe`,
+    and the live drag path runs none of them: main_window wires
+    `model.pose3dChanged` straight to `set_pose`. So after a correction the
+    view kept seating (and sizing) the figure from poses that no longer exist —
+    drag the ankle of the frame that defines the take's floor and the corrected
+    foot sank through the grid, with the whole take mis-seated, until the user
+    happened to press Recalculate 3D. The cache's own docstring promises
+    "cached until the take or the orientation changes".
+    """
+    poses = _standing_take(n=10)
+    view = _headless_view(poses)
+    place0, _travel0 = view._take_placement()
+    scale0 = view._character._scale
+
+    edited = poses[3].copy()
+    edited[:, 0] += 0.5            # this frame's subject is half a metre over
+    view.set_pose(edited)
+
+    corrected = poses.copy()
+    corrected[3] = edited
+    fresh = _headless_view(corrected)
+    want, _travel = fresh._take_placement()
+    place1, _travel1 = view._take_placement()
+    assert not np.allclose(place1, place0), "the correction changed nothing"
+    assert np.allclose(place1, want), "the take was placed from stale poses"
+    assert np.isclose(view._character._scale, fresh._character._scale)
+    assert scale0 is not None      # the fit had happened before the correction
+
+
+@needs_character()
+def test_a_corrected_frame_re_sizes_the_character_too():
+    """The character's size is a take-wide fit, and it is re-measured too.
+
+    Not only the placement: `fit_to_subject` reads the subject's median bone
+    lengths, and a correction that moves a joint moves them. The export
+    re-fits from the saved poses when it runs, so a preview that kept the old
+    fit would be a different-sized figure from the file the client receives.
+
+    Two frames, because that is the smallest take whose median a single
+    correction can move — with ten, one edited frame leaves the median exactly
+    where it was, which is the fit being robust rather than the fit being
+    stale.
+    """
+    poses = _standing_take(n=2)
+    view = _headless_view(poses)
+    scale0 = view._character._scale
+
+    edited = poses[1] * 1.4
+    view.set_pose(edited)
+
+    corrected = poses.copy()
+    corrected[1] = edited
+    fresh = _headless_view(corrected)
+    assert not np.isclose(view._character._scale, scale0)
+    assert np.isclose(view._character._scale, fresh._character._scale)
+
+
+@needs_character()
+def test_stepping_frames_does_not_re_measure_the_take():
+    """...and the cache still IS a cache.
+
+    Every frame change goes through the same `set_pose`, so a placement that
+    re-measured whenever the pose differed from the last one would re-pose the
+    whole take on every step through the timeline.
+    """
+    poses = _travelling_take()
+    view = _headless_view(poses)
+    view._take_placement()
+    calls = []
+    real = view._character.pose_and_joints
+    view._character.pose_and_joints = lambda *a, **kw: (calls.append(1),
+                                                        real(*a, **kw))[1]
+    for pose in poses:
+        view.set_pose(pose)
+    assert len(calls) == len(poses), \
+        "stepping the timeline re-measured the take"
+
+
+@needs_character()
 def test_one_unposable_frame_does_not_cost_the_take_its_placement():
     """A frame with no PELVIS and no hips must be SKIPPED, not fatal.
 

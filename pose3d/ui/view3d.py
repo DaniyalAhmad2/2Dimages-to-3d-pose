@@ -412,6 +412,53 @@ class View3D(gl.GLViewWidget):
             self._place = (None, 0.0)
         return self._place
 
+    def _sync_take(self, pose):
+        """Keep the cached take in step with a pose the model has re-solved.
+
+        A correction is not a frame change. `main_window` wires
+        `model.pose3dChanged` straight to `set_pose`, and a drag with Auto
+        Recalculate on rewrites that frame's `fitted3d` and emits it down the
+        same signal — while `fit_subject`, the only thing that refreshes
+        `self._take` and clears `self._place`, is on none of those paths. The
+        view therefore went on seating and sizing the whole take from poses
+        that no longer existed: drag the ankle of the frame that defines the
+        floor and the corrected foot sinks through the grid, with the rest of
+        the take mis-seated, until the user happens to press Recalculate 3D.
+
+        `set_pose` is not told WHICH frame it is drawing, so the frame is
+        identified by the pose itself: a row of the take that matches exactly
+        is this frame arriving unchanged (the ordinary timeline step, which
+        must stay free), and otherwise the nearest row — by how many joints
+        differ in whether they exist at all, then by the largest coordinate
+        difference — is the frame that was just edited. A drag moves one joint
+        a little, so the nearest row IS its own. Two identical frames make the
+        choice between them arbitrary and harmless: every rule built on the
+        take (the floor, the pelvis, the scale) is an aggregate over the
+        frames, so swapping which of two identical rows carries the edit
+        changes none of them.
+        """
+        if self._take is None:
+            return
+        here = np.isfinite(pose).all(1)
+        best, score = None, None
+        for i, row in enumerate(self._take):
+            there = np.isfinite(row).all(1)
+            both = here & there
+            s = (int((here != there).sum()),
+                 float(np.abs(row[both] - pose[both]).max()) if both.any()
+                 else float("inf"))
+            if score is None or s < score:
+                best, score = i, s
+        if score == (0, 0.0):
+            return                      # this frame, unchanged: nothing to do
+        take = np.array(self._take, float)
+        take[best] = pose
+        # Through `fit_subject`, not by clearing `_place` here: a correction
+        # changes the subject's measured bone lengths too, and the export
+        # re-fits from the saved poses when it runs. Re-sizing here is what
+        # keeps the preview the same figure the export will write.
+        self.fit_subject(take)
+
     def _to_view(self, pts):
         """World -> view rotation. Shape-agnostic: used for the canonical
         joints and for the face keypoints alike."""
@@ -454,6 +501,7 @@ class View3D(gl.GLViewWidget):
         if not valid.any():
             self._clear()
             return
+        self._sync_take(pose3d)
 
         if self._R is None and self._vaxis is None:
             self._vaxis, self._vsign = self._detect_vertical(pose3d, valid)
