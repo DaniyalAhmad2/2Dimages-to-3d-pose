@@ -215,6 +215,10 @@ def remember_project(folder) -> None:
     if not is_project_folder(folder):
         return                     # the empty startup window is not a project
     folder = str(Path(folder))
+    # The de-duplication and the cap are belt and braces: `recent_projects`
+    # above has already applied both to what it read back, so a store written
+    # only through here cannot violate either. They are kept for a store
+    # written by an older build, or edited by hand.
     rest = [f for f in recent_projects() if str(Path(f)) != folder]
     settings().setValue(RECENT_KEY, [folder, *rest][:RECENT_MAX])
 
