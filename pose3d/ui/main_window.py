@@ -785,11 +785,35 @@ class MainWindow(QMainWindow):
     def _run_import_dialog(self, dlg):
         if dlg.exec() and dlg.result_folder:
             if self.open_callback is not None:
-                self.open_callback(dlg.result_folder)   # opens a fresh window
-                self.close()
+                # opens a fresh window; this one steps aside for it
+                self._hand_over_to(self.open_callback(dlg.result_folder))
             else:
                 self.statusBar().showMessage(
                     f"Imported to {dlg.result_folder}", 8000)
+
+    def _hand_over_to(self, new_window):
+        """Let go of this window now that `new_window` has taken its place.
+
+        Reusing the window instead of swapping it is deferred by ruling, so
+        the swap stays — but the old window has to actually go. `app._WINDOWS`
+        holds a reference for the life of the process and nothing removed it,
+        so each import (and now each Open) left a whole MainWindow and its
+        ProjectModel behind, and `close()` alone only hid it.
+
+        The geometry goes across with it: the replacement opens at the
+        designed size, and a client who had maximised the window or sized it
+        to their laptop watched that undone by finishing an import.
+        """
+        if new_window is None:
+            return                       # nothing took over: stay where we are
+        new_window.restoreGeometry(self.saveGeometry())
+        self.close()
+        from pose3d import app
+        try:
+            app._WINDOWS.remove(self)
+        except ValueError:
+            pass                         # never registered (tests, embedding)
+        self.deleteLater()
 
     @guarded
     def _on_export(self):

@@ -319,3 +319,82 @@ def test_a_timed_out_export_is_cleaned_up_and_still_reported_as_a_failure(
     assert not (out / f"{name}.bvh").exists()
     assert len(recorded_errors) == 1, recorded_errors
     assert f"{name}.bvh" in recorded_errors[0][1]
+
+
+# --- the window swap after an import ----------------------------------------
+
+class _FinishedImport:
+    """An ImportDialog that has just created a project."""
+
+    def __init__(self, folder):
+        self.result_folder = str(folder)
+
+    def exec(self):
+        return 1
+
+
+def test_an_import_hands_the_window_over_instead_of_leaking_it(
+        qapp, tmp_path, monkeypatch):
+    """Finishing an import opens the new project in a window of its own and
+    closes this one. `app._WINDOWS` holds a reference for the life of the
+    process and nothing ever removed it, so every import left a whole
+    MainWindow + ProjectModel behind — and the replacement opened at the
+    designed size, losing whatever the client had resized or maximised to.
+    """
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from shiboken6 import Shiboken
+
+    from pose3d import app as app_module
+
+    old = _window()
+    old.resize(1200, 800)
+    opened = []
+
+    restored = []
+
+    def open_callback(folder):
+        new = _window()
+        # what the geometry is restored FROM, rather than the size Qt ends up
+        # choosing: `restoreGeometry` clamps to the screen it is replayed on,
+        # and the offscreen one is smaller than any window under test
+        new.restoreGeometry = lambda data: restored.append(bytes(data))
+        opened.append((new, folder))
+        app_module._WINDOWS.append(new)
+        return new
+
+    old.open_callback = open_callback
+    app_module._WINDOWS.append(old)
+    try:
+        old._run_import_dialog(_FinishedImport(tmp_path))
+
+        assert opened, "the import never opened the new project"
+        new, folder = opened[0]
+        assert folder == str(tmp_path)
+        assert old not in app_module._WINDOWS, "the replaced window is held"
+        assert new in app_module._WINDOWS
+        # the layout the client was working at comes across
+        assert restored == [bytes(old.saveGeometry())]
+
+        QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+        assert not Shiboken.isValid(old), (
+            "the replaced window was closed but never deleted")
+    finally:
+        for win in (old, *(w for w, _ in opened)):
+            if win in app_module._WINDOWS:
+                app_module._WINDOWS.remove(win)
+
+
+def test_an_import_with_nowhere_to_open_it_says_where_it_went(qapp, tmp_path):
+    """A window built without the app's open route (the tests, and any
+    embedding) must not delete itself over an import it cannot show."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+    from shiboken6 import Shiboken
+
+    win = _window()
+    win.open_callback = None
+
+    win._run_import_dialog(_FinishedImport(tmp_path))
+
+    assert str(tmp_path) in win.statusBar().currentMessage()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    assert Shiboken.isValid(win), "it handed over to nothing"
