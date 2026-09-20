@@ -24,18 +24,23 @@ from pose3d.ui.panels import (
 
 COL_GREY = QColor(140, 148, 166)
 
+#: The smallest on-screen hit target a SKELETON handle may present, across.
+#: The floor the body radius below is held to, in code and in the tests, so
+#: neither can drift back towards the pixel-sized dot. The face points are
+#: deliberately under it — see FACE_HANDLE_R.
+MIN_GRAB_PX = 16.0
+
 # Handle radii in SCREEN pixels, not image pixels: the items carry
 # ItemIgnoresTransformations, so the client's 3072x4080 photograph can be
 # fitted into a 400-px panel and the dot he has to hit is still ~20 px across.
 # They were 6 IMAGE pixels, which drew at ~1.4 px on that photograph — "very
 # very small, difficult to see" (2026-08-16), and a miss pans the image.
-HANDLE_R = 10.0
-# The face points stay secondary to the skeleton and sit close together
-# around the head, so they are smaller — but still nothing like a pixel.
+HANDLE_R = max(10.0, MIN_GRAB_PX / 2)
+# The face points are smaller ON PURPOSE (14 px across, under the floor
+# above): they are secondary to the skeleton, they are not what the client
+# was complaining about, and five of them sit close enough together around
+# the head that body-sized handles would cover the face and each other.
 FACE_HANDLE_R = 7.0
-#: The smallest on-screen hit target a handle may present, across. Stated
-#: here so the test asserts the number the code promises.
-MIN_GRAB_PX = 16.0
 
 # Shared with the accuracy panels so a joint's dot, its tooltip and the
 # JOINT ACCURACY list can never disagree about what "amber" means.

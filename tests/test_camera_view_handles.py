@@ -115,6 +115,10 @@ def test_the_face_points_are_smaller_than_the_body_joints(qapp, tmp_path):
     assert face < body, "the face points must stay secondary to the skeleton"
     assert FACE_HANDLE_R < HANDLE_R
     assert face >= 2 * FACE_HANDLE_R, "…but still be grabbable"
+    # the floor is the SKELETON's: the face points are under it on purpose,
+    # and the body radius may not drift below it
+    assert 2 * HANDLE_R >= MIN_GRAB_PX
+    assert face < MIN_GRAB_PX
 
 
 def test_a_near_miss_grabs_the_joint_instead_of_panning(qapp, tmp_path):
