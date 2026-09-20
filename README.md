@@ -16,7 +16,7 @@ There are two ways to run it, and on Windows the native one is better.
 | 3D view | uses the graphics card | software-rendered, noticeably slower |
 | Prerequisites | none | Docker Desktop |
 | File access | anywhere on the machine | only pre-shared folders |
-| Download | ~1 GB zip | ~1.5 GB image |
+| Download | about 720 MB zip | ~1.5 GB image |
 
 The 3D view is where most of the work happens — scrubbing frames, checking
 joints — so on Windows the native build is the one to use. Docker remains the
