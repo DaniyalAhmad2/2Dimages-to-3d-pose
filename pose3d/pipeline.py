@@ -19,7 +19,10 @@ import numpy as np
 from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
-from pose3d.core.skeleton import JOINT_NAMES, Joint, NUM_HEAD_KP, NUM_JOINTS
+from pose3d.core.skeleton import (
+    DERIVED_MIDPOINT_PARENTS, JOINT_NAMES, Joint, NUM_HEAD_KP, NUM_JOINTS,
+    derived_joints,
+)
 from pose3d.detect.base import KeypointDetector
 from pose3d.geometry.bonefit import (
     fallback_bone_lengths, fit_bone_lengths, measure_bone_lengths,
@@ -66,6 +69,76 @@ def _detector_keypoint_model(detector: KeypointDetector) -> str:
     if declared:
         return str(declared)
     return "halpe26" if getattr(detector, "feet", False) else "coco17"
+
+
+# The parents of every joint the midpoint convention derives, in CANONICAL
+# indices. `skeleton.DERIVED_MIDPOINT_PARENTS` is the pairing; WHICH of them a
+# given project actually derives is `skeleton.derived_joints(keypoint_model)`,
+# asked per project and never inferred from the layout's name.
+_DERIVED_PARENTS: dict[int, tuple[int, int]] = {
+    int(joint): (int(a), int(b))
+    for joint, (a, b) in DERIVED_MIDPOINT_PARENTS.items()
+}
+
+
+def derive_midpoint(frame, cam: str, derived: int) -> bool:
+    """Put ONE derived joint back on its parents' midpoint, in ONE view.
+
+    THE midpoint rule, for every path that has to restore it: the live drag
+    (`ui.model._sync_derived`, which re-derives the one joint whose parent
+    moved) and the batch paths (`derive_midpoints`, below). A derived joint is
+    not an independent measurement — it IS the midpoint — so a NECK that
+    contradicts the shoulders it is made of is triangulated and bone-fitted
+    from a pose the user can see is wrong, and the two paths must not be able
+    to disagree about what it should be.
+
+    Returns True when it wrote the point. False, leaving the joint alone, when
+
+    * the user placed it by hand (`corrected`): their correction outranks the
+      derivation, here as everywhere;
+    * either parent is missing: the midpoint of a NaN is not an improvement on
+      whatever is there.
+    """
+    parents = _DERIVED_PARENTS.get(int(derived))
+    if parents is None or frame.corrected[cam][derived]:
+        return False
+    a, b = parents
+    pa, pb = frame.kp2d[cam][a], frame.kp2d[cam][b]
+    if np.isnan(pa).any() or np.isnan(pb).any():
+        return False
+    frame.kp2d[cam][derived] = (pa + pb) / 2.0
+    # nanmin, not min: min(nan, 0.5) is nan while min(0.5, nan) is 0.5, so a
+    # plain min made the derived point's confidence depend on which parent
+    # happens to be listed first. Both parents unscored leaves it NaN — the 2D
+    # above is real either way.
+    pair = np.array([frame.scores[cam][a], frame.scores[cam][b]], float)
+    frame.scores[cam][derived] = (float(np.nanmin(pair))
+                                  if np.isfinite(pair).any() else np.nan)
+    return True
+
+
+def derive_midpoints(project: ProjectData) -> int:
+    """Restore the midpoint rule across the whole take. Returns how many moved.
+
+    Every BATCH path that rewrites 2D has to run this, because every one of
+    them can leave a derived joint contradicting its parents: a re-detect
+    keeps the hand-corrected shoulder and writes the detector's own neck over
+    the synced one (half the correction out), and a plain recompute follows a
+    drag made with "Auto Recalculate 3D" off, or before the project was
+    calibrated, where the live re-solve never ran at all. The contradictory 2D
+    is then triangulated, bone-fitted, drawn and saved.
+
+    A hand-placed derived joint is left alone (see `derive_midpoint`), and a
+    layout that DETECTS these joints rather than deriving them is left alone
+    entirely — `skeleton.derived_joints` is asked, not the layout's name.
+    """
+    joints = sorted(int(j) for j in derived_joints(project.keypoint_model))
+    moved = 0
+    for frame in project.frames:
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            for j in joints:
+                moved += int(derive_midpoint(frame, cam, j))
+    return moved
 
 
 def detect_project(project: ProjectData, detector: KeypointDetector,
@@ -171,7 +244,24 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
             (frame.kp2d_raw[cam], frame.scores_raw[cam],
              frame.kp2d[cam], frame.scores[cam]) = body
         if head is not None:
-            frame.head2d[cam], frame.head_scores[cam] = head
+            # a hand-placed face point is kept exactly as a hand-placed body
+            # joint is: the detector does not overrule the user, and
+            # `redetect_head` reports that every correction was left alone
+            head_xy, head_sc = head
+            keep = (np.asarray(frame.head_corrected[cam], bool)
+                    if respect_corrections else np.zeros(NUM_HEAD_KP, bool))
+            frame.head2d[cam] = np.where(keep[:, None], frame.head2d[cam],
+                                         head_xy)
+            frame.head_scores[cam] = np.where(keep, frame.head_scores[cam],
+                                              head_sc)
+    if fields == "all":
+        # The merge above is exactly where the midpoint rule breaks: a kept
+        # hand correction on a SHOULDER sits beside the detector's own NECK,
+        # which is the midpoint of the shoulders the user rejected. Restored
+        # here, from the layout just recorded, so the take is never
+        # triangulated from a neck that contradicts its shoulders. A neck the
+        # user placed by hand is `corrected` and survives both steps.
+        derive_midpoints(project)
     return heads
 
 

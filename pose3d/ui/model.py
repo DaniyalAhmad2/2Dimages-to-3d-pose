@@ -23,7 +23,7 @@ from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
 from pose3d.pipeline import (
     CalibratedRig, Cancelled, bone_length_targets, cross_view_rejection,
-    face_protect, fill_frame_gaps, fit_frame, gated_kp2d,
+    derive_midpoint, face_protect, fill_frame_gaps, fit_frame, gated_kp2d,
     per_image_allowances, revalidate_joint, triangulate_face,
 )
 
@@ -60,19 +60,17 @@ class RejectedState(str):
         return self
 
 
-# Joints a layout does not measure but derives as the midpoint of two it does.
-# Dragging a shoulder therefore has to move the neck with it, or the pose keeps
-# a neck the user can see is in the wrong place and the bone fit is solved
-# against a contradiction. WHICH joints those are is per project and comes from
-# `skeleton.derived_joints`; this is only the parent pairing, which is the same
-# under both layouts.
-_DERIVED_FROM: dict[int, tuple[int, int]] = {
-    int(joint): (int(a), int(b))
-    for joint, (a, b) in DERIVED_MIDPOINT_PARENTS.items()
-}
+# Which derived joint each PARENT defines — the drag path's question, since
+# what a drag knows is the joint that moved. Dragging a shoulder has to move
+# the neck with it, or the pose keeps a neck the user can see is in the wrong
+# place and the bone fit is solved against a contradiction. WHICH joints are
+# derived is per project and comes from `skeleton.derived_joints`; where the
+# midpoint goes is `pipeline.derive_midpoint`, the one rule the batch paths
+# run too.
 _DERIVED_OF: dict[int, int] = {
-    parent: derived
-    for derived, parents in _DERIVED_FROM.items() for parent in parents
+    int(parent): int(derived)
+    for derived, parents in DERIVED_MIDPOINT_PARENTS.items()
+    for parent in parents
 }
 
 
@@ -96,10 +94,19 @@ class ProjectModel(QObject):
         self.project_dir = project_dir
         self.current = 0
         self.auto_recalc = True
-        self.stack = CorrectionStack({f.frame_id: f for f in project.frames})
+        # seeded with what the file already holds: the log is the client's
+        # correction history and it accumulates across sessions, so starting it
+        # empty (and then saving it over the stored one) destroyed every
+        # correction made before today. The undo/redo stacks stay empty —
+        # earlier sessions' entries are history, not edits this session may
+        # reverse: the 2D they produced is what the project was loaded with.
+        self.stack = CorrectionStack({f.frame_id: f for f in project.frames},
+                                     log=list(project.corrections))
         # set by upgrade_pipeline() when a legacy project is recomputed on open
         self.migration_note = ""
         self._stored_fitted3d = None
+        self._stored_filled = None
+        self._stored_derived2d = None
         self._stored_version = None
         # bone targets for the live re-solve: the median of every bone over the
         # whole take, which is O(frames x bones) to measure and cannot change
@@ -179,10 +186,26 @@ class ProjectModel(QObject):
             self.migration_note = (_NO_RIG_NOTE + _head_hint(p)).strip()
             return self.migration_note
         stored = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
+        # the gap-fill flags belong to that pose and the recompute is about to
+        # rewrite them from the new triangulation, so they are stashed with it
+        # — a flag that outlives its pose says a measured joint was invented
+        # (and, where the new fill invented one the old pose has a hole at,
+        # fails the export's own invariant check).
+        stored_filled = np.stack([np.asarray(f.filled, bool) for f in p.frames])
+        # and the 2D the recompute is allowed to MOVE: it re-derives NECK and
+        # PELVIS from their parents, so on a legacy take whose stored neck
+        # contradicts its shoulders the migration changes a keypoint. The
+        # restore has to be an exact revert or saving after it would store the
+        # previous build's pose beside 2D it was never built from.
+        stored_2d = self._derived_2d()
         self._stored_version = p.pipeline_version
         self.recompute_all()
         p.pipeline_version = PIPELINE_VERSION
         self._stored_fitted3d = stored
+        self._stored_filled = stored_filled
+        # ...and what the migration LEFT, so the restore can tell an untouched
+        # joint from one the user has worked on since (see _restore_derived_2d)
+        self._stored_derived2d = (stored_2d, self._derived_2d())
         now = np.stack([np.asarray(f.fitted3d, float) for f in p.frames])
         self.migration_note = (_recompute_note(stored, now)
                                + _head_hint(p)).strip()
@@ -193,9 +216,17 @@ class ProjectModel(QObject):
         only — nothing was overwritten on disk)."""
         if self._stored_fitted3d is None:
             return False
-        for f, pose in zip(self.project.frames, self._stored_fitted3d):
+        for f, pose, filled in zip(self.project.frames, self._stored_fitted3d,
+                                   self._stored_filled):
             f.fitted3d = pose.copy()
+            # ...and the flags that came with it. `& isfinite` because a flag
+            # may never point at a joint the pose does not have: that is the
+            # invariant the export checks (and aborts on), and the 3D view
+            # draws a flagged joint as interpolated rather than measured.
+            f.filled = np.asarray(filled, bool) & np.isfinite(pose).all(1)
+        self._restore_derived_2d()
         self._stored_fitted3d = None
+        self._stored_filled = None
         self._bone_targets = None
         self.invalidate_readouts()
         if self._stored_version is not None:
@@ -211,6 +242,68 @@ class ProjectModel(QObject):
             "Restored the pose stored by the previous build. Recalculate 3D "
             "to go back to the corrected one.")
         return True
+
+    def _derived_2d(self) -> tuple[list[tuple[int, list[int]]], list[dict]]:
+        """A copy of the 2D the midpoint re-derivation may move.
+
+        Only the derived joints (this project's — `skeleton.derived_joints`),
+        in both views, with their scores and the two PARENTS that define each:
+        that is the whole of what `pipeline.derive_midpoints` writes, plus what
+        it writes it FROM, which is how the restore can tell whether anything
+        has happened since. `corrected` is deliberately not copied, because the
+        re-derivation never touches it — it declines a hand-placed point
+        outright — and `rejected`/`pose3d`/`fitted3d` are re-derived from
+        scratch by any recompute, so they are not this method's to keep either.
+
+        Taken twice: before the migration (the values to put back) and after it
+        (what the migration left, to compare against).
+        """
+        derived = derived_joints(self.project.keypoint_model)
+        pairs = [(int(j), [int(a), int(b)])
+                 for j, (a, b) in DERIVED_MIDPOINT_PARENTS.items()
+                 if j in derived]
+        return pairs, [
+            {c: [(np.array(f.kp2d[c][j], copy=True), float(f.scores[c][j]),
+                  np.array(f.kp2d[c][parents], copy=True))
+                 for j, parents in pairs]
+             for c in CAMERAS}
+            for f in self.project.frames]
+
+    def _restore_derived_2d(self) -> None:
+        """Put that 2D back — where nothing has superseded it.
+
+        The banner offering the restore stays up until the user dismisses it,
+        so an edit made between the migration and the restore is real work, and
+        a blanket revert destroyed it. Per derived joint, per view:
+
+        * hand-placed since (`corrected`): left alone. A correction outranks
+          both the derivation and the restore — and nothing would ever heal it,
+          since the midpoint rule declines a corrected joint;
+        * its PARENTS have moved since (a shoulder drag, whose correction the
+          restore keeps): re-derived from the parents it has now. Reverting it
+          would put the take back into the very neck-contradicting-shoulders
+          state the midpoint rule exists to remove;
+        * otherwise untouched since the migration derived it, so it goes back
+          to the value the previous build stored — the exact revert.
+        """
+        if self._stored_derived2d is None:
+            return
+        (pairs, before), (_, migrated) = self._stored_derived2d
+        for f, was, mig in zip(self.project.frames, before, migrated):
+            for cam in CAMERAS:
+                for k, (joint, parents) in enumerate(pairs):
+                    if f.corrected[cam][joint]:
+                        continue
+                    xy, score, _ = was[cam][k]
+                    mig_xy, _, mig_parents = mig[cam][k]
+                    if not np.array_equal(f.kp2d[cam][parents], mig_parents,
+                                          equal_nan=True):
+                        derive_midpoint(f, cam, joint)
+                    elif np.array_equal(f.kp2d[cam][joint], mig_xy,
+                                        equal_nan=True):
+                        f.kp2d[cam][joint] = xy
+                        f.scores[cam][joint] = score
+        self._stored_derived2d = None
 
     # --- whole-project recompute / detection / save ---
     def recompute_all(self, on_progress=None, cancelled=None) -> None:
@@ -228,9 +321,15 @@ class ProjectModel(QObject):
         if cancelled is not None and cancelled():
             raise Cancelled()
         from pose3d.pipeline import (
-            fit_project, rejection_note, triangulate_project)
+            derive_midpoints, fit_project, rejection_note, triangulate_project)
         self._bone_targets = None
         write_note = ""
+        # before anything is triangulated: a derived joint is the midpoint of
+        # two others, and a drag made with auto-recalc off (or before the
+        # project was calibrated) never went through the live re-solve that
+        # keeps it there. Reconstructing from a NECK that contradicts the
+        # shoulders is reconstructing from a pose the user can see is wrong.
+        derive_midpoints(self.project)
         _report(on_progress, "Re-triangulating every frame…")
         dropped = triangulate_project(self.project, self.rig)
         smoothing = self.project.smoothing
@@ -321,10 +420,18 @@ class ProjectModel(QObject):
         return factor
 
     def rescale_calibration(self, factor: float) -> None:
-        """Multiply the rig's translations (and marker length) by `factor`.
+        """Multiply the rig's translations — and every stored length — by
+        `factor`.
 
         Re-persists the calibration folder and recomputes, so the 3D view,
         the export and the next open all agree about the new size.
+
+        `project.marker_length` is scaled here because it is a SECOND record
+        of the tag edge the extrinsics were scaled by, beside report.json's:
+        scaling only the report left project.json asserting 50 mm for the same
+        physical tag the calibration folder now called 53.7 mm, which is
+        exactly the silent reversion `set_scale_from_height` says the scaling
+        exists to prevent.
         """
         if self.rig is None:
             self.statusMessage.emit("No calibration loaded — nothing to scale")
@@ -333,6 +440,9 @@ class ProjectModel(QObject):
         for cam in CAMERAS:
             self.rig.ext[cam].t = np.asarray(
                 self.rig.ext[cam].t, float) * factor
+        if self.project.marker_length is not None:
+            self.project.marker_length = float(
+                self.project.marker_length) * factor
         self._persist_rig(factor)
         self.recompute_all()
 
@@ -340,7 +450,7 @@ class ProjectModel(QObject):
         """Write the rescaled rig back, keeping the calibration's provenance.
 
         `save_rig` alone would drop report.json's evidence, so the report is
-        read, its one length-valued field scaled, and handed back. The
+        read, its length-valued fields scaled, and handed back. The
         recorded vertical is a DIRECTION, which a scale cannot touch: it is
         carried through the same report (`save_rig` copies it into
         extrinsics.json), so the folder is written once rather than written
@@ -375,9 +485,9 @@ class ProjectModel(QObject):
             calib_dir / "report.json",
             "The calibration's report.json could not be read ({reason}), so "
             "the rescaled calibration is saved without its marker provenance.")
+        if report is not None:
+            _rescale_report(report, factor)
         if report is not None and report.get("marker_length_m") is not None:
-            report["marker_length_m"] = float(
-                report["marker_length_m"]) * factor
             report["marker_length_source"] = (
                 f"rescaled in-app by {factor:.4f}x from a measured distance")
         if report is not None and report.get("world_up") is None and before:
@@ -486,14 +596,21 @@ class ProjectModel(QObject):
             f"correction were left alone")
 
     def save(self) -> None:
-        from pose3d.core.io_project import save_project
+        from pose3d.core.io_project import count_corrections, save_project
+        # the same objects, not copies: `_write_corrections` stamps each one
+        # with the row it now occupies, and the stack goes on holding them, so
+        # the next save recognises them instead of storing them again.
         self.project.corrections = list(self.stack.log)
         if not self.project_dir:
             self.statusMessage.emit("No project folder set — use Save As")
             return
         save_project(self.project, self.project_dir)
+        # the TOTAL in the log, not this session's share of it: the count the
+        # user reads is their answer to "are my corrections still there?", and
+        # reporting the session's own tally is how a save that had just
+        # destroyed 40 of them could report "Saved 1 corrections".
         self.statusMessage.emit(
-            f"Saved {len(self.project.corrections)} corrections to "
+            f"Saved {count_corrections(self.project_dir)} corrections to "
             f"{self.project_dir}")
 
     # --- navigation ---
@@ -530,32 +647,55 @@ class ProjectModel(QObject):
     def undo(self) -> None:
         e = self.stack.undo()
         if e is not None:
-            self._resolve_joint(e.joint, e.cam)
+            # the take-wide numbers describe the 2D this just moved: dropped
+            # for the same reason `set_joint_2d` drops them, or the sidebar
+            # goes on reporting the correction the user has removed
+            self._quality = None
+            # ON THE EDIT'S OWN FRAME. The stack put the 2D back into
+            # `frames_by_id[e.frame_id]`; re-solving whatever is on screen
+            # instead left the edited frame holding 3D built from 2D that no
+            # longer exists (and re-gated the displayed frame for nothing).
+            # Indexed rather than `.get`: a missing id is a broken invariant,
+            # and a None here would put the re-solve back on the displayed
+            # frame — silently, which is the defect itself.
+            self._resolve_joint(e.joint, e.cam,
+                                self.stack.frames_by_id[e.frame_id])
             self._emit(self.joint2dChanged, e.cam, e.joint)
         self._emit(self.historyChanged)
 
     def redo(self) -> None:
         e = self.stack.redo()
         if e is not None:
-            self._resolve_joint(e.joint, e.cam)
+            self._quality = None
+            # the edit's own frame, indexed — see `undo`
+            self._resolve_joint(e.joint, e.cam,
+                                self.stack.frames_by_id[e.frame_id])
             self._emit(self.joint2dChanged, e.cam, e.joint)
         self._emit(self.historyChanged)
 
     # --- geometry ---
-    def _resolve_joint(self, joint: int, cam: str) -> None:
-        """Re-triangulate one edited point and re-fit this frame.
+    def _resolve_joint(self, joint: int, cam: str, frame=None) -> None:
+        """Re-triangulate one edited point and re-fit the frame it belongs to.
 
         `joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
         (the camera views and the correction stack share this convention).
         `cam` is the view whose 2D was edited; a derived joint is re-derived
         in that view only, since that is the only one whose parents moved.
+
+        `frame` is the frame the edit belongs to, which is the DISPLAYED frame
+        for a drag but not for an undo issued after scrubbing elsewhere — the
+        stack reverts the 2D of the frame the edit was made on, so that is the
+        frame whose 3D has to follow. The redraw signals still carry the
+        DISPLAYED frame's pose: it is what the views are showing, and the
+        re-solve can change it even when the edit was elsewhere (the fill of a
+        neighbouring frame reads this one's `pose3d`).
         """
         if self.rig is None:
             return
         # measured BEFORE the edit, so a drag and its undo fit against the
         # same targets and land in the same place
         self._targets()
-        f = self.frame()
+        f = self.frame() if frame is None else frame
         if joint >= NUM_JOINTS:
             # THE CROSS-VIEW GATE APPLIES HERE TOO, exactly as it does to a
             # dragged canonical joint in `_retriangulate`: one helper, so a
@@ -568,8 +708,7 @@ class ProjectModel(QObject):
             # face points have no bones and never change the character's
             # dimensions: no re-fit, just re-orient the rigid neck+head chain
             # (the nose turns it in both modes, the ears only in Face mode)
-            self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
-            self._emit(self.accuracyChanged, self._accuracy(self.current))
+            self._emit_current_pose()
             return
         if joint == HEAD_JOINT and self._head_is_the_nose():
             # Under the nose convention the canonical HEAD and the nose face
@@ -601,7 +740,19 @@ class ProjectModel(QObject):
         for j in touched:
             self._retriangulate(f, j)
         self._refit_frame(f)
-        self._emit(self.pose3dChanged, f.fitted3d, f.head3d, f.filled)
+        self._emit_current_pose()
+
+    def _emit_current_pose(self) -> None:
+        """Redraw what the user is LOOKING at, after a re-solve.
+
+        The frame that was re-solved is not always the displayed one (an undo
+        after scrubbing away), and the views draw the displayed frame — so
+        these two signals carry it, whichever frame the edit belonged to. It
+        may have moved even when the edit was elsewhere: `_refit_frame`
+        re-fits a neighbour whose gap fill reads the edited frame's `pose3d`.
+        """
+        cur = self.frame()
+        self._emit(self.pose3dChanged, cur.fitted3d, cur.head3d, cur.filled)
         self._emit(self.accuracyChanged, self._accuracy(self.current))
 
     def _head_is_the_nose(self) -> bool:
@@ -638,21 +789,12 @@ class ProjectModel(QObject):
         if derived is None or Joint(derived) not in derived_joints(
                 self.project.keypoint_model):
             return []
-        a, b = _DERIVED_FROM[derived]
-        if f.corrected[cam][derived]:
-            return []
-        pa, pb = f.kp2d[cam][a], f.kp2d[cam][b]
-        if np.isnan(pa).any() or np.isnan(pb).any():
-            return []
-        f.kp2d[cam][derived] = (pa + pb) / 2.0
-        # nanmin, not min: min(nan, 0.5) is nan while min(0.5, nan) is 0.5, so
-        # a plain min made the derived point's confidence depend on which
-        # parent happens to be listed first. Both parents unscored leaves it
-        # NaN — the 2D above is real either way.
-        pair = np.array([f.scores[cam][a], f.scores[cam][b]], float)
-        f.scores[cam][derived] = (float(np.nanmin(pair))
-                                  if np.isfinite(pair).any() else np.nan)
-        return [derived]
+        # `pipeline.derive_midpoint` is THE rule — the same call the batch
+        # paths make (`pipeline.derive_midpoints`), so a drag and a re-detect
+        # cannot put the neck in two different places. It declines a derived
+        # point the user has placed by hand, and one whose parents are not
+        # both present.
+        return [derived] if derive_midpoint(f, cam, derived) else []
 
     def _retriangulate(self, f, joint: int) -> None:
         # THE CROSS-VIEW GATE APPLIES HERE TOO, or the live re-solve and the
@@ -996,6 +1138,63 @@ def _body_height(poses: np.ndarray) -> float:
              for p, v in ((q, ~np.isnan(q).any(1)) for q in upright)
              if v.sum() >= 2]
     return float(np.median(spans)) if spans else float("nan")
+
+
+# A length in one of these is a fact about the CAMERA, not about the scene: a
+# lens, a sensor or a pixel is the same size whatever the world is scaled to,
+# so scaling one would be as wrong as scaling a reprojection residual. No
+# calibration report holds such a key today — this is here because the report
+# grows and the unit suffix alone cannot tell the two kinds of millimetre
+# apart: `export.blender_export` already writes `lens_mm`/`sensor_mm` for each
+# camera, and the day that pair is recorded as provenance the rescale must not
+# quietly enlarge the lens.
+#
+# Matched as a SUBSTRING, which errs toward not scaling: a world length named
+# after the optics (`lens_to_subject_m`, say) would be skipped and stay stale.
+# Neither a word-boundary nor a prefix rule separates that example from
+# `lens_mm` either — only the key's meaning does — so whoever adds such a key
+# should name it for the thing measured rather than for the part it is
+# measured from, or make this set exact-key.
+_NOT_A_WORLD_LENGTH = ("lens", "sensor", "focal", "pixel")
+
+
+def _rescale_report(report: dict, factor: float) -> None:
+    """Scale every metric length a calibration report records, in place.
+
+    BY UNIT, not by a list of keys: the report is a provenance record that
+    grows, and scaling "its one length-valued field" left `baseline_m` (and
+    the per-branch one beside it) claiming the pre-rescale size of the very
+    extrinsics.json written in the same call, and `camera_motion_check`'s
+    `max_centre_mm` reporting a camera wobble measured at the old scale. A
+    key's suffix is what says it is a length: `_m` (metres) and `_mm`
+    (millimetres) scale; `_px`, `_deg` and every count do not, because a
+    similarity changes no image measurement and no angle. `_NOT_A_WORLD_LENGTH`
+    is the exception the suffix cannot see — a camera's own dimensions.
+
+    Nested dicts are walked; LISTS are not, because no length in the report
+    lives in one (`world_up` is a direction, `image_size` is in pixels, and
+    `tags_admitted` is a list of ids). A list of world lengths would need a
+    rule for what it contains, which is a decision for whoever adds one.
+
+    `moved` is re-taken from the scaled displacement: it is a verdict about a
+    length against `resolve.MOTION_WARN_MM`, so leaving it as it was would
+    report "the cameras held still" about a wobble that is now over the
+    threshold (or the reverse).
+    """
+    from pose3d.calib.resolve import MOTION_WARN_DEG, MOTION_WARN_MM
+
+    for key, value in report.items():
+        if isinstance(value, dict):
+            _rescale_report(value, factor)
+        elif (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and isinstance(key, str)
+                and (key.endswith("_m") or key.endswith("_mm"))
+                and not any(w in key.lower() for w in _NOT_A_WORLD_LENGTH)):
+            report[key] = float(value) * factor
+    if report.get("max_centre_mm") is not None:
+        rot = report.get("max_rotation_deg") or 0.0
+        report["moved"] = bool(float(rot) > MOTION_WARN_DEG
+                               or report["max_centre_mm"] > MOTION_WARN_MM)
 
 
 def _report(on_progress, label: str) -> None:

@@ -157,6 +157,10 @@ def save_project(project: ProjectData, folder: str | Path) -> Path:
             "filled": [bool(v) for v in f.filled],
             "head2d": {c: _arr_to_json(f.head2d[c]) for c in CAMERAS},
             "head_scores": {c: _vec_to_json(f.head_scores[c]) for c in CAMERAS},
+            # the face points' own hand-placed flags: a correction that is not
+            # persisted is a correction the next session overwrites
+            "head_corrected": {c: [bool(v) for v in f.head_corrected[c]]
+                               for c in CAMERAS},
             "head3d": _arr_to_json(f.head3d),
         })
 
@@ -178,6 +182,7 @@ def load_project(folder: str | Path) -> ProjectData:
         # .get for the head keys: projects written before head keypoints
         # existed have none, and must still load.
         head2d, head_sc = fd.get("head2d") or {}, fd.get("head_scores") or {}
+        head_corr = fd.get("head_corrected") or {}
         # A project written before the raw arrays existed has one copy of its
         # 2D and no record of which observations the gate rejected. Back-fill
         # the raw arrays FROM kp2d and leave the mask empty: that is the
@@ -199,6 +204,9 @@ def load_project(folder: str | Path) -> ProjectData:
             fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
             fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
             fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)
+            # absent before the key existed -> nothing was hand-placed, which
+            # is what such a file holds
+            fr.head_corrected[c] = _json_to_flags(head_corr.get(c), NUM_HEAD_KP)
         fr.filled = _json_to_flags(fd.get("filled"))
         fr.pose3d = _json_to_arr(fd["pose3d"], 3)
         fr.fitted3d = _json_to_arr(fd["fitted3d"], 3)
@@ -239,15 +247,59 @@ def _connect(folder: Path) -> sqlite3.Connection:
     return conn
 
 
-def _write_corrections(folder: Path, corrections: list[Correction]) -> None:
+def _write_corrections(folder: Path, corrections: list[Correction]) -> int:
+    """Store these corrections, keeping every row already in the log.
+
+    APPEND-OR-REPLACE BY ROW, never a rewrite. This used to run
+    `DELETE FROM corrections` first and re-insert whatever the caller held, so
+    saving a project destroyed every correction made in an earlier session —
+    on the button labelled "Save Corrections", silently, and the log the
+    docstring above calls append-only was neither append-only nor cumulative.
+    A correction carries the row it occupies (`Correction.id`, set when it was
+    read back); one that has never been stored is appended and told its row, so
+    saving twice stores it once.
+
+    Rows this caller never loaded are left alone: `append_correction` and a
+    second window on the same folder both write here, and their work is the
+    client's too.
+
+    Returns the number of corrections stored in the log afterwards — the TOTAL,
+    which is what the user has to be told, not the size of this session's share
+    of it.
+    """
     with closing(_connect(folder)) as conn, conn:
-        conn.execute("DELETE FROM corrections")
-        conn.executemany(
-            "INSERT INTO corrections "
-            "(frame_id,cam,joint,old_x,old_y,new_x,new_y,ts) "
-            "VALUES (?,?,?,?,?,?,?,?)",
-            [(c.frame_id, c.cam, c.joint, c.old_xy[0], c.old_xy[1],
-              c.new_xy[0], c.new_xy[1], c.ts) for c in corrections])
+        for c in corrections:
+            row = (c.frame_id, c.cam, c.joint, c.old_xy[0], c.old_xy[1],
+                   c.new_xy[0], c.new_xy[1], c.ts)
+            if c.id is None:
+                cur = conn.execute(
+                    "INSERT INTO corrections "
+                    "(frame_id,cam,joint,old_x,old_y,new_x,new_y,ts) "
+                    "VALUES (?,?,?,?,?,?,?,?)", row)
+                c.id = int(cur.lastrowid)
+            else:
+                conn.execute(
+                    "INSERT OR REPLACE INTO corrections "
+                    "(id,frame_id,cam,joint,old_x,old_y,new_x,new_y,ts) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)", (c.id, *row))
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM corrections").fetchone()[0])
+
+
+def count_corrections(folder: str | Path) -> int:
+    """How many corrections this project's log holds, in total.
+
+    The number the user is told after a save, and it is a question about the
+    FILE rather than about the session: the log accumulates across sessions
+    (and across a second window on the same folder), so counting what this
+    session happens to be holding would under-report the client's own work.
+    """
+    folder = Path(folder)
+    if not (folder / CORRECTIONS_DB).exists():
+        return 0
+    with closing(_connect(folder)) as conn:
+        return int(conn.execute(
+            "SELECT COUNT(*) FROM corrections").fetchone()[0])
 
 
 def append_correction(folder: str | Path, c: Correction) -> None:
@@ -266,7 +318,9 @@ def _read_corrections(folder: Path) -> list[Correction]:
         return []
     with closing(_connect(folder)) as conn:
         rows = conn.execute(
-            "SELECT frame_id,cam,joint,old_x,old_y,new_x,new_y,ts "
+            "SELECT id,frame_id,cam,joint,old_x,old_y,new_x,new_y,ts "
             "FROM corrections ORDER BY id").fetchall()
-    return [Correction(fr, cam, j, (ox, oy), (nx, ny), ts)
-            for (fr, cam, j, ox, oy, nx, ny, ts) in rows]
+    # the row id travels with the correction: it is what lets the next save
+    # recognise a correction it has already stored (see _write_corrections).
+    return [Correction(fr, cam, j, (ox, oy), (nx, ny), ts, id=int(i))
+            for (i, fr, cam, j, ox, oy, nx, ny, ts) in rows]

@@ -230,6 +230,73 @@ def test_dragging_the_nose_moves_the_face_nose_too():
     assert not np.allclose(f.head3d[0], nose3d_before)
 
 
+def test_a_face_edit_is_a_correction_like_any_other(tmp_path):
+    """A nose the user placed is a correction: flagged, logged, undoable, and
+    kept by the next detection.
+
+    `Frame.corrected` has no entry for a face point, so a frame whose only
+    hand work was on the face reported itself uncorrected — the frame's dot
+    stayed green and the timeline's "Corrected" filter under-reported it —
+    while the body's flags are what the cross-view gate reads, so borrowing
+    one of those to say it would have changed which observations the gate
+    keeps. The face points get their own flags instead.
+    """
+    from pose3d.core.project import CAM_LEFT as L
+
+    m = _model_with_heads()
+    m.project_dir = str(tmp_path)
+    f = m.frame()
+    assert not f.has_corrections()
+
+    x, y = f.head2d[L][0]
+    m.set_joint_2d(L, NUM_JOINTS + 0, x + 40.0, y)
+
+    assert f.head_corrected[L][0]
+    assert f.has_corrections() and f.has_corrections(L)
+    assert not f.corrected[L].any(), "a face edit must not flag a body joint"
+    assert not f.has_corrections(CAM_RIGHT), "the other view was not edited"
+    assert [(c.cam, c.joint) for c in m.stack.log] == [(L, NUM_JOINTS + 0)]
+
+    m.undo()
+    assert not f.head_corrected[L][0] and not f.has_corrections()
+    m.redo()
+    assert f.head_corrected[L][0]
+
+    # it survives the round trip, like every other correction
+    m.save()
+    assert load_project(tmp_path).frames[0].head_corrected[L][0]
+    assert len(load_project(tmp_path).corrections) == 1
+
+
+def test_a_re_detect_keeps_a_hand_placed_face_point():
+    """The whole meaning of the flag: the detector does not get to overrule
+    the user. `redetect_head`'s own message says every correction was left
+    alone, and for the face points it was not true."""
+    from pose3d.core.project import CAM_LEFT as L
+    from pose3d.detect.base import Detection, KeypointDetector
+    from pose3d.pipeline import detect_project
+
+    class _Face(KeypointDetector):
+        def detect(self, image_bgr):
+            return Detection(xy=np.zeros((NUM_JOINTS, 2)),
+                             scores=np.full(NUM_JOINTS, 0.5),
+                             head_xy=np.full((NUM_HEAD_KP, 2), 7.0),
+                             head_scores=np.full(NUM_HEAD_KP, 0.5))
+
+    m = _model_with_heads()
+    f = m.frame()
+    f.images = {CAM_LEFT: "l.png", CAM_RIGHT: "r.png"}
+    x, y = f.head2d[L][0]
+    m.set_joint_2d(L, NUM_JOINTS + 0, x + 40.0, y)
+    placed = f.head2d[L][0].copy()
+
+    detect_project(m.project, _Face(), lambda p: np.zeros((4, 4, 3), np.uint8),
+                   fields="head")
+
+    assert np.allclose(f.head2d[L][0], placed), "the correction was overwritten"
+    assert np.allclose(f.head2d[L][1], 7.0), "...while the rest re-detected"
+
+
 def _recompute(m):
     """What the next Recompute press would do: the batch path, same rig."""
     from pose3d.pipeline import triangulate_project

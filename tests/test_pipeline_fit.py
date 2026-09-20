@@ -245,6 +245,84 @@ def test_one_undo_reverses_the_derived_joint_too(layout):
     assert np.allclose(f.fitted3d, before3d, atol=1e-9)
 
 
+def test_undo_re_solves_the_frame_THE_EDIT_belongs_to(layout):
+    """Ctrl+Z after scrubbing away must repair the frame that was edited.
+
+    `CorrectionStack.undo` puts the 2D back into the edit's own frame, but the
+    re-solve ran on `self.frame()` — whatever is on screen now. So the edited
+    frame kept 3D built from 2D that no longer exists (and the displayed frame
+    was re-gated and re-fitted for nothing), until a full Recalculate 3D; the
+    stale pose is what the 3D view, the timeline and the export read.
+    """
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    edited, elsewhere = data.frames[1], data.frames[3]
+    was2d = edited.kp2d[CAM_LEFT][j].copy()
+    was_pose, was_fit = edited.pose3d.copy(), edited.fitted3d.copy()
+
+    model.set_joint_2d(CAM_LEFT, j, float(was2d[0]) + 45.0,
+                       float(was2d[1]) + 20.0)
+    assert not np.allclose(edited.pose3d[j], was_pose[j])
+
+    model.set_frame(3)                       # the user scrubs away
+    untouched = elsewhere.fitted3d.copy()
+    model.undo()
+
+    assert np.allclose(edited.kp2d[CAM_LEFT][j], was2d)
+    assert np.allclose(edited.pose3d, was_pose, atol=1e-9, equal_nan=True), \
+        "the edited frame kept 3D built from the reverted 2D"
+    assert np.allclose(edited.fitted3d, was_fit, atol=1e-9, equal_nan=True)
+    assert np.allclose(elsewhere.fitted3d, untouched, atol=1e-9,
+                       equal_nan=True), "the displayed frame was re-fitted"
+
+
+def test_redo_re_solves_the_frame_THE_EDIT_belongs_to(layout):
+    """Symmetric: a redo issued from another frame must re-apply the edit's
+    own frame, not re-solve the one being looked at."""
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    edited = data.frames[1]
+    xy = edited.kp2d[CAM_LEFT][j].copy()
+
+    model.set_joint_2d(CAM_LEFT, j, float(xy[0]) + 45.0, float(xy[1]) + 20.0)
+    dragged_pose = edited.pose3d.copy()
+    dragged_fit = edited.fitted3d.copy()
+    model.undo()
+
+    model.set_frame(4)                       # ...and redo from somewhere else
+    model.redo()
+
+    assert np.allclose(edited.pose3d, dragged_pose, atol=1e-9, equal_nan=True)
+    assert np.allclose(edited.fitted3d, dragged_fit, atol=1e-9, equal_nan=True)
+
+
+def test_undo_and_redo_drop_the_quality_measured_from_the_2d_they_moved():
+    """`set_joint_2d` drops the cached take-wide quality because "the numbers
+    now describe a 2D that no longer exists". Undo and redo move the very same
+    2D, so the sidebar went on reporting the bone-length spread, epipolar
+    block and symmetry notes of a correction the user had just removed."""
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=3)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    f = model.frame()
+    clean = model.quality().epipolar["max_px"]
+
+    xy = f.kp2d[CAM_LEFT][j]
+    model.set_joint_2d(CAM_LEFT, j, float(xy[0]) + 40.0, float(xy[1]) + 40.0)
+    dragged = model.quality().epipolar["max_px"]      # what a refresh caches
+    assert dragged > clean
+
+    model.undo()
+    assert model.quality().epipolar["max_px"] == pytest.approx(clean)
+    model.redo()
+    assert model.quality().epipolar["max_px"] == pytest.approx(dragged)
+
+
 def test_a_hand_placed_derived_joint_is_not_overwritten(layout):
     """A correction outranks the derivation: if the user put the neck
     somewhere, dragging a shoulder must not move it back."""
@@ -306,6 +384,131 @@ def test_redetect_keeps_corrections():
     # ... while everything NOT corrected did take the detector's new value
     free = [j for j in range(NUM_JOINTS) if j not in corrected]
     assert np.allclose(f.kp2d[CAM_LEFT][free], detector_xy[free])
+
+
+def _midpoint(f, cam, parents):
+    a, b = parents
+    return 0.5 * (f.kp2d[cam][int(a)] + f.kp2d[cam][int(b)])
+
+
+def test_redetect_re_derives_the_neck_of_a_kept_shoulder(layout):
+    """A re-detect keeps the corrected shoulder, so the NECK must follow it.
+
+    `keep = frame.corrected[cam]` protects the joints the user dragged, and
+    NECK is not one of them — it is the midpoint of two of them. So the
+    detector's own NECK (the midpoint of the shoulders the user REJECTED) was
+    written back over the synced one, leaving the take triangulated and
+    bone-fitted from a neck half the correction away from the shoulders it is
+    defined by, under a status line reading "hand-corrected points were kept".
+    """
+    data, rig = _take(n=2, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(0)
+    f = model.frame()
+    detector = _ShiftedDetector(f.kp2d[CAM_LEFT])   # disagrees by 40 px
+
+    xy = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.LEFT_SHOULDER),
+                       float(xy[0]) + 100.0, float(xy[1]))
+    kept = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)].copy()
+
+    model.redetect_all(detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)], kept)
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][int(Joint.NECK)],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)))
+
+
+def test_detect_project_itself_restores_the_midpoint_rule(layout):
+    """The detection is what breaks the rule, so it is what has to restore it.
+
+    Straight against `detect_project`, with no model and no recompute behind
+    it: every other route to a re-detect (`redetect_all`, `run_full`, an
+    import) would otherwise be relying on its caller to notice, and the take
+    is triangulated from whatever this function leaves in `kp2d`.
+    """
+    from pose3d.pipeline import detect_project
+
+    data, _ = _take(n=2, keypoint_model=layout)
+    f = data.frames[0]
+    detector = _ShiftedDetector(f.kp2d[CAM_LEFT])
+    j = int(Joint.LEFT_SHOULDER)
+    f.set_kp(CAM_LEFT, j, float(f.kp2d[CAM_LEFT][j][0]) + 100.0,
+             float(f.kp2d[CAM_LEFT][j][1]), score=1.0, corrected=True)
+    kept = f.kp2d[CAM_LEFT][j].copy()
+
+    detect_project(data, detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.kp2d[CAM_LEFT][j], kept), "the correction was lost"
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][int(Joint.NECK)],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER))), \
+        "the detector's own NECK — the midpoint of the REJECTED shoulders"
+
+
+def test_redetect_keeps_a_hand_placed_derived_joint(layout):
+    """A NECK the user placed by hand is a correction like any other: it
+    outranks both the detector and the midpoint rule."""
+    data, rig = _take(n=2, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(0)
+    f = model.frame()
+    detector = _ShiftedDetector(f.kp2d[CAM_LEFT])
+
+    neck = f.kp2d[CAM_LEFT][int(Joint.NECK)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.NECK),
+                       float(neck[0]) + 17.0, float(neck[1]) - 9.0)
+    placed = f.kp2d[CAM_LEFT][int(Joint.NECK)].copy()
+
+    model.redetect_all(detector, lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.NECK)], placed)
+    assert f.corrected[CAM_LEFT][int(Joint.NECK)]
+
+
+def test_a_batch_recompute_re_derives_the_derived_joints(layout):
+    """The midpoint rule is the project's, not the drag path's.
+
+    `_sync_derived` runs only from the live re-solve, which is skipped with
+    "Auto Recalculate 3D" off (and before a project is calibrated). The batch
+    path then triangulated and bone-fitted a NECK the user could see was 41 px
+    away from the shoulders they had just moved, and saved that 2D.
+    """
+    data, rig = _take(n=3, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.auto_recalc = False
+    model.set_frame(1)
+    f = model.frame()
+
+    for parent in (Joint.LEFT_SHOULDER, Joint.LEFT_HIP):
+        xy = f.kp2d[CAM_LEFT][int(parent)]
+        model.set_joint_2d(CAM_LEFT, int(parent), float(xy[0]) - 80.0,
+                           float(xy[1]) + 20.0)
+
+    model.recompute_all()
+
+    for derived, parents in ((Joint.NECK, (Joint.LEFT_SHOULDER,
+                                           Joint.RIGHT_SHOULDER)),
+                             (Joint.PELVIS, (Joint.LEFT_HIP,
+                                             Joint.RIGHT_HIP))):
+        assert np.allclose(f.kp2d[CAM_LEFT][int(derived)],
+                           _midpoint(f, CAM_LEFT, parents)), derived.name
+
+
+def test_a_batch_recompute_keeps_a_hand_placed_derived_joint(layout):
+    data, rig = _take(n=3, keypoint_model=layout)
+    model = ProjectModel(data, rig)
+    model.set_frame(1)
+    f = model.frame()
+    neck = f.kp2d[CAM_LEFT][int(Joint.NECK)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.NECK),
+                       float(neck[0]) + 12.0, float(neck[1]) + 6.0)
+    placed = f.kp2d[CAM_LEFT][int(Joint.NECK)].copy()
+
+    model.recompute_all()
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.NECK)], placed)
 
 
 def test_redetect_can_be_asked_to_overwrite_corrections():
@@ -483,6 +686,143 @@ def test_the_stored_pose_can_be_restored_in_session():
     for f, pose in zip(data.frames, lagged):
         assert np.allclose(f.fitted3d, pose)
     assert not model.restore_stored_pose()      # nothing left to restore
+
+
+def test_restoring_the_stored_pose_restores_its_fill_flags():
+    """`Frame.filled` describes the pose it is stored beside, so a restore has
+    to take it back with the pose.
+
+    The recompute on open rewrites every flag from the NEW triangulation. The
+    banner's "Restore stored pose" then put the previous build's pose back and
+    left those flags, so the 3D view drew hollow "interpolated" rings on
+    joints the restored pose measured — and worse, a joint the new fill
+    invented is a hole in the restored pose, which trips the export's own
+    invariant check (`filled & ~valid` -> "fill_flags_disagree") and aborts the
+    whole export of a pose the user deliberately asked for.
+    """
+    j = int(Joint.LEFT_WRIST)
+    data, rig = _take(n=5)
+    data.frames[2].kp2d[CAM_LEFT][j] = np.nan      # one view loses the wrist
+    data.frames[2].scores[CAM_LEFT][j] = 0.0
+    triangulate_project(data, rig)
+    fit_project(data)
+    assert data.frames[2].filled[j], "today's fill must invent it"
+
+    # what the previous build's file holds: a hole there, and no fill flags at
+    # all (the key did not exist, so it loads all-False)
+    stored = [f.fitted3d.copy() for f in data.frames]
+    stored[2][j] = np.nan
+    for f, pose in zip(data.frames, stored):
+        f.fitted3d = pose.copy()
+        f.filled[:] = False
+    data.pipeline_version = 0
+
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    assert data.frames[2].filled[j], "the recompute re-invented it"
+
+    assert model.restore_stored_pose()
+
+    for f, pose in zip(data.frames, stored):
+        assert np.allclose(f.fitted3d, pose, equal_nan=True)
+        assert not f.filled.any(), "the flags of a pose that is not loaded"
+        # the invariant the export enforces: nothing is flagged interpolated
+        # that the pose does not have
+        assert not (np.asarray(f.filled, bool)
+                    & np.isnan(f.fitted3d).any(1)).any()
+
+
+def test_restoring_the_stored_pose_puts_back_the_2d_the_migration_moved():
+    """A restore must be an EXACT revert, 2D included.
+
+    The recompute on open re-derives NECK/PELVIS from their parents, so a
+    legacy take whose stored neck contradicts its shoulders has a keypoint
+    MOVED by the migration. "Restore stored pose" puts the previous build's
+    pose back and re-stamps the project legacy — so if the 2D stayed
+    re-derived, saving then stored the old pose beside 2D it was never built
+    from, and the correction the user declined had happened anyway.
+    """
+    data, rig = _take(n=4)
+    neck = int(Joint.NECK)
+    data.frames[1].kp2d[CAM_LEFT][neck] += (40.0, 0.0)   # as a legacy file may
+    data.frames[1].scores[CAM_LEFT][neck] = 0.4          # hold it
+    data.pipeline_version = 0
+    was2d = [{c: f.kp2d[c].copy() for c in CAMERAS} for f in data.frames]
+    was_scores = [{c: f.scores[c].copy() for c in CAMERAS} for f in data.frames]
+
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    assert not np.allclose(data.frames[1].kp2d[CAM_LEFT][neck],
+                           was2d[1][CAM_LEFT][neck]), \
+        "the migration must be the thing that moved it"
+
+    assert model.restore_stored_pose()
+
+    for f, xy, sc in zip(data.frames, was2d, was_scores):
+        for cam in CAMERAS:
+            assert np.array_equal(f.kp2d[cam], xy[cam], equal_nan=True), \
+                f"{f.frame_id} {cam}: the restore left the migrated 2D"
+            assert np.array_equal(f.scores[cam], sc[cam], equal_nan=True)
+
+
+def _migrated_take_with_a_stale_neck(n=4, off=(40.0, 0.0)):
+    """A legacy take whose stored NECK contradicts its shoulders, opened.
+
+    The migration re-derives that neck, which is the one keypoint the restore
+    has to be able to put back — and the banner offering the restore stays up
+    until the user dismisses it, so anything they do in the meantime is real
+    work the restore must not undo.
+    """
+    data, rig = _take(n=n)
+    data.frames[1].kp2d[CAM_LEFT][int(Joint.NECK)] += off
+    data.pipeline_version = 0
+    model = ProjectModel(data, rig)
+    model.upgrade_pipeline()
+    model.set_frame(1)
+    return model, data, rig
+
+
+def test_a_neck_placed_after_the_migration_survives_the_restore():
+    """(a) The restore is a revert of the MIGRATION, not of the user.
+
+    Reverting every derived joint unconditionally replaced a NECK the user had
+    just placed by hand with the pre-migration value — and because the
+    midpoint rule declines a `corrected` joint, nothing ever re-derived it
+    either: the correction was gone for good, silently, with the flag still
+    claiming it was there.
+    """
+    model, data, _ = _migrated_take_with_a_stale_neck()
+    f, neck = data.frames[1], int(Joint.NECK)
+
+    model.set_joint_2d(CAM_LEFT, neck, 111.0, 222.0)
+
+    assert model.restore_stored_pose()
+    assert tuple(f.kp2d[CAM_LEFT][neck]) == (111.0, 222.0)
+    assert f.corrected[CAM_LEFT][neck], "the flag outlived the correction"
+
+
+def test_a_shoulder_dragged_after_the_migration_keeps_its_neck():
+    """(b) ...and it must not re-create the contradiction it removed.
+
+    The shoulder correction is kept (it is `corrected`), so reverting the neck
+    to the legacy value puts the take back into exactly the
+    neck-contradicting-shoulders state the midpoint rule exists to remove. A
+    derived joint whose parents have moved since follows the parents it has
+    now.
+    """
+    model, data, _ = _migrated_take_with_a_stale_neck()
+    f, neck = data.frames[1], int(Joint.NECK)
+    xy = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)]
+    model.set_joint_2d(CAM_LEFT, int(Joint.LEFT_SHOULDER),
+                       float(xy[0]) + 60.0, float(xy[1]))
+    kept = f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)].copy()
+
+    assert model.restore_stored_pose()
+
+    assert np.allclose(f.kp2d[CAM_LEFT][int(Joint.LEFT_SHOULDER)], kept)
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][neck],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)))
 
 
 def test_a_project_with_no_calibration_is_left_alone():

@@ -44,8 +44,8 @@ class CorrectionStack:
             old = tuple(f.head2d[cam][k])
             edit = Edit(frame_id, cam, joint, (float(old[0]), float(old[1])),
                         (float(x), float(y)), float(f.head_scores[cam][k]),
-                        False)
-            f.set_head_kp(cam, k, x, y, score=1.0)
+                        bool(f.head_corrected[cam][k]))
+            f.set_head_kp(cam, k, x, y, score=1.0, corrected=True)
         else:
             old = tuple(f.kp2d[cam][joint])
             edit = Edit(frame_id, cam, joint, (float(old[0]), float(old[1])),
@@ -73,6 +73,7 @@ class CorrectionStack:
             k = e.joint - NUM_JOINTS
             f.head2d[e.cam][k] = e.old_xy
             f.head_scores[e.cam][k] = e.old_score
+            f.head_corrected[e.cam][k] = e.old_corrected
         else:
             f.kp2d[e.cam][e.joint] = e.old_xy
             f.scores[e.cam][e.joint] = e.old_score
@@ -87,7 +88,7 @@ class CorrectionStack:
         f = self.frames_by_id[e.frame_id]
         if e.joint >= NUM_JOINTS:
             f.set_head_kp(e.cam, e.joint - NUM_JOINTS,
-                          e.new_xy[0], e.new_xy[1], score=1.0)
+                          e.new_xy[0], e.new_xy[1], score=1.0, corrected=True)
         else:
             f.set_kp(e.cam, e.joint, e.new_xy[0], e.new_xy[1],
                      score=1.0, corrected=True)
