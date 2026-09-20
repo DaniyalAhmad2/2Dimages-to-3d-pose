@@ -1067,6 +1067,14 @@ class MainWindow(QMainWindow):
                 body += ("\n\nThe preview video could not be rendered on "
                          "this machine. The motion capture and character "
                          "files above are complete.")
+            # HOW the character was sized, when it was not the bone fit. The
+            # export returns it and nothing showed it, so the 3D view said
+            # the figure is sized the rougher way and the delivered file —
+            # the thing the client actually sends on — said nothing. It is a
+            # note on a SUCCESSFUL export: the right character, posed by the
+            # right rule, measured more crudely.
+            if res.fit_note:
+                body += "\n\n" + res.fit_note
             QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
         else:
             # Say WHY, from the reason the export carries, instead of the

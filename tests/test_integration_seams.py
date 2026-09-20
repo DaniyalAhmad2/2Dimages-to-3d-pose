@@ -188,6 +188,72 @@ def test_a_reopened_project_shows_its_face_corrections_too(qapp):
     assert strip.status(0) == "green"
 
 
+# --------------------------------------------------------------------------
+# Seam 4 — T4's `ExportResult.fit_note` was returned and never shown
+# --------------------------------------------------------------------------
+
+def _export_dialog_text(qapp, tmp_path, monkeypatch, fit_note):
+    """Run `_on_export` against a fake Blender and return what it told the
+    user."""
+    from pose3d.export import blender_export
+    from pose3d.ui import filedialog, main_window as mw
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    out = tmp_path / "out"
+    out.mkdir()
+    monkeypatch.setattr(filedialog, "existing_directory",
+                        lambda *a, **k: str(out))
+    monkeypatch.setattr(filedialog, "is_writable", lambda p: True)
+
+    def fake_export(poses, out_dir, name="pose3d", **kw):
+        d = out / f"{name}.bvh"
+        d.write_text("")
+        return blender_export.ExportResult(
+            bvh=d, fbx=None, mp4=None, returncode=0,
+            stdout="POSE3D_EXPORT_OK", stderr="", fit_note=fit_note)
+
+    monkeypatch.setattr(blender_export, "export_animation", fake_export)
+
+    shown = []
+    from PySide6.QtWidgets import QMessageBox
+    monkeypatch.setattr(QMessageBox, "information",
+                        staticmethod(lambda *a, **k: shown.append(a[2])))
+
+    data, rig, _gt = _project_with_rig()
+    win = MainWindow(ProjectModel(data, rig))
+    win._on_export()
+    assert shown, "the export reported nothing at all"
+    return shown[-1]
+
+
+def test_the_export_says_when_the_character_was_sized_the_rough_way(
+        qapp, tmp_path, monkeypatch):
+    """The figure in the file is the right character posed by the right rule
+    and sized by a ROUGHER measurement — a fact about the delivery, not a
+    failure of it. T4 put it on `ExportResult.fit_note`, the dialog T3 owns
+    never read it, and the 3D view said so while the exported file did not.
+    """
+    from pose3d.geometry.placement import SCALE_FROM_HEIGHT_NOTE
+
+    body = _export_dialog_text(qapp, tmp_path, monkeypatch,
+                               SCALE_FROM_HEIGHT_NOTE)
+
+    assert body.startswith("Wrote:")
+    assert SCALE_FROM_HEIGHT_NOTE in body
+
+
+def test_a_normally_sized_export_adds_no_note(qapp, tmp_path, monkeypatch):
+    """The note is for the exception. An empty one must not leave a dangling
+    blank paragraph on every ordinary export."""
+    from pose3d.geometry.placement import SCALE_FROM_HEIGHT_NOTE
+
+    body = _export_dialog_text(qapp, tmp_path, monkeypatch, "")
+    assert body.rstrip() == body
+    assert SCALE_FROM_HEIGHT_NOTE not in body
+    assert "could not be sized" not in body
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),
