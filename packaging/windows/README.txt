@@ -8,23 +8,31 @@ does not need an internet connection.
 Running it
 ----------
 
-1. Extract this whole folder somewhere you can write to. A short path
-   straight on your C: drive — C:\Pose3D — is the safest choice.
+1. Unblock the .zip before extracting it. Right-click the file you
+   downloaded > Properties > tick Unblock > OK. Windows tags every downloaded
+   file, the tag survives extraction, and a tagged _internal\ folder is one of
+   the ways this app will not start.
 
-   Do NOT run it from inside the .zip, and do not put it in "Program Files":
-   the app saves projects and exports next to itself, and Windows blocks
-   writing there. Avoid folders OneDrive syncs (often Desktop and Documents):
-   it can leave placeholder stubs instead of real files.
+2. Extract this whole folder to a short path straight on your C: drive —
+   C:\Pose3D is the one we test. Let it finish completely.
 
-2. Double-click Pose3D.exe.
+   Do NOT run it from inside the .zip. Avoid Desktop, Documents and anything
+   else OneDrive syncs: "files on-demand" can leave placeholder stubs instead
+   of real files. Do not put it in "Program Files" either — the app saves
+   projects and exports next to itself, and Windows blocks writing there.
 
-3. The first time, Windows will show a blue "Windows protected your PC"
+3. Double-click Pose3D.exe.
+
+4. The first time, Windows will show a blue "Windows protected your PC"
    screen. This is SmartScreen, and it appears for any application that has
    not been code-signed — it is not a virus warning.
 
    Click "More info", then "Run anyway".
 
    You should only see this once.
+
+These are the same steps, in the same order, as the "Windows (native)"
+section of the project README.
 
 
 What is in this folder
@@ -44,10 +52,21 @@ Using it
 --------
 
 1. Click "Import Images" and choose your left and right camera images.
-2. Pick the calibration for that camera setup.
-3. Step through the frames. Where the detected skeleton is wrong, drag the
+
+2. Type the ArUco marker size in centimetres: the black square on the printed
+   tag, measured edge to edge with a ruler — for example 8. That one number
+   sets the real-world scale of everything.
+
+   The three calibration file boxes above it are optional, and you almost
+   certainly have none: leave them empty and the app works out where the
+   cameras are from the ArUco tags in your photographs.
+
+3. Give the project a name and click "Process".
+
+4. Step through the frames. Where the detected skeleton is wrong, drag the
    joint in either 2D view — the 3D pose updates as you drag.
-4. Click "Export" and choose a folder. You get:
+
+5. Click "Export" and choose a folder. You get:
      .bvh   joint rotations, for Blender / Maya / MotionBuilder
      .fbx   the same motion on a character rig
      .mp4   a preview video

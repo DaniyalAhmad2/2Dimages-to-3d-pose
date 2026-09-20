@@ -265,6 +265,87 @@ def test_the_client_is_told_both_places_the_log_can_be():
         assert "%LOCALAPPDATA%\\Pose3D" in text, doc
 
 
+# --- the install instructions the client actually followed ----------------
+#
+# The client's launch failure is the one the milestone was rejected over, and
+# the two documents below are what steered him into it: README.md sent him to
+# "Desktop or Documents" while the README.txt inside the same zip said the
+# opposite, and neither mentioned unblocking the download in its install steps
+# — Unblock appeared only inside the write-up of the error it prevents, which
+# is a page nobody reads until it is too late. On 2026-09-19 he wrote that he
+# "followed the exact instructions" and still could not open the app.
+
+#: Where each document stops instructing and starts troubleshooting. Anything
+#: after this is read only once something has already gone wrong.
+TROUBLESHOOTING_HEADING = {"README.txt": "If something goes wrong",
+                           "README.md": "## Troubleshooting"}
+
+
+def _install_steps(doc: Path) -> str:
+    """The part of a client document that is followed BEFORE anything fails."""
+    text = doc.read_text(encoding="utf-8")
+    heading = TROUBLESHOOTING_HEADING[doc.name]
+    cut = text.find(heading)
+    assert cut > 0, f"{doc.name}: no {heading!r} section to cut at"
+    return text[:cut]
+
+
+def test_the_install_steps_say_to_unblock_the_downloaded_zip():
+    """Windows tags a downloaded zip, the tag survives extraction, and a
+    tagged `_internal\\` is one of the ways the "Failed to load Python DLL"
+    dialog happens. It has to be step one, not a troubleshooting footnote."""
+    for doc in CLIENT_DOCS:
+        assert "Unblock" in _install_steps(doc), doc
+
+
+def test_both_install_instructions_name_the_same_short_path():
+    """They used to disagree: the zip's README.txt said `C:\\Pose3D`, the
+    repository's README.md said Desktop or Documents. The client can only
+    follow one of them."""
+    for doc in CLIENT_DOCS:
+        assert "C:\\Pose3D" in _install_steps(doc), doc
+
+
+def test_neither_document_recommends_the_folders_that_break_it():
+    """Desktop and Documents are the two folders OneDrive syncs by default,
+    where "files on-demand" leaves placeholder stubs instead of the real DLLs.
+    Naming them is fine — as the folders to avoid."""
+    import re
+
+    for doc in CLIENT_DOCS:
+        for line in doc.read_text(encoding="utf-8").splitlines():
+            hit = re.search(r"(?<!Docker )\bDesktop\b|\bDocuments\b", line)
+            if not hit:
+                continue
+            # the warning has to come first: "somewhere writable — Desktop or
+            # Documents, not Program Files" has a "not" in it and still sends
+            # the client to the folder that breaks the app
+            assert re.search(r"avoid|\bnot\b|never|instead of", line[:hit.start()],
+                             re.I), \
+                f"{doc.name}: reads as a recommendation — {line.strip()!r}"
+
+
+def test_both_install_instructions_are_the_same_steps_in_the_same_order():
+    """One order, in both documents: unblock the download, extract it to the
+    short path, then run the exe. Unblocking after extraction does nothing for
+    the files already extracted."""
+    for doc in CLIENT_DOCS:
+        steps = _install_steps(doc)
+        order = [steps.find(s) for s in ("Unblock", "C:\\Pose3D", "Pose3D.exe")]
+        assert -1 not in order, f"{doc.name}: a step is missing {order}"
+        assert order == sorted(order), f"{doc.name}: steps out of order {order}"
+
+
+def test_the_zip_readme_does_not_ask_for_a_calibration_the_client_has_not_got():
+    """Step 2 used to be "Pick the calibration for that camera setup". The
+    client has never been given a calibration file and the bundle has no tool
+    that makes one: the dialog's three Browse buttons are optional, and the
+    one number he must set — the marker size — went unmentioned."""
+    steps = _install_steps(ROOT / "packaging" / "windows" / "README.txt").lower()
+    assert "pick the calibration" not in steps
+    assert "marker size" in steps, "the one calibration input he does have"
+
+
 def test_the_bundle_script_ships_the_fallback():
     """A file only in the repository is no use to the client."""
     assert "Diagnose.cmd" in (

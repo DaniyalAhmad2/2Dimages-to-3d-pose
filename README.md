@@ -26,9 +26,23 @@ environment.
 ### Windows (native)
 
 Download `Pose3D-Windows.zip` from the
-[Releases page](https://github.com/DaniyalAhmad2/2Dimages-to-3d-pose/releases),
-extract it somewhere writable — Desktop or Documents, **not** Program Files —
-and run `Pose3D.exe`.
+[Releases page](https://github.com/DaniyalAhmad2/2Dimages-to-3d-pose/releases)
+— the newest release — and then, in this order:
+
+1. **Unblock the zip.** Right-click the downloaded file ▸ **Properties** ▸ tick
+   **Unblock** ▸ **OK**. Windows tags anything downloaded, the tag survives
+   extraction, and a tagged `_internal\` is one of the ways the app refuses to
+   start.
+2. **Extract the whole zip to a short path on `C:`** — `C:\Pose3D` is the one
+   we test. Do **not** extract to Desktop, Documents or any other folder
+   OneDrive syncs ("files on-demand" leaves placeholder stubs where the real
+   files should be), not to Program Files (the app saves next to itself, and
+   Windows blocks writing there), and never run it from inside the zip. Let
+   the extraction finish completely.
+3. **Run `Pose3D.exe`.**
+
+These are the same steps, in the same order, as the `README.txt` inside the
+zip.
 
 Blender, the pose models and everything else are inside the folder. No
 installs, no internet.
@@ -114,10 +128,11 @@ on your own machine immediately.
 
 1. **Capture** — two cameras, fixed and synchronised. Name the pairs so they
    match up, e.g. `left_0001.jpg` / `right_0001.jpg`.
-2. **Calibrate** — either upload the camera intrinsics/extrinsics, or include
-   four ArUco markers (or a checkerboard) in view and the app will solve the
-   camera positions itself. If neither is available it will tell you rather
-   than produce silent nonsense.
+2. **Calibrate** — calibration files are optional. Include ArUco markers in
+   view and the app solves the camera positions itself; the one number you
+   must set is the marker size, typed in centimetres (the black square, edge
+   to edge — an 8 cm tag is typed as 8). If no calibration can be worked out
+   it says so rather than producing silent nonsense.
 3. **Import** — *Import images* in the app, point it at your folder. It detects
    the 2D joints in both views and triangulates them into 3D.
 4. **Review and correct** — the timeline shows every frame. Drag any joint in
