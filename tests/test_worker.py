@@ -214,6 +214,10 @@ def test_cancel_keeps_the_window_blocked_until_the_job_has_really_stopped(
         deadline = time.monotonic() + 10
         while not cancelled() and time.monotonic() < deadline:
             time.sleep(0.01)
+        # Blender goes on printing render lines for seconds after it is asked
+        # to stop, and each one is a progress report: none of them may put
+        # "Rendering the animation…" back over the label that says cancelling.
+        report(0, 0, "Rendering the animation…")
         saw_the_flag.set()
         time.sleep(0.5)             # still running, still holding the project
         raise worker.Cancelled()

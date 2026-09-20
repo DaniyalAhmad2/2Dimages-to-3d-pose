@@ -101,15 +101,17 @@ def _export_status(line: str) -> str:
 def _export_targets(out, name):
     """Every file one export writes into the chosen folder.
 
-    All five are the project name plus a fixed suffix, so a second export of
-    the same take into the same folder writes exactly these paths again —
-    which is why a stopped run has to be able to say which of them are its
-    own and which are the previous delivery.
+    Each is the project name plus a fixed suffix, so a second export of the
+    same take into the same folder writes exactly these paths again — which
+    is why a stopped run has to be able to say which of them are its own and
+    which are the previous delivery. `_frames.json` is here for completeness:
+    `blender_job` writes it only for the stepped schedule, which this export
+    does not ask for, and listing a file that is never there costs one stat.
     """
     from pathlib import Path
     return [Path(out) / f"{name}{suffix}"
             for suffix in (".bvh", ".fbx", ".mp4", "_camera.mp4",
-                           "_poses.json")]
+                           "_poses.json", "_frames.json")]
 
 
 def _file_identity(path):

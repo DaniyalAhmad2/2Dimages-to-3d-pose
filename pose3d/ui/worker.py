@@ -107,7 +107,18 @@ class _Sink(QObject):
         self._loop = loop
         self._painting = False
         self._done = False
+        self._label_frozen = False
         self.result = None
+
+    def freeze_label(self) -> None:
+        """Stop letting the job rewrite the dialog's label.
+
+        Once the user has pressed Cancel the label says so, and a progress
+        report still in flight — Blender goes on printing render lines for
+        seconds after it is asked to stop — would put "Rendering the
+        animation…" back over it.
+        """
+        self._label_frozen = True
 
     def detach(self) -> None:
         """Stop listening, before the objects behind this sink go away.
@@ -133,7 +144,7 @@ class _Sink(QObject):
         try:
             self._dialog.setMaximum(int(total))
             self._dialog.setValue(int(done))
-            if label:
+            if label and not self._label_frozen:
                 self._dialog.setLabelText(label)
         finally:
             self._painting = False
@@ -221,6 +232,7 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
             job.cancel()
         dialog.setLabelText(f"{title} — cancelling…" if cancellable
                             else f"{title} — please wait…")
+        sink.freeze_label()              # a report in flight must not undo it
         dialog.show()
 
     # Connected even when the job cannot be cancelled: there is no button
