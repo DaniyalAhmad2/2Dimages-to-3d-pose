@@ -816,6 +816,12 @@ class MainWindow(QMainWindow):
         # failure inside a slot becomes a dialog, and it prints the traceback
         # to the log as this used to.
         from pose3d.ui.import_dialog import ImportDialog
+        # Guarded like the job slots even though the jobs are the dialog's
+        # own: opened from inside an outer job it would nest a second
+        # `run_job` (and a second detector) under the first, and finish by
+        # swapping this window out from under it.
+        if self._busy():
+            return None
         return self._run_import_dialog(ImportDialog(self))
 
     def _fill_recent_menu(self):

@@ -76,15 +76,21 @@ def test_a_second_job_while_one_is_running_does_nothing_and_says_so(
 
 @pytest.mark.parametrize("slot", ["_on_run_detection", "_on_redetect_head",
                                   "_on_recalibrate", "_on_diagnostics",
-                                  "_on_export"])
+                                  "_on_export", "_on_import"])
 def test_every_job_slot_is_closed_while_a_job_is_running(qapp, monkeypatch,
                                                          slot):
-    """All five, not just the one with a test: the flag is what makes the
+    """All six, not just the one with a test: the flag is what makes the
     window single-threaded about the project, and a slot that forgot to check
-    it is the hole reopened."""
+    it is the hole reopened.
+
+    `_on_import` belongs here even though the jobs it starts are
+    ImportDialog's own: opened from inside an outer job it would nest a second
+    `run_job` (and a second detector) under the first, and finish by swapping
+    the window out from under it.
+    """
     import pose3d.ui.main_window as main_window
     from pose3d import diagnostics
-    from pose3d.ui import filedialog
+    from pose3d.ui import filedialog, import_dialog
 
     win = _window()
     win.detector = _Detector()
@@ -99,6 +105,8 @@ def test_every_job_slot_is_closed_while_a_job_is_running(qapp, monkeypatch,
                         lambda **k: pytest.fail("the diagnostics ran"))
     monkeypatch.setattr(diagnostics, "show_report",
                         lambda *a, **k: pytest.fail("a report was shown"))
+    monkeypatch.setattr(import_dialog, "ImportDialog",
+                        lambda *a, **k: pytest.fail("the import dialog opened"))
 
     win._job_running = True
     getattr(win, slot)()
