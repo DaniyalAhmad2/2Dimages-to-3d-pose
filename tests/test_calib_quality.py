@@ -123,7 +123,20 @@ def test_a_real_problem_is_still_a_problem():
     headline cannot go green on a calibration that did not work."""
     assert is_problem("No tag was seen by both cameras.")
     assert not is_problem(CalibrationNote("the lenses were estimated"))
-    assert is_problem(CalibrationNote("the solve failed", "problem"))
+    assert is_problem(CalibrationNote("the solve failed",
+                                      CalibrationNote.PROBLEM))
+
+
+def test_a_note_put_through_a_string_operation_fails_safe():
+    """`severity` cannot survive `str` returning plain strings, so the class
+    says so and this pins which way it fails: a note that has been sliced,
+    stripped or f-stringed reads as a PROBLEM, which at worst calls a good
+    calibration doubtful — never the other way round."""
+    note = CalibrationNote("the lenses were estimated")
+    assert not is_problem(note)
+    assert is_problem(note.strip())
+    assert is_problem(f"{note}")
+    assert is_problem(" ".join([note]))
 
 
 def test_no_rig_is_not_an_error():

@@ -39,11 +39,23 @@ class CalibrationNote(str):
     or tests these goes on working unchanged — including the window, which
     inserts its own plain-string `rig_error` into the same list, and which is
     another task's file this pass.
+
+    THE CONTRACT, because a str subclass has a sharp edge: `severity` does not
+    survive string operations. `note.strip()`, `note.upper()`, an f-string and
+    `"".join(...)` all return a plain `str`, which `is_problem` then calls a
+    PROBLEM. That is the fail-safe direction — the worst case is a correct
+    calibration described as having problems, never a broken one described as
+    fine — but it means callers must pass these along unmodified and reduce
+    them only at the point of display. `set_calibrated` does; nothing else
+    should start.
     """
+
+    NOTE = "note"
+    PROBLEM = "problem"
 
     __slots__ = ("severity",)
 
-    def __new__(cls, text: str, severity: str = "note"):
+    def __new__(cls, text: str, severity: str = NOTE):
         self = super().__new__(cls, text)
         self.severity = severity
         return self
@@ -52,12 +64,17 @@ class CalibrationNote(str):
 def is_problem(item) -> bool:
     """Is this line a problem rather than a note?
 
-    Anything that does not declare itself a note IS one: a bare string comes
-    from a caller that has not been taught the difference (the window's
-    `rig_error`, a solve's failure message), and the safe reading of an
-    unlabelled line about a calibration is that something went wrong.
+    Explicitly typed, not duck-typed: ONLY a `CalibrationNote` that says it is
+    a note is not a problem. Everything else is — a bare string from a caller
+    that has not been taught the difference (the window's `rig_error`, a
+    solve's failure message), and equally a string DERIVED from a note, which
+    has lost the attribute on the way (see the class docstring). Reading a
+    missing attribute as "note" would be the same code with the failure
+    pointing the other way: a calibration that did not work, reported in
+    green.
     """
-    return getattr(item, "severity", "problem") != "note"
+    return not (isinstance(item, CalibrationNote)
+                and item.severity == CalibrationNote.NOTE)
 
 
 def world_up_tilt(rig) -> float | None:
