@@ -103,7 +103,22 @@ def test_a_take_with_no_readable_photo_at_all_fails_softly(tmp_path,
     assert not res.ok and res.status == "failed"
     assert "no image pair could be read" in res.message.lower()
     assert "online-only" in res.message        # the likely cause, named
-    assert len(res.skipped) >= PAIRS
+    # every reason is one this run MEASURED, on a pair it actually tried —
+    # the list used to be fabricated for every frame and camera, with a
+    # reason ("could not be read") that nothing had produced
+    assert len(res.skipped) == 2 * PAIRS
+    assert all("0 bytes" in s["reason"] for s in res.skipped)
+    assert {s["frame"] for s in res.skipped} == {f.frame_id
+                                                 for f in proj.frames}
+
+
+def test_the_skipped_pairs_are_listed_in_frame_order(tmp_path, _rendered):
+    """Zero-padded ids sort the same either way; "9" and "10" do not, and the
+    sentence exists to let the user find the photo."""
+    from pose3d.calib.resolve import summarise_skipped
+    skipped = [{"frame": f, "camera": "left", "reason": "0 bytes"}
+               for f in ("10", "9", "2")]
+    assert "2, 9, 10" in summarise_skipped(skipped)
 
 
 def test_a_frame_with_no_image_for_a_camera_is_skipped(tmp_path, _rendered):

@@ -309,25 +309,44 @@ def _read_frame_image(frame, cam, load_image, skipped=None):
     return img
 
 
-def first_readable_pair(project: ProjectData, load_image):
+def first_readable_pair(project: ProjectData, load_image, skipped=None):
     """(left image, right image) of the first frame whose BOTH photos read.
 
     Only the image SIZE is wanted (`_approx_intrinsics`), so any readable pair
     will do — and insisting on the first one made a 0-byte photo at the front
     of the take fatal for the other 25 pairs behind it.
+
+    `skipped` collects what was tried and why it failed, exactly as
+    `detect_all_tags` collects it, so the caller can report MEASURED reasons.
+    Pass a list of its own: this stops at the first readable pair, so on the
+    happy path it has only looked at the frames in front of that one, and
+    `detect_all_tags` is about to look at every frame properly.
     """
     for frame in project.frames:
-        imgs = [_read_frame_image(frame, cam, load_image) for cam in CAMERAS]
+        imgs = [_read_frame_image(frame, cam, load_image, skipped)
+                for cam in CAMERAS]
         if all(img is not None for img in imgs):
             return imgs[0], imgs[1]
     return None
+
+
+def _frame_order(frame_id):
+    """Sort key for frame ids: numerically when they are numbers.
+
+    The ids the importer writes are zero-padded ("0007"), where lexicographic
+    and numeric order agree — but a project whose frames are named "9" and
+    "10" would be listed 10 before 9, in a sentence whose whole job is to let
+    the user find the photo.
+    """
+    s = str(frame_id)
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
 
 
 def summarise_skipped(skipped) -> str:
     """One sentence naming the pairs a calibration could not read."""
     if not skipped:
         return ""
-    frames = sorted({s["frame"] for s in skipped})
+    frames = sorted({s["frame"] for s in skipped}, key=_frame_order)
     shown = ", ".join(frames[:5]) + (", …" if len(frames) > 5 else "")
     return (f" {len(frames)} image pair(s) were skipped because a photo could "
             f"not be read ({shown}); the calibration used the rest. "
@@ -808,17 +827,22 @@ def resolve_calibration(
 
     # --- intrinsics ---
     if intr_left is None or intr_right is None:
-        pair = first_readable_pair(project, load_image)
+        # Its own list: on the happy path this stops at the first readable
+        # pair, and `detect_all_tags` below reads every frame and records the
+        # real reasons into `skipped`. Only the failure branch keeps these —
+        # and then they are every frame's own measured reason, which is the
+        # point: the list used to be fabricated ("could not be read", for
+        # every frame and camera) from failures nobody had looked at.
+        probed: list[dict] = []
+        pair = first_readable_pair(project, load_image, probed)
         if pair is None:
             return CalibrationResult(
                 False, None, "failed",
                 "No image pair could be read, so the cameras' image size — "
                 "which is what an uncalibrated take estimates the lenses "
                 "from — is not known. Check that the photos are on this "
-                "machine and not online-only placeholders.",
-                skipped=[{"frame": f.frame_id, "camera": c,
-                          "reason": "could not be read"}
-                         for f in project.frames for c in CAMERAS])
+                "machine and not online-only placeholders."
+                + summarise_skipped(probed), skipped=probed)
         img_l, img_r = pair
         intr_left = intr_left or _approx_intrinsics(img_l)
         intr_right = intr_right or _approx_intrinsics(img_r)
