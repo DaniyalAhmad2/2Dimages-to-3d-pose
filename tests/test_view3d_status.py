@@ -128,6 +128,7 @@ def _frame():
 
 def _panel_colors(qapp):
     """What the 2D camera panel paints the same frame's joints."""
+    from PySide6.QtCore import Qt
     from pose3d.core.project import CAM_LEFT
     states, errors, corrected, filled = _frame()
     p = CameraPanel("left", "LEFT CAMERA")
@@ -138,8 +139,11 @@ def _panel_colors(qapp):
                    errors[CAM_LEFT]["delivered"], states[CAM_LEFT])
     out = {}
     for j, item in enumerate(p.view._joints):
-        pen, brush = item.pen().color(), item.brush().color()
-        out[j] = pen if item.brush().style().name == "NoBrush" else brush
+        # a hollow joint carries its colour in the pen, a measured one in the
+        # brush — the 2D overlay's own way of saying "this is not a
+        # measurement", which the 3D view says with size and opacity
+        hollow = item.brush().style() == Qt.BrushStyle.NoBrush
+        out[j] = item.pen().color() if hollow else item.brush().color()
     return out
 
 
