@@ -390,6 +390,45 @@ def test_esc_and_the_close_box_cannot_hand_the_window_back(
     win.close()
 
 
+def test_a_dismissal_arriving_after_the_job_was_reaped_reaches_nothing(
+        qapp, monkeypatch):
+    """The dialog outlives `run_job` — it is parked, not deleted — so a press
+    or a close queued behind the teardown is delivered after it.
+
+    It must not ask a reaped `Job` to stop, and must not put the dialog back
+    on screen over the window `run_job` has just released. Until the teardown
+    unwired it, both were one queued click away.
+    """
+    from PySide6.QtCore import QEvent, Qt
+    from PySide6.QtGui import QCloseEvent, QKeyEvent
+    from PySide6.QtWidgets import QApplication, QPushButton
+
+    from pose3d.ui import worker
+
+    dialogs, jobs = [], []
+    real_dialog, real_job = worker._JobDialog, worker.Job
+    monkeypatch.setattr(worker, "_JobDialog",
+                        lambda *a, **kw: dialogs.append(real_dialog(*a, **kw))
+                        or dialogs[-1])
+    monkeypatch.setattr(worker, "Job",
+                        lambda *a, **kw: jobs.append(real_job(*a, **kw))
+                        or jobs[-1])
+
+    assert worker.run_job(None, "Detection",
+                          lambda report, cancelled: "done") == "done"
+
+    dialog, job = dialogs[0], jobs[0]
+    dialog.findChild(QPushButton).click()        # the press that was queued
+    QApplication.sendEvent(dialog, QCloseEvent())
+    QApplication.sendEvent(dialog, QKeyEvent(QEvent.Type.KeyPress,
+                                             Qt.Key.Key_Escape,
+                                             Qt.KeyboardModifier.NoModifier))
+
+    assert job.is_cancelled() is False, "a finished job was asked to stop"
+    assert not dialog.isVisible(), "the retired dialog came back"
+    assert QApplication.activeModalWidget() is None
+
+
 def test_a_finished_job_is_retired_by_the_next_one_not_in_its_own_teardown(
         qapp, monkeypatch):
     """`run_job` is called once per detection, re-detect, recompute, export and
