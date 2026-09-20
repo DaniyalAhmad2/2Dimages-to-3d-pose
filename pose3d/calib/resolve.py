@@ -293,14 +293,12 @@ def _approx_intrinsics(image: np.ndarray) -> Intrinsics:
 # --------------------------------------------------------------------------
 # tag observations
 # --------------------------------------------------------------------------
-# This frame's image for `cam`, or None with the reason recorded — THE rule
-# for every pass over a take's photographs, and it lives in `pipeline`
-# because two passes each having their own is what the import broke on: the
-# calibration skipped a 0-byte OneDrive placeholder and the detection right
-# after it raised on the same file, so the import ended with "Import failed"
-# and nothing written. Bound to the old private name so this module's own
-# callers below read unchanged.
-_read_frame_image = read_frame_image
+# `read_frame_image` — this frame's image for `cam`, or None with the reason
+# recorded — is imported from `pipeline`, where it is THE rule for every pass
+# over a take's photographs. Two passes each having their own is what the
+# import broke on: the calibration skipped a 0-byte OneDrive placeholder and
+# the detection right after it raised on the same file, so the import ended
+# with "Import failed" and nothing written.
 
 
 def first_readable_pair(project: ProjectData, load_image, skipped=None):
@@ -317,7 +315,7 @@ def first_readable_pair(project: ProjectData, load_image, skipped=None):
     `detect_all_tags` is about to look at every frame properly.
     """
     for frame in project.frames:
-        imgs = [_read_frame_image(frame, cam, load_image, skipped)
+        imgs = [read_frame_image(frame, cam, load_image, skipped)
                 for cam in CAMERAS]
         if all(img is not None for img in imgs):
             return imgs[0], imgs[1]
@@ -361,7 +359,7 @@ def detect_all_tags(project: ProjectData, load_image, dictionaries=None,
     for frame in project.frames:
         images = {}
         for cam in CAMERAS:
-            images[cam] = _read_frame_image(frame, cam, load_image, skipped)
+            images[cam] = read_frame_image(frame, cam, load_image, skipped)
         if any(img is None for img in images.values()):
             continue
         for dict_id, detector in detectors:
