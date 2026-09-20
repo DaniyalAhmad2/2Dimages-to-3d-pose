@@ -166,6 +166,102 @@ def test_the_progress_dialogs_cancel_reaches_the_job(qapp, monkeypatch,
     assert recorded_errors == []
 
 
+def test_cancel_keeps_the_window_blocked_until_the_job_has_really_stopped(
+        qapp, monkeypatch, recorded_errors):
+    """Pressing Cancel must not hand the window back while the job is alive.
+
+    `QProgressDialog::cancel()` is wired to the dialog's own `canceled` signal
+    and sets `forceHide`, so `reset()` hides the dialog whatever
+    `setAutoClose(False)` says — and a hidden dialog is not in Qt's modal
+    stack, so `QApplication.activeModalWidget()` becomes None and the window
+    behind it takes clicks again. Meanwhile `run_job` is still inside
+    `loop.exec()` with the worker thread running: Export's Blender child takes
+    seconds to be polled and killed, and in that window a second Export could
+    be started into the same folder, or a second detection run against the
+    same ProjectData.
+
+    So this presses the REAL Cancel button on a job that keeps running for
+    half a second afterwards, and then clicks the parent window through the
+    window-system path — the path Qt's modal blocking actually filters, as
+    opposed to `sendEvent`, which bypasses it.
+    """
+    from PySide6.QtCore import QPoint, QTimer, Qt
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import (
+        QApplication, QMainWindow, QPushButton)
+
+    from pose3d.ui import worker
+
+    win = QMainWindow()
+    button = QPushButton("start something else")
+    clicks = []
+    button.clicked.connect(lambda: clicks.append(1))
+    win.setCentralWidget(button)
+    win.resize(200, 120)
+    win.show()
+    QTest.qWaitForWindowExposed(win, 2000)
+
+    dialogs = []
+    real = worker.QProgressDialog
+    monkeypatch.setattr(worker, "QProgressDialog",
+                        lambda *a, **kw: dialogs.append(real(*a, **kw))
+                        or dialogs[-1])
+
+    saw_the_flag = threading.Event()
+
+    def slow_to_stop(report, cancelled):
+        deadline = time.monotonic() + 10
+        while not cancelled() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        saw_the_flag.set()
+        time.sleep(0.5)             # still running, still holding the project
+        raise worker.Cancelled()
+
+    seen = {}
+
+    def drive():
+        if not dialogs:
+            QTimer.singleShot(5, drive)
+            return
+        cancel = dialogs[0].findChild(QPushButton)
+        if cancel is not None and cancel.isVisible():
+            cancel.click()                      # the real button, not the signal
+            QTimer.singleShot(5, drive)
+            return
+        if not saw_the_flag.is_set():
+            QTimer.singleShot(5, drive)
+            return
+        seen["modal"] = QApplication.activeModalWidget()
+        seen["dialog_visible"] = dialogs[0].isVisible()
+        seen["label"] = dialogs[0].labelText()
+        # a Cancel still live over a job that has already been asked to stop
+        # reads as an app that ignored the first press
+        seen["cancel_offered"] = cancel is not None and cancel.isVisible()
+        QTest.mouseClick(win.windowHandle(), Qt.MouseButton.LeftButton,
+                         Qt.KeyboardModifier.NoModifier,
+                         button.mapTo(win, QPoint(0, 0))
+                         + QPoint(button.width() // 2, button.height() // 2))
+        QGuiApplication.processEvents()
+        seen["clicks_while_running"] = len(clicks)
+
+    QTimer.singleShot(0, drive)
+    res = worker.run_job(win, "Export", slow_to_stop)
+
+    assert isinstance(res, worker.Cancelled)
+    assert recorded_errors == []
+    assert seen.get("modal") is not None, (
+        "the window was released while the cancelled job was still running")
+    assert seen["dialog_visible"] is True
+    assert "ancel" in seen["label"], seen["label"]
+    assert seen["cancel_offered"] is False
+    assert seen["clicks_while_running"] == 0, (
+        "a click reached the window behind a job that had not stopped yet")
+    # and the window is its own again once the job really has stopped
+    assert QApplication.activeModalWidget() is None
+    win.close()
+
+
 def test_a_finished_job_is_retired_by_the_next_one_not_in_its_own_teardown(
         qapp, monkeypatch):
     """`run_job` is called once per detection, re-detect, recompute, export and

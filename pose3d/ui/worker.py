@@ -21,7 +21,7 @@ from __future__ import annotations
 from PySide6.QtCore import (
     QCoreApplication, QEventLoop, QObject, Qt, QThread, Signal,
 )
-from PySide6.QtWidgets import QProgressDialog
+from PySide6.QtWidgets import QProgressDialog, QPushButton
 
 from pose3d.pipeline import Cancelled  # noqa: F401  (re-exported by contract)
 
@@ -163,8 +163,12 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     # every stale cross-thread call still queued for them (see _PARKED).
     _drain_parked()
 
-    dialog = QProgressDialog(title, "Cancel" if cancellable else None,
-                             0, 0, parent)
+    # The Cancel button is ours, not the one the constructor would make, so
+    # that `_keep_blocking` below can take it away without deleting a widget
+    # from inside its own `clicked` emission.
+    dialog = QProgressDialog(title, None, 0, 0, parent)
+    cancel_button = QPushButton("Cancel") if cancellable else None
+    dialog.setCancelButton(cancel_button)      # None: no button at all
     dialog.setWindowTitle(title)
     dialog.setWindowModality(Qt.WindowModality.WindowModal)
     dialog.setMinimumWidth(420)
@@ -173,8 +177,6 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     # its maximum — a job that reports 10/10 and then commits is not finished
     dialog.setAutoClose(False)
     dialog.setAutoReset(False)
-    if not cancellable:
-        dialog.setCancelButton(None)
 
     loop = QEventLoop()
     job = Job(fn, parent)
@@ -191,8 +193,40 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     # would otherwise leave this loop spinning with the window frozen behind a
     # modal dialog — the exact failure mode this module removes.
     job.finished.connect(loop.quit)
-    if cancellable:
-        dialog.canceled.connect(job.cancel)
+
+    def _keep_blocking():
+        """Ask the job to stop, and go on blocking the window until it has.
+
+        `canceled` is emitted by the Cancel button AND by the dialog's own
+        close/Esc path, and Qt's first connection to it is
+        `QProgressDialog::cancel()`, which sets `forceHide` and calls
+        `reset()`. So by the time this runs the dialog is already hidden and
+        out of Qt's modal stack: `QApplication.activeModalWidget()` is None
+        and the window behind takes clicks again — while `loop.exec()` below
+        has not returned and the worker thread is still alive. That gap is
+        seconds wide for an Export (Blender is polled, then killed), and it
+        let a second Export start into the same folder, or a second detection
+        run against the same ProjectData.
+
+        Showing the dialog again puts it straight back in the modal stack, so
+        the window stays blocked until `loop.exec()` returns. The button goes
+        away rather than staying live over a job that has already been asked
+        to stop — hidden and disabled, not deleted: this runs inside its own
+        `clicked` emission, and `setCancelButton(None)` would free the widget
+        Qt is in the middle of.
+        """
+        if cancel_button is not None:
+            cancel_button.setEnabled(False)
+            cancel_button.hide()
+            job.cancel()
+        dialog.setLabelText(f"{title} — cancelling…" if cancellable
+                            else f"{title} — please wait…")
+        dialog.show()
+
+    # Connected even when the job cannot be cancelled: there is no button
+    # then, but Esc and the window's close box still reach `canceled`, and
+    # a recompute must not hand the window back mid-take either.
+    dialog.canceled.connect(_keep_blocking)
 
     dialog.show()
     job.start()
@@ -211,8 +245,11 @@ def run_job(parent, title: str, fn, cancellable: bool = True):
     job.progress.disconnect()
     job.finished_res.disconnect()
     job.finished.disconnect()
-    if cancellable:
-        dialog.canceled.disconnect()
+    # BEFORE `dialog.close()` below, and load-bearing: `closeEvent` emits
+    # `canceled`, so a still-connected `_keep_blocking` would show the dialog
+    # again — over a job that has already finished, with nothing left to close
+    # it.
+    dialog.canceled.disconnect()
     QCoreApplication.removePostedEvents(sink)
     QCoreApplication.removePostedEvents(job)
     QCoreApplication.removePostedEvents(loop)
