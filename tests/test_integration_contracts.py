@@ -59,9 +59,13 @@ def test_open_project_is_reachable_by_menu_and_by_button(qapp, tmp_path):
     assert win._recent_menu.title() == "Recent Projects"
     assert win._recent_menu.toolTipsVisible(), \
         "the tooltip is the only thing that tells two takes of one name apart"
-    # the menu is rebuilt from disk on every show, and says so when empty
+    # rebuilt from disk on every show — a project moved or deleted since the
+    # last session is dropped rather than offered — and it says so when there
+    # is nothing to offer, instead of dropping an empty menu on the user
     win._fill_recent_menu()
-    assert win._recent_menu.actions(), "the menu offered nothing at all"
+    actions = win._recent_menu.actions()
+    assert len(actions) == 1 and not actions[0].isEnabled()
+    assert actions[0].text() == "Nothing opened yet"
 
 
 def test_the_open_button_is_on_the_empty_window_and_only_there(
