@@ -398,3 +398,183 @@ def test_an_import_with_nowhere_to_open_it_says_where_it_went(qapp, tmp_path):
     assert str(tmp_path) in win.statusBar().currentMessage()
     QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
     assert Shiboken.isValid(win), "it handed over to nothing"
+
+
+# --- the door back into a saved project -------------------------------------
+
+# The Recent Projects list is already isolated per test by the autouse
+# `project_settings` fixture in conftest.py; asking for it by name is how a
+# test reads back what the app recorded.
+recent_store = pytest.fixture(lambda project_settings: project_settings)
+
+
+def _saved_project(folder, name="Saved_Take"):
+    """A real project folder, written the way Save Corrections writes one."""
+    from pose3d.core.io_project import save_project
+
+    data, _, _ = _project_with_rig()
+    data.name = name
+    folder.mkdir(parents=True, exist_ok=True)
+    save_project(data, folder)
+    return str(folder)
+
+
+def test_a_saved_project_can_be_opened_from_the_window(qapp, tmp_path,
+                                                       recent_store,
+                                                       monkeypatch,
+                                                       recorded_errors):
+    """The client imports, corrects, saves, closes the app — and until now had
+    no way back in but a command line, on a product sold as one-click."""
+    from pose3d.app import build_model
+    from pose3d.ui import filedialog
+
+    folder = _saved_project(tmp_path / "Saved_Take")
+    opened = []
+    win = _window()
+
+    def open_callback(picked):
+        opened.append(_window(build_model(picked)))
+        return opened[-1]
+
+    win.open_callback = open_callback
+    monkeypatch.setattr(filedialog, "existing_directory",
+                        lambda *a, **k: folder)
+
+    win._on_open_project()
+
+    assert opened, "the folder never reached the open route"
+    model = opened[0].model
+    assert model.project.name == "Saved_Take"
+    assert len(model.project.frames) == 3, "the saved take came back empty"
+    assert model.project_dir == folder
+    assert recorded_errors == []
+
+
+def test_a_folder_that_is_not_a_project_is_refused_with_a_reason(
+        qapp, tmp_path, recent_store, recorded_errors):
+    """Picking the images folder, or the parent of the project, is the
+    ordinary mistake — and it has to name what is missing rather than open an
+    empty window titled "No project loaded"."""
+    win = _window()
+    opened = []
+    win.open_callback = opened.append
+
+    win._open_project_folder(str(tmp_path))
+
+    assert opened == [], "a folder with no project.json was opened anyway"
+    assert len(recorded_errors) == 1, recorded_errors
+    title, text = recorded_errors[0]
+    assert "project.json" in text and str(tmp_path) in text
+
+
+def test_recent_projects_lists_the_last_eight_most_recent_first(
+        qapp, tmp_path, recent_store):
+    folders = [_saved_project(tmp_path / f"take{i}", f"Take_{i}")
+               for i in range(10)]
+    for folder in folders:
+        recent_store.remember_project(folder)
+
+    assert recent_store.recent_projects() == folders[:-9:-1]
+    assert len(recent_store.recent_projects()) == 8
+
+
+def test_a_project_opened_again_moves_back_to_the_top(qapp, tmp_path,
+                                                      recent_store):
+    """Not a second entry for the same folder: eight slots are few enough
+    that duplicates would push a real project off the end."""
+    a = _saved_project(tmp_path / "a", "A")
+    b = _saved_project(tmp_path / "b", "B")
+    for folder in (a, b, a):
+        recent_store.remember_project(folder)
+
+    assert recent_store.recent_projects() == [a, b]
+
+
+def test_recent_projects_drops_a_folder_that_is_no_longer_there(
+        qapp, tmp_path, recent_store):
+    """A project moved, renamed or deleted between two sessions must not be
+    offered: an entry that opens nothing is worse than no entry."""
+    import shutil
+
+    kept = _saved_project(tmp_path / "kept", "Kept")
+    gone = _saved_project(tmp_path / "gone", "Gone")
+    recent_store.remember_project(kept)
+    recent_store.remember_project(gone)
+    shutil.rmtree(gone)
+
+    assert recent_store.recent_projects() == [kept]
+
+
+def test_the_recent_menu_offers_what_was_opened_and_opens_it(
+        qapp, tmp_path, recent_store):
+    from PySide6.QtGui import QAction
+
+    folders = [_saved_project(tmp_path / f"take{i}", f"Take_{i}")
+               for i in range(3)]
+    for folder in folders:
+        recent_store.remember_project(folder)
+
+    win = _window()
+    opened = []
+    win.open_callback = opened.append
+    win._fill_recent_menu()                 # what `aboutToShow` does
+
+    entries = [a for a in win._recent_menu.actions() if a.isEnabled()]
+    assert [a.toolTip() for a in entries] == folders[::-1]
+    entries[0].trigger()
+    assert opened == [folders[-1]]
+    assert isinstance(entries[0], QAction)
+
+
+def test_the_recent_menu_says_so_when_there_is_nothing_in_it(
+        qapp, recent_store):
+    win = _window()
+    win._fill_recent_menu()
+
+    entries = win._recent_menu.actions()
+    assert len(entries) == 1 and not entries[0].isEnabled()
+
+
+def test_opening_a_project_records_it_in_recent(qapp, tmp_path, recent_store,
+                                                monkeypatch):
+    """Every successful open and every successful import, through the one
+    route both of them take."""
+    folder = _saved_project(tmp_path / "Take", "Take")
+    from pose3d import app as app_module
+
+    win = app_module.open_project_window(folder)
+    try:
+        assert app_module.recent_projects() == [folder]
+        assert win.model.project.name == "Take"
+    finally:
+        if win in app_module._WINDOWS:
+            app_module._WINDOWS.remove(win)
+        win.close()
+
+
+def test_a_folder_with_no_project_is_never_recorded(qapp, tmp_path,
+                                                    recent_store):
+    """`open_project_window(None)` is how the app starts, and a bad path from
+    the command line opens the same empty window: neither is a project to
+    come back to."""
+    from pose3d import app as app_module
+
+    for folder in (None, str(tmp_path / "nothing-here"), str(tmp_path)):
+        app_module.remember_project(folder)
+
+    assert app_module.recent_projects() == []
+
+
+def test_the_empty_startup_window_offers_a_way_in(qapp, tmp_path):
+    """The window a client meets after double-clicking the exe: no project,
+    and until now only Import Images — which re-runs detection over images
+    they have already corrected."""
+    from pose3d.app import build_model
+
+    empty = _window(build_model(None))
+    assert empty.btn_open.isVisibleTo(empty), (
+        "the empty window offers no way to open a saved project")
+
+    loaded = _window(build_model(_saved_project(tmp_path / "Take", "Take")))
+    assert not loaded.btn_open.isVisibleTo(loaded), (
+        "the dashboard's top bar grew a button it does not need")

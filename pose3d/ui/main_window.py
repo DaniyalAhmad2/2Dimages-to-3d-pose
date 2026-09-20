@@ -226,14 +226,44 @@ class MainWindow(QMainWindow):
         self.saved_label = QLabel("✓ Project Saved"); self.saved_label.setObjectName("savedLabel")
         lay.addWidget(self.saved_label)
         lay.addStretch(1)
+        self.btn_open = QPushButton("Open Project")
+        self.btn_open.setToolTip("Open a project you saved earlier — its "
+                                 "images, corrections and calibration exactly "
+                                 "as you left them")
+        # Only on the empty window a client meets after double-clicking the
+        # exe, where Import Images was the one thing on offer and re-running
+        # detection over images they had already corrected was the only way
+        # back in. With a project open, File ▸ Open Project… is the route and
+        # the dashboard's top bar stays as it was designed.
+        self.btn_open.setVisible(not self.model.project_dir)
         self.btn_import = QPushButton("⬆  Import Images")
         self.btn_export = QPushButton("⬇  Export Results")
+        lay.addWidget(self.btn_open)
         lay.addWidget(self.btn_import); lay.addWidget(self.btn_export)
         return bar
 
     def _build_menus(self):
-        """Two menu actions: the migration path for a project made before face
-        keypoints existed, and the report we ask the client to send us."""
+        """File, Tools and Help.
+
+        File is the door back into a saved take. Until it existed the only
+        way to reopen one was a command-line argument, on a product whose
+        premise is a one-click executable: a client who closed the app had no
+        route to yesterday's corrections at all, while the status bar advised
+        a "Save As" that was never built.
+        """
+        from PySide6.QtGui import QKeySequence
+
+        file_menu = self.menuBar().addMenu("&File")
+        act = file_menu.addAction("Open Project…")
+        act.setShortcut(QKeySequence.StandardKey.Open)
+        act.setToolTip("Open a project folder saved earlier")
+        act.triggered.connect(self._on_open_project)
+        # Held on self: a QMenu wrapper that Python collects takes the menu
+        # (and its actions) with it.
+        self._recent_menu = file_menu.addMenu("Recent Projects")
+        self._recent_menu.aboutToShow.connect(self._fill_recent_menu)
+        self._fill_recent_menu()
+
         tools = self.menuBar().addMenu("&Tools")
         act = tools.addAction("Re-detect face points only")
         act.setToolTip("Detect the nose and face points again so the "
@@ -355,6 +385,7 @@ class MainWindow(QMainWindow):
         # a freshly opened project as having unsaved changes
         self.head_combo.currentIndexChanged.connect(self._on_head_mode_changed)
 
+        self.btn_open.clicked.connect(self._on_open_project)
         self.btn_import.clicked.connect(self._on_import)
         self.btn_export.clicked.connect(self._on_export)
         self.sidebar.runDetection.connect(self._on_run_detection)
@@ -781,6 +812,62 @@ class MainWindow(QMainWindow):
         # to the log as this used to.
         from pose3d.ui.import_dialog import ImportDialog
         return self._run_import_dialog(ImportDialog(self))
+
+    def _fill_recent_menu(self):
+        """(Re)build File ▸ Recent Projects from what is on disk right now.
+
+        Rebuilt on every show rather than cached, because the list is only
+        useful while it is true: a project moved or deleted since the last
+        session is dropped by `app.recent_projects` and never offered.
+        """
+        from pathlib import Path
+
+        from pose3d import app
+        self._recent_menu.clear()
+        folders = app.recent_projects()
+        for folder in folders:
+            act = self._recent_menu.addAction(Path(folder).name or folder)
+            act.setToolTip(folder)       # two takes can share a folder name
+            act.triggered.connect(
+                lambda checked=False, f=folder: self._open_project_folder(f))
+        if not folders:
+            act = self._recent_menu.addAction("Nothing opened yet")
+            act.setEnabled(False)
+
+    @guarded
+    def _on_open_project(self):
+        """File ▸ Open Project… — pick a saved project folder and open it."""
+        from pose3d import app
+        from pose3d.ui import filedialog
+        root = app.projects_root()
+        folder = filedialog.existing_directory(
+            self, "Open a Pose3D project",
+            str(root) if root.is_dir() else filedialog.writable_dir())
+        if folder:
+            self._open_project_folder(folder)
+
+    @guarded
+    def _open_project_folder(self, folder):
+        """Open `folder` in this window's place, or say why it cannot be.
+
+        Guarded in its own right: the Recent Projects entries call it from
+        their own `triggered` slots, where an exception would otherwise be
+        swallowed by Qt and the click would look ignored.
+        """
+        from pose3d import app
+        if not app.is_project_folder(folder):
+            guard.report_error(
+                self, "Not a Pose3D project",
+                f"There is no saved project in:\n{folder}\n\n"
+                f"A project folder is the one the app made when you imported "
+                f"the images: it contains project.json, an images folder and "
+                f"a calibration folder. Look under {app.projects_root()}.")
+            return
+        if self.open_callback is None:   # embedded, or a window built by hand
+            self.statusBar().showMessage(
+                f"This window cannot open another project ({folder})", 8000)
+            return
+        self._hand_over_to(self.open_callback(folder))
 
     def _run_import_dialog(self, dlg):
         if dlg.exec() and dlg.result_folder:

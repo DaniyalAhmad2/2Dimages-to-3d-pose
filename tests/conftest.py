@@ -53,6 +53,34 @@ def shown_message_boxes(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def project_settings(monkeypatch, tmp_path_factory):
+    """The app's QSettings, in a file of this test's own.
+
+    `pose3d.app.settings()` is the Recent Projects list — the registry on
+    Windows, ~/.config/Pose3D/Pose3D.conf elsewhere. Anything that opens a
+    project writes to it, so a suite left on the real store would rewrite the
+    developer's (and the runner's) recent list as a side effect of running,
+    and one test's list would be visible to the next.
+
+    Replaced here for every test, asked for or not, for the same reason as
+    the two fixtures above: the hazard belongs to every test that reaches
+    `open_project_window`, not to the file that happens to test it. Ask for
+    it by name to read back what the app recorded.
+    """
+    try:
+        from PySide6.QtCore import QSettings
+
+        from pose3d import app
+    except ImportError:                    # a build without PySide6
+        yield None
+        return
+    path = str(tmp_path_factory.mktemp("settings") / "Pose3D.ini")
+    monkeypatch.setattr(
+        app, "settings", lambda: QSettings(path, QSettings.Format.IniFormat))
+    yield app
+
+
+@pytest.fixture(autouse=True)
 def closed_windows():
     """Destroy each test's windows while Qt is still able to do it properly.
 
