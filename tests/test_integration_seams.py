@@ -132,6 +132,62 @@ def test_the_camera_view_asks_the_shared_joint_status_rule(qapp, monkeypatch):
     assert panel.view._joint_status(0)[0] == "corrected"
 
 
+# --------------------------------------------------------------------------
+# Seam 3 — T1 gave face edits their own flag; T2's dot and filter never asked
+# --------------------------------------------------------------------------
+
+def test_a_face_only_edit_turns_the_frames_dot_purple(qapp, tmp_path):
+    """A nose placed by hand IS a correction to that frame.
+
+    T1 split the flags in two — `Frame.corrected` for the body joints,
+    `Frame.head_corrected` for the face points — and gave the question one
+    answer, `Frame.has_corrections()`. T2's timeline had already shipped
+    reading `Frame.corrected` alone, so a frame whose only hand work was on
+    the face reported itself uncorrected: its dot stayed green and it was
+    missing from Show = Corrected, which is the one view that exists to find
+    the frames the user has worked on.
+    """
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, _gt = _project_with_rig()
+    for f in data.frames:
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.head2d[cam][:] = 100.0
+            f.head_scores[cam][:] = 1.0
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    win = MainWindow(model)
+    model.set_frame(1)
+    assert win.timeline.status(1) == "green"
+
+    nose = NUM_JOINTS + 0
+    model.set_joint_2d(CAM_LEFT, nose, 140.0, 160.0)
+
+    assert data.frames[1].has_corrections()
+    assert not data.frames[1].corrected[CAM_LEFT].any(), "a FACE edit only"
+    assert win.timeline.status(1) == "corrected"
+
+    win.timeline_header.show_combo.setCurrentIndex(
+        win.timeline_header.show_combo.findData("corrected"))
+    assert not win.timeline.isRowHidden(1)
+    assert win.timeline.isRowHidden(0) and win.timeline.isRowHidden(2)
+
+
+def test_a_reopened_project_shows_its_face_corrections_too(qapp):
+    """`populate` asks the same question — a project carries its corrections
+    back from disk, and the filter was empty in every reopened one."""
+    from pose3d.ui.timeline import Timeline
+
+    data, _rig, _gt = _project_with_rig()
+    data.frames[2].set_head_kp(CAM_RIGHT, 0, 10.0, 20.0, corrected=True)
+
+    strip = Timeline()
+    strip.populate(data.frames, load_thumb=None)
+
+    assert strip.status(2) == "corrected"
+    assert strip.status(0) == "green"
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),

@@ -33,9 +33,17 @@ SHOW_FILTERS = (("All Frames", ""), ("Low", "amber"), ("Missing", "red"),
 
 
 def _has_correction(frame) -> bool:
-    """Has the user hand-corrected any keypoint in this frame, in any view?"""
-    flags = getattr(frame, "corrected", None) or {}
-    return any(bool(np.any(v)) for v in flags.values())
+    """Has the user hand-corrected any keypoint in this frame, in any view?
+
+    `Frame.has_corrections()` and nothing else. The question has two halves —
+    the body joints keep `corrected`, the face points keep `head_corrected` —
+    and this used to read the first alone, so a frame whose only hand work was
+    a nose placed by hand reported itself uncorrected: green dot, and absent
+    from Show = Corrected, the one view whose whole job is to find the frames
+    the user has worked on. The frame answers it, so a third kind of hand edit
+    reaches the dot without this module hearing about it.
+    """
+    return bool(frame.has_corrections())
 
 
 class TimelineHeader(QWidget):
