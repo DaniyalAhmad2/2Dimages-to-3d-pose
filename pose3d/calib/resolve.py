@@ -62,6 +62,25 @@ MOTION_WARN_DEG = 2.0
 MOTION_WARN_MM = 30.0
 
 
+def camera_moved(rot_deg, centre_mm) -> bool:
+    """Did a camera move during the take, given how far its pose wandered?
+
+    THE rule, stated once. `camera_motion_check` takes this verdict when the
+    rig is solved and `ui.model._rescale_report` re-takes it when a set-scale
+    changes the displacement — the number it judges is a LENGTH, so a rescale
+    really can carry a take over the threshold or back under it, and the two
+    places used to compare against the two constants separately. Nothing made
+    them agree, and a provenance record that says "the cameras held still"
+    about a wobble now over the threshold is worse than no record.
+
+    A missing measurement is not motion: `None` for either half reads as
+    zero, which is what a caller that could not measure an angle means.
+    """
+    rot = 0.0 if rot_deg is None else float(rot_deg)
+    cen = 0.0 if centre_mm is None else float(centre_mm)
+    return bool(rot > MOTION_WARN_DEG or cen > MOTION_WARN_MM)
+
+
 def _to_jsonable(o):
     # bool before int: True is an int subclass, and "moved": 1 in a provenance
     # file reads as a count
@@ -601,7 +620,7 @@ def camera_motion_check(observations, frames, tag_id, intr, marker_length,
             "n_frames": len(Rs),
             "max_rotation_deg": float(rot),
             "max_centre_mm": cen,
-            "moved": bool(rot > MOTION_WARN_DEG or cen > MOTION_WARN_MM),
+            "moved": camera_moved(rot, cen),
         }
     return out
 

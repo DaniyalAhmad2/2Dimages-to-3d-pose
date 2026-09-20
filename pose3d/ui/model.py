@@ -1177,11 +1177,13 @@ def _rescale_report(report: dict, factor: float) -> None:
     rule for what it contains, which is a decision for whoever adds one.
 
     `moved` is re-taken from the scaled displacement: it is a verdict about a
-    length against `resolve.MOTION_WARN_MM`, so leaving it as it was would
-    report "the cameras held still" about a wobble that is now over the
-    threshold (or the reverse).
+    length, so leaving it as it was would report "the cameras held still"
+    about a wobble that is now over the threshold (or the reverse). Re-taken
+    through `resolve.camera_moved`, which is the rule itself — the two
+    thresholds were compared here and in `camera_motion_check` separately,
+    and nothing made the two verdicts agree.
     """
-    from pose3d.calib.resolve import MOTION_WARN_DEG, MOTION_WARN_MM
+    from pose3d.calib import resolve
 
     for key, value in report.items():
         if isinstance(value, dict):
@@ -1192,9 +1194,8 @@ def _rescale_report(report: dict, factor: float) -> None:
                 and not any(w in key.lower() for w in _NOT_A_WORLD_LENGTH)):
             report[key] = float(value) * factor
     if report.get("max_centre_mm") is not None:
-        rot = report.get("max_rotation_deg") or 0.0
-        report["moved"] = bool(float(rot) > MOTION_WARN_DEG
-                               or report["max_centre_mm"] > MOTION_WARN_MM)
+        report["moved"] = resolve.camera_moved(report.get("max_rotation_deg"),
+                                               report["max_centre_mm"])
 
 
 def _report(on_progress, label: str) -> None:

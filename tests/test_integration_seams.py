@@ -415,6 +415,48 @@ def test_the_marker_row_uses_the_same_formatting_as_the_rows_beside_it(qapp):
     assert _cm(0.083) == "8.3 cm"
 
 
+# --------------------------------------------------------------------------
+# Seam 7 — "the cameras moved" was decided in two places
+# --------------------------------------------------------------------------
+
+def test_one_camera_moved_rule(monkeypatch):
+    """`camera_motion_check` (T4's file) and `model._rescale_report` (T1's)
+    each compared a rotation and a displacement against the two thresholds.
+    A rescale re-takes the verdict because it changes the displacement, so
+    the two had to agree — and nothing made them.
+    """
+    from pose3d.calib import resolve
+    from pose3d.ui import model as uimodel
+
+    assert not resolve.camera_moved(0.0, 0.0)
+    assert resolve.camera_moved(resolve.MOTION_WARN_DEG + 0.1, 0.0)
+    assert resolve.camera_moved(0.0, resolve.MOTION_WARN_MM + 0.1)
+    assert not resolve.camera_moved(None, 0.0), "a missing angle is not motion"
+
+    # both callers go through it: swap the rule and both verdicts follow
+    monkeypatch.setattr(resolve, "camera_moved", lambda rot, cen: True)
+    report = {"max_rotation_deg": 0.0, "max_centre_mm": 0.0}
+    uimodel._rescale_report(report, 2.0)
+    assert report["moved"] is True
+
+
+def test_a_rescale_re_takes_the_verdict_from_the_scaled_displacement():
+    """The number the rule judges is a LENGTH, so rescaling the calibration
+    can carry it over the threshold (or back under it) — and the provenance
+    record must not go on claiming the cameras held still."""
+    from pose3d.calib.resolve import MOTION_WARN_MM
+    from pose3d.ui.model import _rescale_report
+
+    report = {"max_rotation_deg": 0.0, "max_centre_mm": 0.6 * MOTION_WARN_MM,
+              "moved": False}
+    _rescale_report(report, 2.0)
+    assert report["max_centre_mm"] == pytest.approx(1.2 * MOTION_WARN_MM)
+    assert report["moved"] is True
+
+    _rescale_report(report, 0.25)
+    assert report["moved"] is False
+
+
 @pytest.mark.parametrize("state", ["ok", "rejected", "not_measured"])
 @pytest.mark.parametrize("err", [0.0005, 0.007, 0.05, float("nan")])
 @pytest.mark.parametrize("filled,corrected", [(False, False), (True, False),
