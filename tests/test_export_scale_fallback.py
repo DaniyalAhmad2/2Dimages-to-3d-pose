@@ -26,11 +26,20 @@ def unfittable(monkeypatch):
                         lambda self, poses: None)
 
 
-def _take(n=5, grow=0.0):
+def _take(n=5, grow=0.0, tilt_deg=0.0):
     """n frames of a standing pose; `grow` scales each frame a little more, so
-    a per-frame size ratio can be told from one take-wide size."""
+    a per-frame size ratio can be told from one take-wide size.
+
+    `tilt_deg` leans the whole take, which is what a calibration world frame
+    from a tag taped to a wall does to every take shot against it — the
+    client's own is 90 deg out.
+    """
+    from tests.synth import rot_about
     base = sample_skeleton_3d()
-    return np.stack([base * (1.0 + grow * i) for i in range(n)])
+    poses = np.stack([base * (1.0 + grow * i) for i in range(n)])
+    if tilt_deg:
+        poses = poses @ rot_about((1, 0, 0), tilt_deg).T
+    return poses
 
 
 @needs_character()
@@ -46,7 +55,12 @@ def test_the_fallback_is_one_size_for_the_take(unfittable):
     # height — which is what stops the figure changing size keyframe to
     # keyframe, and what makes the preview and the export agree
     assert ch._scale == scale
-    heights = [float(np.ptp(p[:, 2])) for p in poses]
+    # the rig's height over the subject's median height, measured on the
+    # DE-TILTED take (see `take_scale`: a height is a measurement in a frame
+    # and the bone fit it replaces is not)
+    from pose3d.geometry.orient import de_tilt_matrix, sequence_up
+    level = poses @ de_tilt_matrix(sequence_up(poses)).T
+    heights = [float(np.ptp(p[:, 2])) for p in level]
     assert np.isclose(scale, ch.rig_h / np.median(heights))
     for p in poses:
         assert ch._frame_scale(p, np.ones(NUM_JOINTS, bool)) == scale
@@ -124,3 +138,47 @@ def test_the_view_says_exactly_what_the_export_says(unfittable):
     assert said == [SCALE_FROM_HEIGHT_NOTE]
     assert frag["fit_note"] == said[0]
     assert view._character._scale == pytest.approx(frag["take_scale"])
+
+
+@needs_character()
+def test_the_fallback_does_not_depend_on_which_frame_it_is_handed(unfittable):
+    """A height is a measurement in a frame; the bone fit it stands in for is
+    not. A take leaning 30 deg must be sized the same as the same take upright,
+    or the view and the export size the figure differently the moment they
+    hold it in different frames."""
+    from pose3d.geometry.character import Character
+
+    upright = _take(grow=0.10)
+    leaning = _take(grow=0.10, tilt_deg=30.0)
+    a, _note = take_scale(Character(), upright)
+    b, _note = take_scale(Character(), leaning)
+    assert a == pytest.approx(b, rel=1e-9)
+
+
+@needs_character()
+def test_a_view_with_no_orientation_yet_still_matches_the_export(unfittable):
+    """`View3D.fit_subject` uses the raw world poses while `_R` is None —
+    before `main_window._apply_view_orientation` has run, or after it decided
+    there was no vertical to level on — and the export always de-tilts. They
+    must still agree: the export IS the preview, and a size that depended on
+    which of the two ran first is exactly the class of bug this pass is about.
+    """
+    import os
+
+    os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+    pytest.importorskip("PySide6")
+    from pose3d.export.blender_export import _character_document
+    from pose3d.ui.view3d import View3D
+
+    poses = _take(grow=0.10, tilt_deg=30.0)
+    view = View3D.__new__(View3D)
+    view._R = None                      # no orientation has been set
+    view._vaxis, view._vsign = None, 1.0
+    view._character = None
+    view._take = view._place = None
+    view._char_error = view._char_error_source = ""
+    view._report = lambda msg, source="": None
+
+    view.fit_subject(poses)
+    frag, _reason = _character_document(poses, 0, None)
+    assert view._character._scale == pytest.approx(frag["take_scale"], rel=1e-9)

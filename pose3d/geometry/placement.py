@@ -21,6 +21,7 @@ import math
 import numpy as np
 
 from pose3d.core.skeleton import NUM_JOINTS, Joint
+from pose3d.geometry.orient import de_tilt_matrix, sequence_up
 
 #: The share of a take's frames allowed to sit BELOW its floor. The floor is
 #: an order statistic over the per-frame seats, not a mean or an interpolated
@@ -115,12 +116,26 @@ def take_scale(character, poses):
     is a single number and a pose can lose it (a crouch measures short) — but
     it is one measurement, so the figure keeps its size, and the preview and
     the exported file keep each other's.
+
+    The take is DE-TILTED here before its height is read. The fit this stands
+    in for is rotation-blind — a bone is the same length whichever way the
+    room leans — and a height is not, so measuring the poses as they arrive
+    would make the answer depend on the caller's frame: the export always
+    de-tilts before calling (`take_up` then `de_tilt_matrix`), while the view
+    hands over RAW world poses until `main_window` has given it an
+    orientation. Two callers, two sizes, one figure. Doing it here means they
+    agree by construction rather than by call order; a take that arrives
+    already upright is de-tilted by an identity and pays a matrix multiply.
     """
     scale = character.fit_to_subject(poses)
     if scale is not None:
         return float(scale), ""
+    poses = np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3)
+    up = sequence_up(poses)
+    if up is not None:
+        poses = poses @ de_tilt_matrix(up).T
     heights = []
-    for pose in np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3):
+    for pose in poses:
         seen = pose[~np.isnan(pose).any(1)]
         if len(seen) >= 2:
             h = float(seen[:, 2].max() - seen[:, 2].min())
