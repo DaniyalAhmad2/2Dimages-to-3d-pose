@@ -24,6 +24,24 @@ from pose3d.ui.panels import (
 
 COL_GREY = QColor(140, 148, 166)
 
+#: The smallest on-screen hit target a SKELETON handle may present, across.
+#: The floor the body radius below is held to, in code and in the tests, so
+#: neither can drift back towards the pixel-sized dot. The face points are
+#: deliberately under it — see FACE_HANDLE_R.
+MIN_GRAB_PX = 16.0
+
+# Handle radii in SCREEN pixels, not image pixels: the items carry
+# ItemIgnoresTransformations, so the client's 3072x4080 photograph can be
+# fitted into a 400-px panel and the dot he has to hit is still ~20 px across.
+# They were 6 IMAGE pixels, which drew at ~1.4 px on that photograph — "very
+# very small, difficult to see" (2026-08-16), and a miss pans the image.
+HANDLE_R = max(10.0, MIN_GRAB_PX / 2)
+# The face points are smaller ON PURPOSE (14 px across, under the floor
+# above): they are secondary to the skeleton, they are not what the client
+# was complaining about, and five of them sit close enough together around
+# the head that body-sized handles would cover the face and each other.
+FACE_HANDLE_R = 7.0
+
 # Shared with the accuracy panels so a joint's dot, its tooltip and the
 # JOINT ACCURACY list can never disagree about what "amber" means.
 RAG_COLORS = {
@@ -47,11 +65,28 @@ RAG_COLORS = {
     # overruled, and the two are never confusable: corrected is a filled dot,
     # rejected a hollow ring.
     "rejected": COL_PURPLE,
+    # the detector found nothing here at all, so this handle is a PLACEHOLDER
+    # the user drags onto the limb, not a point anything saw. RED, which the
+    # accuracy bands otherwise own, for two reasons: it is the colour the
+    # timeline legend already gives the word "Missing", the client's own
+    # vocabulary for this; and this is the one state whose entire point is
+    # that he must FIND it on the photograph, which grey on a photograph
+    # loses. It cannot be confused with a red band — that is a filled dot,
+    # this is a DASHED ring, and no other state is dashed. (The argument the
+    # file makes for painting "rejected" purple rather than red does not
+    # reach here: a rejected joint has two measurements that disagree and is
+    # the geometry's problem, while this one has no measurement at all and
+    # nothing but the user can fix it.)
+    "missing": COL_RED,
 }
 
 # States drawn as a hollow ring rather than a filled dot: none of them is a
 # measurement of this frame, and none may look like one.
 HOLLOW_STATES = ("filled", "unmeasured", "rejected")
+
+# Hollow AND dashed: nothing was detected here, so the ring is not even
+# reporting a position — it is an empty slot waiting to be dragged onto one.
+DASHED_STATES = ("missing",)
 
 # The per-joint states are imported from `pose3d.ui.model`, which produces
 # them, rather than restated here: two independent copies of three string
@@ -80,13 +115,25 @@ class _JointSignals(QObject):
 
 
 class JointItem(QGraphicsEllipseItem):
-    R = 6.0
+    R = HANDLE_R
 
     def __init__(self, joint_id: int, radius: float | None = None):
         r = self.R if radius is None else radius
         super().__init__(-r, -r, 2 * r, 2 * r)
         self.joint_id = joint_id
         self.signals = _JointSignals()
+        # this joint was not detected in this view and the handle is an empty
+        # slot to drag onto it — set by `CameraView.set_pose`, read by the
+        # colouring and by the bones, which may not span a guess
+        self.is_placeholder = False
+        # The radius is in SCREEN pixels: the handle keeps its size whatever
+        # the view transform is, so fitting a 4080-px photo into the panel no
+        # longer shrinks the grab target to a pixel. `pos()` is unaffected —
+        # it stays the joint's position in image coordinates, which is what
+        # the drag reports and what the model stores.
+        self.setFlag(
+            QGraphicsEllipseItem.GraphicsItemFlag.ItemIgnoresTransformations,
+            True)
         self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsMovable, True)
         self.setFlag(QGraphicsEllipseItem.GraphicsItemFlag.ItemIsSelectable, True)
         self.setFlag(
@@ -97,6 +144,12 @@ class JointItem(QGraphicsEllipseItem):
         self.set_status("green")
 
     def set_status(self, status: str):
+        if status in DASHED_STATES:
+            self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
+            pen = QPen(RAG_COLORS[status], 2)
+            pen.setStyle(Qt.PenStyle.DashLine)
+            self.setPen(pen)
+            return
         if status in HOLLOW_STATES:
             self.setBrush(QBrush(Qt.BrushStyle.NoBrush))
             self.setPen(QPen(RAG_COLORS[status], 2))
@@ -152,6 +205,10 @@ class CameraView(QGraphicsView):
         # a hand correction out of nothing. True until the first `set_pose`,
         # which is what the old guard said for a never-posed item too.
         self._joint_shown = [True] * NUM_JOINTS
+        # the last position THIS view was given for each joint, so a frame
+        # the detector missed can offer the placeholder where the joint was
+        # last actually seen rather than in the middle of the picture
+        self._last_seen: dict[int, QPointF] = {}
         self._bones: list[QGraphicsLineItem] = []
         self._show_joints = True
         self._show_bones = True
@@ -179,7 +236,7 @@ class CameraView(QGraphicsView):
             self._scene.addItem(item)
             self._joints.append(item)
         for jid in FACE_KP_IDS:
-            item = JointItem(jid, radius=4.0)
+            item = JointItem(jid, radius=FACE_HANDLE_R)
             item.setBrush(QBrush(FACE_COLOR))
             k = jid - NUM_JOINTS
             # the nose turns the head in BOTH modes; the eyes and ears steer
@@ -201,7 +258,15 @@ class CameraView(QGraphicsView):
             self._pixmap_item.setPixmap(pm)
         if not pm.isNull():
             self._scene.setSceneRect(QRectF(pm.rect()))
-            self.fitInView(self._pixmap_item, Qt.AspectRatioMode.KeepAspectRatio)
+            # …but only while the view is still the one WE chose. A frame
+            # step reloads the image, and re-fitting here threw away the
+            # user's zoom and pan every single time — so correcting the same
+            # joint across ten frames meant zooming and panning ten times.
+            # `_zoomed` is the flag that already means "the user has taken
+            # the view over"; `resizeEvent` and the Fit button honour it too.
+            if not self._zoomed:
+                self.fitInView(self._pixmap_item,
+                               Qt.AspectRatioMode.KeepAspectRatio)
 
     def set_pose(self, xy: np.ndarray, scores: np.ndarray,
                  corrected: np.ndarray | None = None,
@@ -222,6 +287,10 @@ class CameraView(QGraphicsView):
 
         `filled` flags joints whose 3D was interpolated across a one-frame
         dropout (pipeline.fill_gaps); they are drawn as hollow rings.
+
+        A joint this view has no detection for (NaN) is not dropped: it gets
+        a dashed PLACEHOLDER handle to drag onto the limb — see the NaN
+        branch below and `_placeholder_pos`.
         """
         self._scores = np.asarray(scores, float)
         self._corrected = corrected
@@ -242,19 +311,46 @@ class CameraView(QGraphicsView):
             item.signals.blockSignals(False)
         for j, item in enumerate(self._joints):
             p = xy[j]
-            if np.isnan(p).any():
-                self._joint_shown[j] = False
-                item.setVisible(False)
-                continue
-            self._joint_shown[j] = True
-            item.setVisible(self._show_joints)
             # suppress the move signal while we set position programmatically
             # (QGraphicsItem is not a QObject; the Signal lives on item.signals)
             item.signals.blockSignals(True)
-            item.setPos(float(p[0]), float(p[1]))
+            self._joint_shown[j] = True
+            if np.isnan(p).any():
+                # The detector found nothing for this joint HERE. Hiding it
+                # was the same as deleting it: an invisible QGraphicsItem is
+                # not hit-tested and a drag is the only way into a correction,
+                # so the frames the tool exists for — occlusion, extreme poses
+                # — were exactly the ones the user could not fix. Offer an
+                # empty, dashed slot instead, where the joint was last seen in
+                # this view (else the middle of the picture), and let him drag
+                # it onto the limb: that drag commits through the ordinary
+                # `released` path, so the model records it as a correction.
+                item.is_placeholder = True
+                item.setPos(self._placeholder_pos(j))
+            else:
+                item.is_placeholder = False
+                item.setPos(float(p[0]), float(p[1]))
+                self._last_seen[j] = QPointF(float(p[0]), float(p[1]))
+            item.setVisible(self._show_joints)
             item.signals.blockSignals(False)
         self._apply_status()
         self._refresh_bones()
+
+    def _placeholder_pos(self, j: int) -> QPointF:
+        """Where to park the handle for a joint this view did not detect.
+
+        The last position this view had for the joint — for a dropout mid-take
+        that is the previous frame's, a few pixels from where the limb really
+        is — else the middle of the image, the one point always on screen.
+        """
+        prev = self._last_seen.get(j)
+        if prev is not None:
+            return QPointF(prev)
+        if self._pixmap_item is not None:
+            r = self._pixmap_item.boundingRect()
+            if r.width() and r.height():
+                return r.center()
+        return self._scene.sceneRect().center()
 
     def set_accuracy(self, errors, delivered=None, states=None) -> None:
         """Per-joint residuals for THIS view, normalised by figure height.
@@ -283,6 +379,16 @@ class CameraView(QGraphicsView):
         where the user is already looking.
         """
         for j, item in enumerate(self._joints):
+            if item.is_placeholder:
+                # nothing was detected, so there is no accuracy, no
+                # confidence and no band to report — only the one thing the
+                # user can do about it
+                item.set_status("missing")
+                item.setToolTip(
+                    f"<b>{JOINT_NAMES[j]}</b><br>"
+                    f"<span style='color:{RAG_COLORS['missing'].name()};'>"
+                    f"not detected — drag to place</span>")
+                continue
             status, tip = self._joint_status(j)
             item.set_status(status)
             item.setToolTip(tip)
@@ -366,7 +472,10 @@ class CameraView(QGraphicsView):
     def _refresh_bones(self):
         for (a, b), line in zip(BONES, self._bones):
             ja, jb = self._joints[int(a)], self._joints[int(b)]
-            if not (ja.isVisible() and jb.isVisible()) or not self._show_bones:
+            # a bone to a placeholder would draw a limb out of a guess: the
+            # handle is parked where the joint last was, not where it is
+            if (not (ja.isVisible() and jb.isVisible()) or not self._show_bones
+                    or ja.is_placeholder or jb.is_placeholder):
                 line.setVisible(False)
                 continue
             line.setVisible(True)
