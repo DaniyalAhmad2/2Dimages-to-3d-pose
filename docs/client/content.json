@@ -40,7 +40,7 @@
           "Click **Import Images** and choose the left-camera photos and the right-camera photos. Name the files so the pairs line up, as you do now (for example 1_01.jpg with 2_01.jpg). The window shows how many pairs it matched.",
           "Type the tag size in centimetres into **ArUco marker size (cm)** — the black square, measured edge to edge with a ruler, for example 8 for an 8 cm tag. This one number sets the real-world scale of everything. The three calibration file boxes above it are optional: leave them empty and the app works out where the cameras are from the ArUco markers in the photos themselves.",
           "Give the project a name and click **Process**. The app finds the body points in every photo, works out their 3D positions from the two views, and shows the character in the 3D view.",
-          "Step through the photos with the timeline at the bottom. Where a point is wrong, drag it in either camera view and the 3D character updates as you drag. Click **Save Corrections** when you are happy.",
+          "Step through the photos with the timeline at the bottom or the left and right arrow keys. Where a point is wrong, drag it in either camera view and the 3D character updates as you drag; a point the detector could not find shows as a red dashed handle you can drag into place. Click **Save Corrections** when you are happy — they are kept with the project, and **File → Open Project** brings it back another day.",
           "Choose how the head is turned with the **Head:** box above the 3D view (see the next section).",
           "Click **Export Results** and choose a folder. You get a BVH file (motion data), an FBX file (the character with its rig), and an MP4 preview video."
         ] }
