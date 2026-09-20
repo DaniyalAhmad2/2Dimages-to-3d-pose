@@ -261,6 +261,11 @@ class ExportResult:
     # A substitution the HOST decided on (a missing asset with allow_fallback),
     # which never reaches Blender's stdout and so cannot be read back from it.
     fallback_note: str = ""
+    # How the character was SIZED, when it was not the bone fit. Distinct from
+    # `fallback_note`: the figure is the right character, posed by the right
+    # rule, and only its size is a rougher measurement — so it is a note on a
+    # successful export, not a substitution. Empty when the fit worked.
+    fit_note: str = ""
 
     @property
     def ok(self) -> bool:
@@ -400,6 +405,9 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
         from pose3d.geometry.character import Character, take_pelvis_ref
         from pose3d.geometry.orient import (take_up, de_tilt_matrix,
                                             detect_vertical, upright_matrix)
+        # in the same guarded import as the rest of the geometry package, so a
+        # broken install is still a typed reason rather than an ImportError
+        from pose3d.geometry.placement import take_scale
     except Exception as e:
         return None, ("character_import_failed", f"{type(e).__name__}: {e}")
     try:
@@ -428,8 +436,13 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
 
     upright = poses3d @ R
     # size the character to this subject once, from the whole take — the same
-    # fit the 3D view applies, so the export stays identical to the preview
-    ch.fit_to_subject(upright)
+    # fit the 3D view applies, so the export stays identical to the preview,
+    # INCLUDING when that fit fails: `take_scale` is where both of them fall
+    # back to sizing from the take's height, and it hands back the sentence
+    # that says so. Discarding the answer here (which is what "ch.fit_to_
+    # subject(upright)" did) shipped a character that changed size on every
+    # keyframe, with `ok` True and nothing said anywhere.
+    scale, fit_note = take_scale(ch, upright)
     # ...and place it by the same take-wide rule the view uses (view3d
     # `_take_placement`), which is what root motion IS: one reference pelvis
     # for the sequence instead of re-centring on each frame's own.
@@ -438,7 +451,6 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
         keep_root_motion = False
 
     bone_frames, root_offsets = [], []
-    scale = None                # the take's uniform scale, from the first frame
     for i, pose in enumerate(upright):
         valid = ~np.isnan(pose).any(1)
         if filled is not None:
@@ -469,6 +481,8 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
         if al is None:
             root_offsets.append(None); continue
         if scale is None:
+            # No take-wide size at all (`take_scale` found no measurable
+            # height): this frame's own, which is what it was posed through.
             scale = al.scale
         root_offsets.append([float(v) for v in al.root_offset])
     if all(b is None for b in bone_frames):
@@ -476,7 +490,11 @@ def _character_document(poses3d: np.ndarray, display_frame: int,
 
     frag = {"bone_frames": bone_frames, "bone_names": ch.bone_names,
             "root_offsets": root_offsets,
-            "keep_root_motion": bool(keep_root_motion)}
+            "keep_root_motion": bool(keep_root_motion),
+            # provenance, and what the host reads back as `fit_note`: the size
+            # every frame was posed through, and why it is that number
+            "take_scale": None if scale is None else float(scale),
+            "fit_note": fit_note}
     if camera is not None and pelvis_ref is not None and scale is not None:
         try:
             frag["camera"] = _rig_camera(camera, R.T, scale,
@@ -577,7 +595,7 @@ def export_animation(
 
     want_character = requested_bundled or bool(character)
     have_character = bool(character) and Path(character).exists()
-    fallback_note = ""
+    fallback_note = fit_note = ""
     if want_character and not have_character:
         detail = f"looked for {character}" if character else "no path configured"
         if not allow_fallback:
@@ -592,6 +610,13 @@ def export_animation(
             camera=camera)
         if frag is not None:
             doc.update(frag)
+            fit_note = frag.get("fit_note") or ""
+            if fit_note:
+                # onto stdout as well as into the result: stdout is what the
+                # diagnostics report and the failure dialog carry, and a size
+                # that was guessed is the first thing to check when the client
+                # says the figure looks wrong
+                print(f"POSE3D_EXPORT_SCALE_FALLBACK: {fit_note}")
         elif not allow_fallback:
             return _failure(reason[0], reason[1], 3)
         else:
@@ -664,7 +689,7 @@ def export_animation(
         bvh=_exists(name, "bvh"), fbx=_exists(name, "fbx"),
         mp4=_exists(name, "mp4") if render_video else None,
         mp4_camera=_exists(f"{name}_camera", "mp4") if render_video else None,
-        fallback_note=fallback_note,
+        fallback_note=fallback_note, fit_note=fit_note,
         returncode=rc, stdout=stdout, stderr=stderr)
     if not res.ok:
         res.reason = "blender_failed"

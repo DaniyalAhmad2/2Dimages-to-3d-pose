@@ -33,7 +33,8 @@ from pose3d.geometry.orient import detect_vertical, upright_matrix
 # Qt/OpenGL stack — measure the SAME ground this view draws. Re-exported here
 # under its old name: it was this module's function for two phases and the
 # tests and tools that import it by that path are right to.
-from pose3d.geometry.placement import ground_datum, take_floor  # noqa: F401
+from pose3d.geometry.placement import (  # noqa: F401  (ground_datum re-export)
+    ground_datum, take_floor, take_scale)
 from pose3d.ui.camera_view import HOLLOW_STATES, RAG_COLORS
 from pose3d.ui.model import STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED
 
@@ -384,24 +385,19 @@ class View3D(gl.GLViewWidget):
             self._take = raw
             self._place = None
             poses = raw @ self._R.T if self._R is not None else raw
-            scale = self._character.fit_to_subject(poses)
+            _scale, note = take_scale(self._character, poses)
         except Exception as e:
             self._report(f"The character could not be prepared for this take "
                          f"({type(e).__name__}: {e}) — the 3D view is showing "
                          f"the captured skeleton only.", "fit")
             return
-        if scale is None:
-            # No bone in the take was long enough to size the rig against, so
-            # `_frame_scale` falls back to a PER-FRAME height ratio — which
-            # pulses the figure over a 37.9 % range on the client's take.
-            # Silence here is what made that look like the reconstruction
-            # breathing rather than the fit never having happened.
-            self._report(
-                "The character could not be sized to this subject (no bone "
-                "was reconstructed well enough to fit against), so its size "
-                "is re-guessed every frame and the figure will pulse.", "fit")
-        else:
-            self._report("")
+        # `note` is "" when the bone fit worked, which withdraws any previous
+        # one. When it did not, the take is sized from its height instead —
+        # ONE size, by `take_scale`, which the export now takes too, rather
+        # than the per-frame ratio that used to pulse the figure over a 37.9 %
+        # range here while the export shipped the same pulse with no note at
+        # all.
+        self._report(note, "fit")
 
     def _ensure_character(self):
         if self._character is None:

@@ -20,12 +20,23 @@ import math
 
 import numpy as np
 
-from pose3d.core.skeleton import Joint
+from pose3d.core.skeleton import NUM_JOINTS, Joint
 
 #: The share of a take's frames allowed to sit BELOW its floor. The floor is
 #: an order statistic over the per-frame seats, not a mean or an interpolated
 #: percentile: it is always a height some frame's sole actually reached.
 FLOOR_QUANTILE = 0.10
+
+#: Said by the view AND by the export, because it is the same fact about the
+#: same take and the client is looking at both.
+SCALE_FROM_HEIGHT_NOTE = (
+    "The character could not be sized to this subject by its bones (no bone "
+    "was reconstructed well enough to fit against), so it is sized from the "
+    "take's overall height instead: one size for the whole take, but a "
+    "rougher one.")
+NO_SCALE_NOTE = (
+    "The character could not be sized to this subject at all (no frame has a "
+    "measurable height), so it is drawn at the rig's own size.")
 
 
 def ground_datum(verts, joints, drop):
@@ -83,3 +94,44 @@ def take_floor(seats, quantile: float = FLOOR_QUANTILE) -> float | None:
         return finite[0]
     k = int(math.ceil(float(quantile) * (len(finite) - 1)))
     return finite[min(k, len(finite) - 1)]
+
+
+def take_scale(character, poses):
+    """(scale, note): ONE uniform size for the whole take, and why.
+
+    `Character.fit_to_subject` is the real answer — least squares against the
+    subject's median bone lengths — and it returns None when no bone in the
+    take could be measured. What used to happen then was nothing, twice over:
+    `_frame_scale` fell back to THIS frame's height ratio, so the figure
+    changed size on every keyframe (37.9 % over the client's take), and while
+    the 3D view at least said so, the export discarded the same None two lines
+    below a comment promising "the same fit the 3D view applies" — shipping a
+    pulsing character with `ok` True and no note anywhere, and a fixed camera
+    placed from whichever frame happened to be posable first.
+
+    So the fallback is made ONCE, here, for both of them: the rig's height
+    over the subject's MEDIAN height, pinned on the character so every frame
+    is posed through it. It is a worse measurement than the bone fit — height
+    is a single number and a pose can lose it (a crouch measures short) — but
+    it is one measurement, so the figure keeps its size, and the preview and
+    the exported file keep each other's.
+    """
+    scale = character.fit_to_subject(poses)
+    if scale is not None:
+        return float(scale), ""
+    heights = []
+    for pose in np.asarray(poses, float).reshape(-1, NUM_JOINTS, 3):
+        seen = pose[~np.isnan(pose).any(1)]
+        if len(seen) >= 2:
+            h = float(seen[:, 2].max() - seen[:, 2].min())
+            if h > 1e-9:
+                heights.append(h)
+    if not heights:
+        return None, NO_SCALE_NOTE
+    scale = float(character.rig_h / np.median(heights))
+    # The attribute `fit_to_subject` itself writes. Reached from here because
+    # this module is the geometry package's own — the fallback is the same
+    # kind of answer as the fit, made where both callers can share it, and
+    # `Character` has no other way to be told "this is the take's size".
+    character._scale = scale
+    return scale, SCALE_FROM_HEIGHT_NOTE
