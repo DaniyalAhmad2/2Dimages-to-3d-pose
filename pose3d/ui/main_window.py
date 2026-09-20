@@ -299,6 +299,28 @@ class MainWindow(QMainWindow):
         for panel in (self.cam_left, self.cam_right):
             panel.view.jointDragged.connect(self._on_drag)
         self.timeline.frameSelected.connect(self.model.set_frame)
+        # the Show filter came from the client's own dashboard layout and was
+        # wired to nothing; the strip filters on the status its dots paint
+        self.timeline_header.filterChanged.connect(self.timeline.set_filter)
+        # a correction is a fact about the FRAME too, and only the model
+        # knows one happened — the legend has promised a "Corrected" dot
+        # since the layout was copied. Re-read, not latched: undo emits this
+        # too, and taking the last correction back must clear the dot.
+        self.model.joint2dChanged.connect(
+            lambda *_: self.timeline.refresh_corrected(
+                self.model.current, self.model.frame()))
+        # …and the frame keys reach `_step_frame` from wherever the user is
+        # working. Window shortcuts, not just key propagation: the 3D view
+        # accepts the arrows to orbit its camera (pyqtgraph) and a
+        # QGraphicsView accepts them to nudge its scrollbars, so from the two
+        # panels the client corrects joints in they never reached the window
+        # at all. A focused line edit or spin box still keeps them — it
+        # claims them first, through ShortcutOverride.
+        from PySide6.QtGui import QKeySequence, QShortcut
+        for key in self.FRAME_KEYS:
+            sc = QShortcut(QKeySequence(key), self)
+            sc.setContext(Qt.ShortcutContext.WindowShortcut)
+            sc.activated.connect(lambda k=key: self._step_frame(k))
 
         self.model.frameChanged.connect(self._on_frame_changed)
         self.model.pose3dChanged.connect(self.view3d.set_pose)
@@ -904,15 +926,54 @@ class MainWindow(QMainWindow):
         # nudge the GL view to re-frame at the new size
         self.view3d.update()
 
+    #: Left/Right step one frame, Home/End jump to the ends of the take.
+    #: R12: the client asked for this on 2026-08-16 ("the left and right keys
+    #: on the keyboard should move you between frames") and we promised it the
+    #: same day. Until now the only key the window handled was Escape, and the
+    #: arrows stepped frames solely as a QListView side effect — i.e. only
+    #: while the filmstrip had focus, which is exactly what clicking into a
+    #: camera panel to drag a joint takes away.
+    FRAME_KEYS = (Qt.Key.Key_Left, Qt.Key.Key_Right,
+                  Qt.Key.Key_Home, Qt.Key.Key_End)
+
+    @guarded
+    def _step_frame(self, key) -> bool:
+        """Act on one of FRAME_KEYS. True if this key moved the frame."""
+        # A local import: this function's diff stays inside this function.
+        from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit
+
+        n = len(self.model.project.frames)
+        if key not in self.FRAME_KEYS or not n:
+            return False
+        # a number the user is typing owns its own arrows — stepping the
+        # frame out from under a half-entered marker size or height would put
+        # the next correction on a different frame than the one on screen.
+        # (Qt already withholds the shortcut from a focused line edit, which
+        # claims these keys via ShortcutOverride; this also covers the plain
+        # key-propagation path, and says the rule out loud.)
+        if isinstance(self.focusWidget(), (QAbstractSpinBox, QLineEdit)):
+            return False
+        step = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: 1}.get(key)
+        if step is not None:
+            self.model.set_frame(self.model.current + step)   # clamps itself
+        else:
+            self.model.set_frame(0 if key == Qt.Key.Key_Home else n - 1)
+        return True
+
     def keyPressEvent(self, event):
         if event.key() == Qt.Key.Key_Escape and self._fs_active:
             self._toggle_fullscreen()
-        else:
+        elif not self._step_frame(event.key()):
             super().keyPressEvent(event)
 
     # --- refresh ---
     @guarded
     def _on_frame_changed(self, idx):
+        # the filmstrip is the frame indicator, so it follows every frame
+        # change and not just a click on itself (keyboard stepping, Home/End,
+        # a project load). `Timeline.select` is silent and is a no-op on the
+        # current row, so this cannot loop back through frameSelected.
+        self.timeline.select(idx)
         self._refresh_views()
         f = self.model.frame()
         # head3d must ride along or the character's head snaps back to riding

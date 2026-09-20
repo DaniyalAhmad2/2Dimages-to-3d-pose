@@ -1328,3 +1328,202 @@ def test_the_gui_export_has_no_overall_deadline_and_asks_for_the_idle_one(
     assert seen["timeout"] is None, "the GUI export must not be capped"
     assert seen["idle_timeout"] == 300
     assert seen["cancelled"] is not None, "Cancel is the guard that replaces it"
+
+
+# --- keyboard frame stepping and the filmstrip highlight (T2) -------------
+#
+# The client asked on 2026-08-16 for "the left and right keys on the keyboard
+# should move you between frames" (R12) and we answered the same day that we
+# would do it. Until now the only key the window handled was Escape, and the
+# arrows stepped frames solely as a QListView side effect — i.e. only while
+# the filmstrip itself had focus, which is exactly what clicking into a camera
+# panel to drag a joint takes away.
+
+
+def _long_project(n=14):
+    """The 3-frame fixture, lengthened, so 'frame 12' means something."""
+    import copy
+    data, rig, gt = _project_with_rig()
+    while len(data.frames) < n:
+        f = copy.deepcopy(data.frames[0])
+        f.frame_id = f"{len(data.frames):04d}"
+        data.frames.append(f)
+    return data, rig, gt
+
+
+def _keyboard_window(n=14):
+    from PySide6.QtWidgets import QApplication
+
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+    data, rig, _ = _long_project(n)
+    win = MainWindow(ProjectModel(data, rig))
+    win.show()
+    win.activateWindow()
+    QApplication.processEvents()
+    return win
+
+
+def _press(win, key):
+    """Send a key into the WINDOW the way the platform does.
+
+    Not straight at a widget: what the client complained about is what the
+    app does with an arrow key while some panel — a camera view, the 3D
+    preview — holds the focus, and that is decided before the focus widget
+    ever sees the key.
+    """
+    from PySide6.QtTest import QTest
+    QTest.keyClick(win.windowHandle(), key)
+
+
+def test_left_and_right_step_frames_from_the_camera_panels(qapp):
+    from PySide6.QtCore import Qt
+    win = _keyboard_window()
+    win.model.set_frame(4)
+
+    win.cam_left.view.setFocus()
+    _press(win, Qt.Key.Key_Right)
+    assert win.model.current == 5, "the arrows died in the camera panel"
+    _press(win, Qt.Key.Key_Left)
+    assert win.model.current == 4
+
+
+def test_left_and_right_step_frames_from_the_3d_view_and_the_sidebar(qapp):
+    from PySide6.QtCore import Qt
+    win = _keyboard_window()
+    win.model.set_frame(4)
+
+    win.view3d.setFocus()
+    _press(win, Qt.Key.Key_Right)
+    assert win.model.current == 5
+
+    win.btn_save.setFocus()
+    _press(win, Qt.Key.Key_Right)
+    assert win.model.current == 6
+
+
+def test_home_and_end_go_to_the_first_and_last_frame(qapp):
+    from PySide6.QtCore import Qt
+    win = _keyboard_window()
+    win.model.set_frame(4)
+
+    win.cam_left.view.setFocus()
+    _press(win, Qt.Key.Key_End)
+    assert win.model.current == len(win.model.project.frames) - 1
+    _press(win, Qt.Key.Key_Home)
+    assert win.model.current == 0
+
+
+def test_the_arrows_stop_at_the_ends_of_the_take(qapp):
+    from PySide6.QtCore import Qt
+    win = _keyboard_window()
+    win.model.set_frame(0)
+    win.cam_left.view.setFocus()
+
+    _press(win, Qt.Key.Key_Left)
+    assert win.model.current == 0
+
+    win.model.set_frame(len(win.model.project.frames) - 1)
+    _press(win, Qt.Key.Key_Right)
+    assert win.model.current == len(win.model.project.frames) - 1
+
+
+def test_a_spinbox_keeps_its_own_arrow_keys(qapp):
+    """The scale field is a number the user is typing: stepping the frame out
+    from under it would put the correction on the wrong frame."""
+    from PySide6.QtCore import Qt
+    win = _keyboard_window()
+    win.model.set_frame(4)
+
+    win.sidebar.scale_value.setFocus()
+    _press(win, Qt.Key.Key_Right)
+    _press(win, Qt.Key.Key_Home)
+
+    assert win.model.current == 4, "the window stole the field's arrow keys"
+
+
+def test_escape_still_leaves_the_fullscreen_3d_view(qapp):
+    from PySide6.QtCore import Qt
+    win = _keyboard_window(n=3)
+    win._toggle_fullscreen()
+    assert win._fs_active
+
+    win.cam_left.view.setFocus()
+    _press(win, Qt.Key.Key_Escape)
+    assert not win._fs_active
+
+
+def test_the_filmstrip_highlight_follows_the_frame(qapp):
+    """`_on_frame_changed` never moved it, so the strip pointed at the last
+    thumbnail the user clicked while the app showed another frame."""
+    win = _keyboard_window()
+    heard = []
+    win.timeline.frameSelected.connect(heard.append)
+
+    win.model.set_frame(12)
+
+    assert win.timeline.currentIndex().row() == 12
+    assert heard == [], "the highlight must not re-drive the model"
+
+
+def test_the_show_filter_filters_the_strip(qapp):
+    """The dropdown came from the client's own dashboard layout and was wired
+    to nothing at all."""
+    win = _keyboard_window(n=6)
+    for i, status in enumerate(
+            ["green", "amber", "red", "amber", "green", "red"]):
+        win.timeline.set_status(i, status)
+
+    win.timeline_header.show_combo.setCurrentIndex(2)       # Missing
+
+    assert [i for i in range(6) if not win.timeline.isRowHidden(i)] == [2, 5]
+    win.timeline_header.show_combo.setCurrentIndex(0)       # All Frames
+    assert not any(win.timeline.isRowHidden(i) for i in range(6))
+
+
+def test_a_hand_correction_shows_on_the_filmstrip(qapp):
+    """The legend promises a 'Corrected' dot and the filter offers it; only
+    the model knows a correction happened."""
+    from PySide6.QtCore import QPointF
+    win = _keyboard_window(n=6)
+    win.model.set_frame(3)
+
+    pl = win.model.frame().kp2d[CAM_LEFT][6]
+    win.cam_left.view._on_released(6, QPointF(float(pl[0] + 30), float(pl[1])))
+
+    assert win.timeline.status(3) == "corrected"
+
+
+def test_an_undetected_joint_can_be_placed_and_is_recorded(qapp):
+    """End to end: the detector missed a joint, the user drags the
+    placeholder onto the limb, and the model records a correction — the path
+    that did not exist while an undetected joint was invisible."""
+    from PySide6.QtCore import QPointF
+    win = _keyboard_window(n=3)
+    win.model.set_frame(1)
+    gone = 9
+    win.model.frame().kp2d[CAM_LEFT][gone] = np.nan
+    win._refresh_overlays()
+
+    item = win.cam_left.view._joints[gone]
+    assert item.is_placeholder and item.isVisible()
+
+    item.signals.released.emit(gone, QPointF(640.0, 480.0))
+
+    assert win.model.frame().corrected[CAM_LEFT][gone]
+    assert not np.isnan(win.model.frame().kp2d[CAM_LEFT][gone]).any()
+    assert not win.cam_left.view._joints[gone].is_placeholder, \
+        "a placed joint must render as an ordinary corrected handle"
+
+
+def test_undoing_a_correction_clears_the_filmstrip_dot(qapp):
+    from PySide6.QtCore import QPointF
+    win = _keyboard_window(n=6)
+    win.model.set_frame(3)
+    pl = win.model.frame().kp2d[CAM_LEFT][6]
+    win.cam_left.view._on_released(6, QPointF(float(pl[0] + 30), float(pl[1])))
+    assert win.timeline.status(3) == "corrected"
+
+    win.model.undo()
+
+    assert win.timeline.status(3) != "corrected"

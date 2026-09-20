@@ -496,6 +496,7 @@ class CameraView(QGraphicsView):
     def wheelEvent(self, event):
         self.zoom(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
 
+
     # --- panning: left-drag on empty area pans; left-drag on a joint moves it ---
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton and not isinstance(
