@@ -382,16 +382,28 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_set_scale(self, real_height_m: float):
-        from PySide6.QtWidgets import QApplication
-        QApplication.setOverrideCursor(Qt.CursorShape.WaitCursor)
-        try:
-            applied = self.model.set_scale_from_height(real_height_m)
-        finally:
-            QApplication.restoreOverrideCursor()
-        if applied is None:
+        """Rescale the calibration so the subject comes out as measured.
+
+        A job like the others, and for the same reason: this rewrites the
+        calibration folder and then re-triangulates and re-fits every frame,
+        which under nothing but a wait cursor is the "Not Responding" the
+        worker module exists to remove. No Cancel — like the recompute it
+        wraps, the rescale is one answer about the whole take.
+        """
+        if self._busy():
             return
-        self._apply_view_orientation()   # the character is sized to the take
-        self._refresh_views(); self._refresh_timeline_status()
+
+        def job(report, cancelled):
+            report(0, 0, "Rescaling the calibration and recomputing the take…")
+            return self.model.set_scale_from_height(real_height_m)
+
+        with self.model.quiet():
+            applied = self._run_job("Set scale", job, cancellable=False)
+        if self._job_stopped(applied, "Setting the scale"):
+            return
+        if applied is None:
+            return                       # nothing to scale; the model said why
+        self._refresh_after_job()        # re-fits the character to the take
         self._refresh_calibration_status()
         self._mark_unsaved()
 

@@ -18,7 +18,7 @@ import pytest
 
 pytest.importorskip("PySide6")
 
-from tests.test_ui_smoke import _project_with_rig
+from tests.test_ui_smoke import _project_with_rig, _write_calibration
 
 
 @pytest.fixture(scope="module")
@@ -124,3 +124,65 @@ def test_the_flag_is_cleared_even_when_the_job_raises(qapp, monkeypatch):
     win._on_run_detection()          # @guarded turns it into a report
 
     assert win._job_running is False
+
+
+# --- the set-scale recompute is a job like the others -----------------------
+
+def test_setting_the_scale_runs_through_the_job_mechanism(qapp, monkeypatch,
+                                                          tmp_path):
+    """`set_scale_from_height` rewrites the calibration folder and then
+    re-triangulates and re-fits every frame. On the GUI thread, under nothing
+    but a wait cursor, that is the "Not Responding" the worker module exists
+    to remove — and `_on_recalibrate` already wraps the identical recompute.
+
+    No Cancel: like the recompute, the rescale is one answer about the whole
+    take, and a button that could only abort before the work started would be
+    the dead control the export used to have.
+    """
+    import pose3d.ui.main_window as main_window
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, _ = _project_with_rig()
+    _write_calibration(tmp_path, rig)
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    win = _window(model)
+    target = model.measured_subject_height() * 2.0
+
+    seen = {}
+
+    def capturing_run_job(parent, title, fn, cancellable=True):
+        seen["title"] = title
+        seen["cancellable"] = cancellable
+        # the model has to be quiet WHILE the job runs: it re-poses every
+        # frame, and repainting the window once per frame from a worker
+        # thread is both wasted and unsafe
+        seen["quiet"] = model._quiet
+        return fn(lambda *a: None, lambda: False)
+
+    monkeypatch.setattr(main_window, "run_job", capturing_run_job)
+
+    win._on_set_scale(target)
+
+    assert seen["cancellable"] is False
+    assert seen["quiet"] is True
+    assert model._quiet is False, "the model was left quiet after the job"
+    # and the answer the job computed is on screen, not just in the model
+    assert model.measured_subject_height() == pytest.approx(target, rel=1e-3)
+    assert win.saved_label.text().startswith("●")
+
+
+def test_a_scale_that_cannot_be_applied_changes_nothing(qapp, monkeypatch):
+    """`set_scale_from_height` returns None when there is nothing to measure
+    or the typed distance is nonsense. That is not an edit, so the window must
+    not mark the project unsaved over it."""
+    import pose3d.ui.main_window as main_window
+
+    win = _window()
+    win.model.set_scale_from_height = lambda h: None
+    monkeypatch.setattr(main_window, "run_job",
+                        lambda parent, title, fn, cancellable=True:
+                        fn(lambda *a: None, lambda: False))
+
+    win._on_set_scale(-1.0)
+
+    assert win.saved_label.text() == "✓ Project Saved"
