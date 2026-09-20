@@ -660,8 +660,15 @@ def face_protect(frame, head_source: str) -> tuple[int, ...]:
 
     Under the skull convention the HEAD joint and the nose are different
     detections (~86 px apart on frame 0 of the client take) and `corrected`
-    says nothing about the nose, so nothing is protected. Face points have no
-    `corrected` flag of their own, which is why this reads the joint's.
+    says nothing about the nose, so nothing is protected.
+
+    The JOINT's flag and not the nose's own `head_corrected`, even though the
+    face points now have one: this gate is about the pair the CANONICAL HEAD
+    forms, and it must return the same answer as `cross_view_rejection` gives
+    that joint or the two disagree about one detection — which is the defect
+    it was written for. Under this convention a HEAD drag sets both flags
+    anyway (`ui.model._resolve_joint` syncs the nose with its provenance), so
+    the two readings agree on every path a user can take.
 
     A separate, pure function because all four callers of `triangulate_face`
     must reach the same `head3d` from the same 2D, and this is the only thing
@@ -689,9 +696,12 @@ def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
 
     What it does NOT do is write a mask. `Frame.rejected` is a per-JOINT array
     the bone fit and the camera views read; the face points have no entry in
-    it, no `corrected` flag of their own and no dot colour to explain it —
-    their one override is `protect`, which the nose borrows from the HEAD
-    joint it IS under the COCO-17 convention (see `face_protect`). The
+    it and no dot colour to explain one — their one override is `protect`,
+    which the nose borrows from the HEAD joint it IS under the COCO-17
+    convention (see `face_protect`). They DO keep their own
+    `head_corrected`, but that records who placed a point, not whether the
+    two views agree about it, and a gate must not be overruled by the first
+    of those. The
     verdict lives only in the 3D: a refused pair is NaN, and the
     character falls back to the neck's own aim for that frame. `head2d` is
     left exactly as the detector and the user wrote it, so the next

@@ -297,6 +297,73 @@ def test_a_re_detect_keeps_a_hand_placed_face_point():
     assert np.allclose(f.head2d[L][1], 7.0), "...while the rest re-detected"
 
 
+class _FaceDetector:
+    """A face re-detect: new face points, no body pose."""
+    head_source = "nose"
+
+    def detect(self, image_bgr):
+        from pose3d.detect.base import Detection
+        return Detection(xy=np.zeros((NUM_JOINTS, 2)),
+                         scores=np.full(NUM_JOINTS, 0.5),
+                         head_xy=np.full((NUM_HEAD_KP, 2), 7.0),
+                         head_scores=np.full(NUM_HEAD_KP, 0.5))
+
+
+def test_a_head_dragged_under_the_nose_convention_survives_a_face_re_detect():
+    """Under COCO-17 the canonical HEAD and the nose ARE the same detection,
+    so a HEAD drag syncs the nose — and the sync recorded no flag.
+
+    "Re-detect face points only" then overwrote the hand-placed nose while
+    `kp2d[HEAD]` kept it: one physical point, two stored copies, disagreeing,
+    with the head basis built from the one the user did not place. The flag
+    MIRRORS the joint's, because it is the same detection and the same
+    provenance — so an undo of the drag takes it back too.
+    """
+    from pose3d.core.project import CAM_LEFT as L
+    from pose3d.core.skeleton import Joint
+
+    m = _model_with_heads()
+    f = m.frame()
+    f.images = {CAM_LEFT: "l.png", CAM_RIGHT: "r.png"}
+    assert m.project.head_source == "nose"
+
+    head = int(Joint.HEAD)
+    x, y = f.kp2d[L][head]
+    m.set_joint_2d(L, head, float(x) + 40.0, float(y))
+    placed = f.head2d[L][0].copy()
+    assert f.head_corrected[L][0], "the synced nose was not recorded as placed"
+    assert not f.head_corrected[CAM_RIGHT][0], "the other view was not edited"
+
+    m.redetect_head(_FaceDetector(), lambda p: np.zeros((4, 4, 3), np.uint8))
+
+    assert np.allclose(f.head2d[L][0], placed), \
+        "the re-detect overwrote a nose the user placed through the HEAD dot"
+    assert np.allclose(f.kp2d[L][head], placed), "the two copies disagree"
+    assert np.allclose(f.head2d[L][1], 7.0), "...while the rest re-detected"
+
+
+def test_undoing_that_drag_takes_the_nose_flag_back_with_it():
+    """The flag says a human put it there, so taking the correction back must
+    clear it — otherwise the next re-detect protects a point the detector is
+    now free to replace."""
+    from pose3d.core.project import CAM_LEFT as L
+    from pose3d.core.skeleton import Joint
+
+    m = _model_with_heads()
+    f = m.frame()
+    head = int(Joint.HEAD)
+    x, y = f.kp2d[L][head]
+    m.set_joint_2d(L, head, float(x) + 40.0, float(y))
+    assert f.head_corrected[L][0]
+
+    m.undo()
+    assert not f.head_corrected[L][0]
+    assert not f.has_corrections()
+
+    m.redo()
+    assert f.head_corrected[L][0]
+
+
 def _recompute(m):
     """What the next Recompute press would do: the batch path, same rig."""
     from pose3d.pipeline import triangulate_project

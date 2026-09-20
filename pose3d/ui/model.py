@@ -727,6 +727,16 @@ class ProjectModel(QObject):
             for c in (CAM_LEFT, CAM_RIGHT):
                 if not np.isnan(f.head2d[c]).all():     # cam has face points
                     f.head2d[c][0] = f.kp2d[c][joint]
+                    # ...and the nose inherits the joint's PROVENANCE with its
+                    # position, because it is the same physical detection.
+                    # Without this, "Re-detect face points only" overwrote a
+                    # nose the user had placed through the HEAD dot while
+                    # `kp2d[HEAD]` kept it: one point, two stored copies,
+                    # disagreeing, with the head basis built from the one the
+                    # user did not place. Mirrored rather than set True, so an
+                    # undo — which re-enters here after clearing the joint's
+                    # flag — takes this one back with it.
+                    f.head_corrected[c][0] = bool(f.corrected[c][joint])
             # and through the same gate as any other face edit: the synced
             # nose is a cross-view pair like the rest, and a drag that pulls
             # it off its epipolar line must lose its 3D here too — unless the
