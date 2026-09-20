@@ -176,6 +176,7 @@ class MainWindow(QMainWindow):
         self._fs_active = False
         self._fs_split = self._fs_side = None
         self._migration_banner = None
+        self._job_running = False        # see `_busy` / `_run_job`
 
         self._wire()
         self._load_model()
@@ -468,6 +469,35 @@ class MainWindow(QMainWindow):
         self._refresh_quality()
         self._refresh_history()
 
+    def _busy(self) -> bool:
+        """True when a job is already running — and it says so.
+
+        Every long operation runs a nested event loop, so a click queued
+        behind a progress dialog (or behind the modal box a failure opens)
+        arrives while the first job is still alive. Without this, a second
+        Export started into the same folder while the first was being
+        cancelled, and a second detection ran against the same ProjectData —
+        the one thing that would corrupt a take rather than merely annoy.
+        """
+        if self._job_running:
+            self.statusBar().showMessage("A job is still running", 6000)
+            return True
+        return False
+
+    def _run_job(self, title: str, fn, cancellable: bool = True):
+        """`worker.run_job`, with the flag `_busy` reads.
+
+        Set and cleared HERE rather than in each slot: five slots each
+        remembering to clear it on every exit — including the ones a failure
+        takes — is five chances to lock the window for the rest of the
+        session.
+        """
+        self._job_running = True
+        try:
+            return run_job(self, title, fn, cancellable=cancellable)
+        finally:
+            self._job_running = False
+
     def _job_stopped(self, res, what: str) -> bool:
         """True when a job did not finish, having said so.
 
@@ -485,6 +515,8 @@ class MainWindow(QMainWindow):
     def _on_run_detection(self):
         from pose3d.geometry.character import (
             default_head_source, set_default_head_source)
+        if self._busy():
+            return
         det = self._ensure_detector()
         if det is None:
             return
@@ -498,10 +530,10 @@ class MainWindow(QMainWindow):
         # replaced with them, and nothing may be posed under the old convention.
         self._adopt_head_source(det)
         with self.model.quiet():
-            res = run_job(self, "Detection", lambda report, cancelled:
-                          self.model.redetect_all(det, self.load_image,
-                                                  on_progress=report,
-                                                  cancelled=cancelled))
+            res = self._run_job("Detection", lambda report, cancelled:
+                                self.model.redetect_all(det, self.load_image,
+                                                        on_progress=report,
+                                                        cancelled=cancelled))
         if self._job_stopped(res, "Detection"):
             # Every way this run can stop before `detect_project` commits — the
             # cancel, an unreadable image, a detector that throws — leaves the
@@ -534,6 +566,8 @@ class MainWindow(QMainWindow):
         this process at all.
         """
         from pose3d import diagnostics
+        if self._busy():
+            return
 
         def job(report, cancelled):
             report(0, 0, "Running the diagnostics…")
@@ -548,7 +582,7 @@ class MainWindow(QMainWindow):
                 raise Cancelled()
             return text
 
-        text = run_job(self, "Diagnostics", job)
+        text = self._run_job("Diagnostics", job)
         if isinstance(text, Exception):
             return                       # cancelled, or already reported
         # The child writes the file itself, as `--diagnose` does; naming it
@@ -559,14 +593,16 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_redetect_head(self):
+        if self._busy():
+            return
         det = self._ensure_detector()
         if det is None:
             return
         with self.model.quiet():
-            res = run_job(self, "Face re-detect", lambda report, cancelled:
-                          self.model.redetect_head(det, self.load_image,
-                                                   on_progress=report,
-                                                   cancelled=cancelled))
+            res = self._run_job("Face re-detect", lambda report, cancelled:
+                                self.model.redetect_head(det, self.load_image,
+                                                         on_progress=report,
+                                                         cancelled=cancelled))
         if self._job_stopped(res, "The face re-detect"):
             return
         self._refresh_after_job()
@@ -595,15 +631,17 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _on_recalibrate(self):
+        if self._busy():
+            return
         # No Cancel: the triangulation and the bone fit are ONE answer about
         # the whole take, and a button that could only abort before the work
         # started would be the same dead control the export used to have. So
         # `cancelled` is not passed on either — with no button behind it, it
         # is a flag that can never become True.
         with self.model.quiet():
-            res = run_job(self, "Recompute 3D", lambda report, cancelled:
-                          self.model.recompute_all(on_progress=report),
-                          cancellable=False)
+            res = self._run_job("Recompute 3D", lambda report, cancelled:
+                                self.model.recompute_all(on_progress=report),
+                                cancellable=False)
         if self._job_stopped(res, "The recompute"):
             return
         self._refresh_after_job()
@@ -703,6 +741,8 @@ class MainWindow(QMainWindow):
         from pose3d.ui import filedialog
         import numpy as np
         from pose3d.core.skeleton import NUM_JOINTS
+        if self._busy():
+            return
         frames = self.model.project.frames
         # How many 3D joints actually RECONSTRUCTED, on average — a joint the
         # gap fill interpolated is posed and exported, but it is not something
@@ -792,7 +832,7 @@ class MainWindow(QMainWindow):
 
         # Cancel really does stop it now: the export polls `cancelled` and
         # kills the Blender child, which is why the button is here at all.
-        res = run_job(self, "Export", job)
+        res = self._run_job("Export", job)
         if isinstance(res, Exception):
             return                       # already reported through guard
         if res.reason == "blender_cancelled":
