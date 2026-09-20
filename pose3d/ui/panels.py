@@ -625,8 +625,19 @@ class Sidebar(QWidget):
         self.row_res.set_value(res)
 
     def set_calibrated(self, ok: bool, warnings=()):
+        """The calibration headline, and the lines under it.
+
+        A line is a PROBLEM or a note (`calib.quality.is_problem`), and only a
+        problem may turn the headline amber. Every line this app produces for
+        the client's own rig — lenses estimated from the photo size, two
+        cameras of different resolutions, a marker tag at an arbitrary
+        rotation — is a note: the import worked, and saying "with problems"
+        over three of them is how a correct run came out looking broken.
+        """
+        from pose3d.calib.quality import is_problem
         warnings = list(warnings)
-        if ok and warnings:
+        problems = [w for w in warnings if is_problem(w)]
+        if ok and problems:
             self.calib_status.setText("⚠ Calibrated (with problems)")
             self.calib_status.setStyleSheet("color:#e0a33a;")
         else:
@@ -636,6 +647,10 @@ class Sidebar(QWidget):
         self.calib_warn.setText("\n\n".join(f"• {w}" for w in warnings))
         self.calib_warn.setToolTip("\n\n".join(warnings))
         self.calib_warn.setVisible(bool(warnings))
+        # ...and notes are not painted in the warning amber either: the colour
+        # is the first thing read and it must agree with the headline.
+        self.calib_warn.setStyleSheet(
+            f"color:{'#e0a33a' if problems else '#8a91a3'}; font-size:11px;")
 
     def show_levelling_note(self, on: bool, source: str = "subject",
                             spread_deg: float | None = None,
