@@ -527,6 +527,66 @@ def test_setting_the_scale_from_a_measured_height_rescales_the_rig(qapp,
     assert report["world_tag_id"] == 15, "the provenance was thrown away"
 
 
+def test_setting_the_scale_rescales_every_stored_length(qapp, tmp_path):
+    """A scale is a scale: every metric length the project stores moves by it.
+
+    Only the rig translations and `report["marker_length_m"]` were scaled, so
+    after "Set scale" the project held records of the same physical quantities
+    that contradicted each other by exactly the factor: project.json still
+    asserted the pre-rescale marker edge, report.json still claimed the old
+    baseline for extrinsics it was written beside, and `camera_motion_check`
+    still reported a camera wobble in millimetres measured at the old size —
+    with its `moved` verdict thresholded there too.
+    """
+    import json
+
+    from pose3d.core.io_project import load_project
+    from pose3d.ui.model import ProjectModel
+
+    data, rig, gt = _project_with_rig()
+    data.marker_length = 0.05
+    calib = _write_calibration(tmp_path, rig)
+    (calib / "report.json").write_text(json.dumps({
+        "marker_length_m": 0.05,
+        "baseline_m": 0.40,
+        "branch_pair_scores": {"L0R0": {"baseline_m": 0.40,
+                                        "relpose_spread_deg": 1.5}},
+        "camera_motion_check": {
+            CAM_LEFT: {"n_frames": 9, "max_rotation_deg": 0.2,
+                       "max_centre_mm": 25.0, "moved": False},
+            CAM_RIGHT: {"n_frames": 0, "max_rotation_deg": None,
+                        "max_centre_mm": None, "moved": None}},
+        "residual_rms_px": {CAM_LEFT: 0.4, CAM_RIGHT: 0.5},
+        "convergence_deg": 33.0,
+        "world_tag_id": 15}))
+
+    model = ProjectModel(data, rig, project_dir=str(tmp_path))
+    factor = model.set_scale_from_height(model.measured_subject_height() * 1.25)
+    assert factor == pytest.approx(1.25, rel=1e-6)
+    model.save()
+
+    assert load_project(tmp_path).marker_length == pytest.approx(0.0625)
+    report = json.loads((calib / "report.json").read_text())
+    assert report["marker_length_m"] == pytest.approx(0.0625)
+    assert report["baseline_m"] == pytest.approx(0.50)
+    assert report["branch_pair_scores"]["L0R0"]["baseline_m"] == \
+        pytest.approx(0.50)
+    # a millimetre length scales too — and its verdict was thresholded at the
+    # old size, so it has to be re-taken: 25 mm becomes 31.25, over the 30 mm
+    # warning threshold
+    motion = report["camera_motion_check"]
+    assert motion[CAM_LEFT]["max_centre_mm"] == pytest.approx(31.25)
+    assert motion[CAM_LEFT]["moved"] is True
+    assert motion[CAM_RIGHT] == {"n_frames": 0, "max_rotation_deg": None,
+                                 "max_centre_mm": None, "moved": None}
+
+    # ...and everything a similarity cannot touch is left exactly as it was
+    assert report["residual_rms_px"] == {CAM_LEFT: 0.4, CAM_RIGHT: 0.5}
+    assert report["convergence_deg"] == 33.0
+    assert report["branch_pair_scores"]["L0R0"]["relpose_spread_deg"] == 1.5
+    assert report["world_tag_id"] == 15
+
+
 def test_setting_the_scale_keeps_a_recorded_vertical(qapp, tmp_path):
     """The recorded vertical is a DIRECTION; a scale cannot touch it, and
     re-saving the rig must not quietly drop it — the 3D view and the export

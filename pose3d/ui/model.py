@@ -334,10 +334,18 @@ class ProjectModel(QObject):
         return factor
 
     def rescale_calibration(self, factor: float) -> None:
-        """Multiply the rig's translations (and marker length) by `factor`.
+        """Multiply the rig's translations — and every stored length — by
+        `factor`.
 
         Re-persists the calibration folder and recomputes, so the 3D view,
         the export and the next open all agree about the new size.
+
+        `project.marker_length` is scaled here because it is a SECOND record
+        of the tag edge the extrinsics were scaled by, beside report.json's:
+        scaling only the report left project.json asserting 50 mm for the same
+        physical tag the calibration folder now called 53.7 mm, which is
+        exactly the silent reversion `set_scale_from_height` says the scaling
+        exists to prevent.
         """
         if self.rig is None:
             self.statusMessage.emit("No calibration loaded — nothing to scale")
@@ -346,6 +354,9 @@ class ProjectModel(QObject):
         for cam in CAMERAS:
             self.rig.ext[cam].t = np.asarray(
                 self.rig.ext[cam].t, float) * factor
+        if self.project.marker_length is not None:
+            self.project.marker_length = float(
+                self.project.marker_length) * factor
         self._persist_rig(factor)
         self.recompute_all()
 
@@ -353,7 +364,7 @@ class ProjectModel(QObject):
         """Write the rescaled rig back, keeping the calibration's provenance.
 
         `save_rig` alone would drop report.json's evidence, so the report is
-        read, its one length-valued field scaled, and handed back. The
+        read, its length-valued fields scaled, and handed back. The
         recorded vertical is a DIRECTION, which a scale cannot touch: it is
         carried through the same report (`save_rig` copies it into
         extrinsics.json), so the folder is written once rather than written
@@ -388,9 +399,9 @@ class ProjectModel(QObject):
             calib_dir / "report.json",
             "The calibration's report.json could not be read ({reason}), so "
             "the rescaled calibration is saved without its marker provenance.")
+        if report is not None:
+            _rescale_report(report, factor)
         if report is not None and report.get("marker_length_m") is not None:
-            report["marker_length_m"] = float(
-                report["marker_length_m"]) * factor
             report["marker_length_source"] = (
                 f"rescaled in-app by {factor:.4f}x from a measured distance")
         if report is not None and report.get("world_up") is None and before:
@@ -1037,6 +1048,38 @@ def _body_height(poses: np.ndarray) -> float:
              for p, v in ((q, ~np.isnan(q).any(1)) for q in upright)
              if v.sum() >= 2]
     return float(np.median(spans)) if spans else float("nan")
+
+
+def _rescale_report(report: dict, factor: float) -> None:
+    """Scale every metric length a calibration report records, in place.
+
+    BY UNIT, not by a list of keys: the report is a provenance record that
+    grows, and scaling "its one length-valued field" left `baseline_m` (and
+    the per-branch one beside it) claiming the pre-rescale size of the very
+    extrinsics.json written in the same call, and `camera_motion_check`'s
+    `max_centre_mm` reporting a camera wobble measured at the old scale. A
+    key's suffix is what says it is a length: `_m` (metres) and `_mm`
+    (millimetres) scale; `_px`, `_deg` and every count do not, because a
+    similarity changes no image measurement and no angle.
+
+    `moved` is re-taken from the scaled displacement: it is a verdict about a
+    length against `resolve.MOTION_WARN_MM`, so leaving it as it was would
+    report "the cameras held still" about a wobble that is now over the
+    threshold (or the reverse).
+    """
+    from pose3d.calib.resolve import MOTION_WARN_DEG, MOTION_WARN_MM
+
+    for key, value in report.items():
+        if isinstance(value, dict):
+            _rescale_report(value, factor)
+        elif (isinstance(value, (int, float)) and not isinstance(value, bool)
+                and isinstance(key, str)
+                and (key.endswith("_m") or key.endswith("_mm"))):
+            report[key] = float(value) * factor
+    if report.get("max_centre_mm") is not None:
+        rot = report.get("max_rotation_deg") or 0.0
+        report["moved"] = bool(float(rot) > MOTION_WARN_DEG
+                               or report["max_centre_mm"] > MOTION_WARN_MM)
 
 
 def _report(on_progress, label: str) -> None:
