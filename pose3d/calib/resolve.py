@@ -325,11 +325,13 @@ def first_readable_pair(project: ProjectData, load_image, skipped=None):
 
 
 def summarise_skipped(skipped) -> str:
-    """One sentence naming the pairs a calibration could not read.
+    """One sentence naming the frames a calibration could not read.
 
     Appended to a message that is already a sentence, hence the leading
     space. The naming itself is `pipeline.summarise_unreadable`, shared with
-    the detection, which skips the same photos for the same reason.
+    the detection, which skips the same photos for the same reason; the
+    clause here is the COST, and for a calibration it is the whole frame —
+    it needs both views to see the same tag.
     """
     note = summarise_unreadable(skipped, "the calibration used the rest")
     return f" {note}" if note else ""

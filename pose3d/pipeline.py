@@ -95,18 +95,22 @@ def read_frame_image(frame, cam: str, load_image, skipped=None):
 
 
 def summarise_unreadable(skipped, what: str) -> str:
-    """One sentence naming the pairs `what` could not read ("" for none).
+    """One sentence naming the frames `what` could not read ("" for none).
 
-    `what` names the pass, because the same list is reported by the
-    calibration and by the detection and the user needs to know which one
-    lost the pair.
+    The sentence states only the fact every caller shares — these frames had
+    a photo that could not be read — and `what` states the COST, because the
+    cost differs: the calibration loses the whole frame (it needs both views
+    to see the same tag), while the detection keeps the view it could read
+    and leaves the other one missing. "N image pair(s) were skipped"
+    overstated that second case to the one person who has to decide whether
+    to re-import.
     """
     if not skipped:
         return ""
     frames = sorted({s["frame"] for s in skipped}, key=_frame_order)
     shown = ", ".join(frames[:5]) + (", …" if len(frames) > 5 else "")
-    return (f"{len(frames)} image pair(s) were skipped because a photo could "
-            f"not be read ({shown}); {what}. "
+    return (f"{len(frames)} frame(s) had a photo that could not be read "
+            f"({shown}); {what}. "
             f"The first was: {skipped[0]['reason']}")
 
 

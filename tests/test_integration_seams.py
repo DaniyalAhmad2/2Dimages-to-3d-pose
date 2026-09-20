@@ -462,6 +462,29 @@ def test_a_build_with_no_face_model_is_still_named_as_the_reason(tmp_path):
     assert data.frames[2].frame_id in joined, said
 
 
+def test_the_skip_sentence_does_not_claim_the_whole_pair_was_lost(tmp_path):
+    """A skip costs one (frame, camera) — the readable half of the pair IS
+    detected — so "N image pair(s) were skipped" overstated the loss to the
+    one person who has to decide whether to re-import.
+
+    The sentence says what is true of every caller: those frames had a photo
+    that could not be read. What it COST is the caller's own clause, because
+    the calibration does lose the whole frame while the detection keeps the
+    view it could read.
+    """
+    from pose3d.pipeline import summarise_unreadable
+
+    note = summarise_unreadable(
+        [{"frame": "0007", "camera": CAM_LEFT, "reason": "0 bytes"}],
+        "the import kept the rest")
+
+    assert "pair(s) were skipped" not in note
+    assert "1 frame(s) had a photo that could not be read (0007)" in note
+    assert "the import kept the rest" in note
+    assert "The first was: 0 bytes" in note
+    assert summarise_unreadable([], "anything") == ""
+
+
 def test_a_loader_that_returns_none_is_skipped_by_detection_too(tmp_path):
     """`cv2.imread` answers None where `read_image` raises, and the tools and
     `pose3d.quality` still pass a plain `cv2.imread`."""
