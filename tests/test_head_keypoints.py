@@ -416,44 +416,53 @@ def test_a_face_point_without_a_detection_is_never_drawn():
     assert not any(vis.values()), "the joints toggle overrode Nose mode"
 
 
-def test_an_undetected_body_joint_is_never_drawn_either():
-    """The same rule for the canonical joints, which never had it.
+def test_an_undetected_body_joint_is_a_placeholder_never_a_measurement():
+    """The canonical joints, under the ruling that superseded hiding them.
 
-    `set_show_joints` gated a joint on `not np.isnan(it.pos().x())`, and that
-    is never False: `set_pose` skips `setPos` for a NaN joint, so the item
-    keeps the last FINITE position it was ever given and the guard passes
-    every time. Toggling joints off and back on therefore re-showed every
-    undetected joint as a draggable dot at a stale position — a point the
-    cameras never saw, sitting where it used to be, where a drag would write
-    a hand correction out of nothing.
+    This test used to require an undetected joint to stay INVISIBLE, because
+    `set_show_joints` gated it on `not np.isnan(it.pos().x())` — never False,
+    since `set_pose` skipped `setPos` for a NaN joint — so toggling the dots
+    off and on re-showed it as an ordinary draggable dot at a stale position,
+    a point the cameras never saw where a drag would write a hand correction
+    out of nothing.
+
+    Hiding it, though, is what made the frames the tool exists for (occlusion,
+    extreme poses) the ones the user could NOT fix: an invisible item is not
+    hit-tested, and dragging is the only way into a correction. So the joint
+    is drawn again — as an explicit placeholder, dashed and hollow and saying
+    "not detected — drag to place", which is a thing to place, not a stale
+    measurement. The rest of the old rule stands: the toggle still only hides
+    and un-hides, and a frame that DOES see the joint draws it normally.
     """
     p = _face_panel()
     xy = np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None], (1, 2)) * 10 + 5
     scores = np.full(NUM_JOINTS, 0.9)
     p.view.set_pose(xy, scores)                     # every joint detected...
     assert all(it.isVisible() for it in p.view._joints)
+    assert not any(it.is_placeholder for it in p.view._joints)
 
     gone = 3
     xy = xy.copy()
     xy[gone] = np.nan                               # ...and now one is not
     p.view.set_pose(xy, scores)
-    assert not p.view._joints[gone].isVisible()
-    assert not np.isnan(p.view._joints[gone].pos().x()), \
-        "this test is pointless unless the item holds a stale finite position"
+    item = p.view._joints[gone]
+    assert item.isVisible() and item.is_placeholder
+    assert "not detected" in item.toolTip()
 
     p.view.set_show_joints(False)
+    assert not item.isVisible()
     p.view.set_show_joints(True)
-    assert not p.view._joints[gone].isVisible(), \
-        "the joints toggle resurrected an undetected joint at a stale position"
-    assert all(p.view._joints[j].isVisible()
-               for j in range(NUM_JOINTS) if j != gone), \
-        "the toggle failed to bring the detected joints back"
+    assert item.is_placeholder, \
+        "the joints toggle turned a placeholder into an ordinary dot"
+    assert all(p.view._joints[j].isVisible() for j in range(NUM_JOINTS)), \
+        "the toggle failed to bring the joints back"
 
-    # a later frame that DOES see it draws it again: the flag is per frame,
-    # not a latch that outlives the dropout
+    # a later frame that DOES see it draws it normally again: the placeholder
+    # is per frame, not a latch that outlives the dropout
     p.view.set_pose(np.tile(np.arange(NUM_JOINTS, dtype=float)[:, None],
                             (1, 2)) * 10 + 5, scores)
     assert p.view._joints[gone].isVisible()
+    assert not p.view._joints[gone].is_placeholder
 
 
 def test_frame_change_delivers_head3d_to_the_3d_view():
