@@ -7,6 +7,7 @@ in CI. The tests below are about the two properties that make it worth
 anything: it answers those questions, and it never fails to be produced.
 """
 import os
+import re
 import subprocess
 import sys
 import time
@@ -306,21 +307,68 @@ def test_both_install_instructions_name_the_same_short_path():
         assert "C:\\Pose3D" in _install_steps(doc), doc
 
 
+_ONEDRIVE_FOLDER = re.compile(r"(?<!Docker )\bDesktop\b|\bDocuments\b")
+#: What makes naming the folder a warning rather than an instruction.
+_NEGATION = re.compile(r"avoid|\bnot\b|never|\bout of\b|instead of", re.I)
+#: What stops an earlier negation from governing the folder name: a contrast
+#: ("not Program Files, BUT the Desktop") or the end of the sentence it was in.
+_NEGATION_ENDS = re.compile(
+    r"\bbut\b|\bhowever\b|\bthough\b|\bexcept\b|\brather than\b"
+    r"|\binstead\b(?! of)|[.!?](\s|$)", re.I)
+
+
 def _recommends_a_onedrive_folder(line: str) -> bool:
     """True if this line points the client AT Desktop or Documents.
 
-    Naming them is fine — as the folders to keep out of. What is checked is
-    the few words immediately in front of the name, not the whole line: "some-
-    where writable — Desktop or Documents, not Program Files" carries a "not"
-    and still sends the client to the folder that breaks the app.
-    """
-    import re
+    Naming them is fine — as the folders to keep out of. So each mention is
+    read against the negation nearest in front of it, and only while that
+    negation still governs: "somewhere writable — Desktop or Documents, not
+    Program Files" has its "not" after the folder names, and "not Program
+    Files, but the Desktop" has a contrast in between. Both send the client to
+    the folder that breaks the app, and both are recommendations here.
 
-    hit = re.search(r"(?<!Docker )\bDesktop\b|\bDocuments\b", line)
-    if not hit:
-        return False
-    before = line[max(0, hit.start() - 40):hit.start()]
-    return not re.search(r"avoid|\bnot\b|never|instead of|out of", before, re.I)
+    Deliberately strict in one direction: a negation that a line wrap has
+    carried onto the previous line reads as a recommendation and fails the
+    test, which costs a rewording. The other way round would ship the sentence
+    the client followed into a launch failure.
+    """
+    for hit in _ONEDRIVE_FOLDER.finditer(line):
+        before = line[:hit.start()]
+        negations = list(_NEGATION.finditer(before))
+        if not negations:
+            return True
+        if _NEGATION_ENDS.search(before[negations[-1].end():]):
+            return True
+    return False
+
+
+#: The heuristic's own fixtures. The first line is what README.md really said
+#: while the client could not open the app; the second is the "not X, but Y"
+#: shape a whole-line or fixed-window check waves through.
+READS_AS_A_RECOMMENDATION = (
+    "extract it somewhere writable — Desktop or Documents, **not** Program Files —",
+    "Do not put it in Program Files, but the Desktop is fine.",
+    "Do not extract it to C:\\Pose3D. Put it on the Desktop.",
+    "Extract it to Documents.",
+)
+READS_AS_A_WARNING = (
+    "   we test. Do **not** extract to Desktop, Documents or any other folder",
+    "   Do NOT run it from inside the .zip. Avoid Desktop, Documents and anything",
+    "Avoid folders OneDrive syncs (often Desktop and Documents):",
+    "do not put it on the Desktop or in Documents — those are the folders "
+    "OneDrive syncs",
+    "a short path on C: instead of the Desktop",
+    "You need [Docker Desktop](https://www.docker.com/products/docker-desktop/).",
+)
+
+
+def test_the_rule_about_those_folders_reads_the_sentence_the_way_a_client_does():
+    """The install steps are only as good as the check that holds them, so the
+    check is tested on the sentences it exists to tell apart."""
+    for line in READS_AS_A_RECOMMENDATION:
+        assert _recommends_a_onedrive_folder(line), f"let through: {line!r}"
+    for line in READS_AS_A_WARNING:
+        assert not _recommends_a_onedrive_folder(line), f"flagged: {line!r}"
 
 
 def test_neither_document_recommends_the_folders_that_break_it():
