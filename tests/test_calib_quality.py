@@ -53,15 +53,19 @@ def test_level_calibration_reports_nothing():
 
 def test_world_frame_not_vertical_is_reported():
     """The world frame's up comes from one arbitrarily-rotated marker tag, so
-    the user has to be told the 3D view is levelling on the subject instead —
-    and what that costs (a lean held all take reads as upright)."""
+    the user has to be told upright is being taken from the subject instead —
+    what that costs (a lean held all take reads as upright), and the one thing
+    that would change it (a tag on the floor next time)."""
     rig = _rig((_tipped_cam((-0.3, -3, 1.5)), _tipped_cam((0.3, -3, 1.5))),
                _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True),
                _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True))
     assert world_up_tilt(rig) > 60.0
     msgs = " ".join(check_rig(rig)).lower()
-    assert "off vertical" in msgs
-    assert "levels on the subject" in msgs
+    assert "away from upright" in msgs             # the number, in plain words
+    assert "from the subject's own body" in msgs   # which vertical is in use
+    assert "lay one tag flat on the floor" in msgs # the one action it implies
+    # ...and none of the jargon it used to be written in
+    assert "world frame" not in msgs and "nominal" not in msgs
 
 
 def test_assumed_intrinsics_are_reported_as_a_note_with_one_action():
@@ -114,7 +118,7 @@ def test_the_clients_own_rig_reads_as_calibrated_with_notes():
     assert notes, "a rig with guessed lenses should still say so"
     assert not any(is_problem(n) for n in notes)
     # the tag frame's own tilt is not a problem once the view is not using it
-    assert "off vertical" not in " ".join(notes)
+    assert "away from upright" not in " ".join(notes)
 
 
 def test_a_real_problem_is_still_a_problem():
@@ -159,8 +163,8 @@ def test_a_recorded_vertical_in_use_makes_the_tilt_a_non_event():
     recorded = (np.array([0.0, 0.0, 1.0]), "camera pair + tag row", 9.0)
 
     assert check_rig(rig, recorded) == []
-    # ...and without one, the old message stands unchanged
-    assert "levels on the subject" in " ".join(check_rig(rig))
+    # ...and without one, the line about where upright comes from stands
+    assert "from the subject's own body" in " ".join(check_rig(rig))
 
 
 def test_a_vertical_too_uncertain_to_use_is_named_as_unused():
@@ -174,11 +178,11 @@ def test_a_vertical_too_uncertain_to_use_is_named_as_unused():
     too_wide = (np.array([0.0, 0.0, 1.0]), "camera pair + tag row", 25.0)
 
     msgs = " ".join(check_rig(rig, too_wide))
-    assert "levels on the subject" in msgs
+    assert "from the subject's own body" in msgs
     assert "±25°" in msgs and "20°" in msgs     # why it is not being used
     # ...and just inside the gate it IS used, and the tilt stops being news
     ok = (np.array([0.0, 0.0, 1.0]), "camera pair + tag row", 19.0)
-    assert "off vertical" not in " ".join(check_rig(rig, ok))
+    assert check_rig(rig, ok) == []
 
 
 def test_an_unverified_vertical_does_not_change_what_the_tilt_costs():
@@ -192,5 +196,5 @@ def test_an_unverified_vertical_does_not_change_what_the_tilt_costs():
                _intr(dist=[0.1, 0, 0, 0, 0], f=1500, measured=True))
     unverified = (np.array([0.0, 0.0, 1.0]), "camera up", None)
     msgs = " ".join(check_rig(rig, unverified))
-    assert "levels on the subject" in msgs
+    assert "from the subject's own body" in msgs
     assert "±" not in msgs                     # nothing to put a number on

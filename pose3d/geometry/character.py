@@ -1348,7 +1348,9 @@ class Character:
 
         Grounding on the sole beneath the ankle, rather than on whichever mesh
         vertex is lowest this frame, is what stops the figure bobbing against
-        the grid; see `pose3d.ui.view3d.ground_datum`.
+        the grid; see `pose3d.geometry.placement.ground_datum`, which is where
+        that rule lives now that the view, the export metrics and the fidelity
+        tool all call one copy of it.
         """
         return self.ankle_sole_drop / self._frame_scale(up_pose, valid)
 

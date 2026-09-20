@@ -147,17 +147,20 @@ def check_rig(rig, world_up=None) -> list[CalibrationNote]:
         why = ""
         if world_up is not None and world_up[0] is not None \
                 and world_up[2] is not None:
-            why = (f" A vertical was recorded at calibration (from the "
-                   f"{world_up[1]}), but its estimates disagree by "
-                   f"±{world_up[2]:.0f}° — wider than the "
-                   f"{RECORDED_UP_MAX_SPREAD_DEG:.0f}° the 3D view will "
-                   f"accept — so it is not being used.")
+            why = (f" (An upright direction was recorded when this take was "
+                   f"calibrated, from the {world_up[1]}, but those estimates "
+                   f"disagree with each other by ±{world_up[2]:.0f}° — too "
+                   f"far apart to trust, over the "
+                   f"{RECORDED_UP_MAX_SPREAD_DEG:.0f}° limit — so it is not "
+                   f"being used.)")
         msgs.append(CalibrationNote(
-            f"The calibration's own up is {tilt:.0f}° off vertical, which is "
-            f"normal: the world frame comes from one marker tag and a tag's "
-            f"rotation is arbitrary. The 3D view levels on the subject "
-            f"instead, so a lean held for the whole take will read as "
-            f"upright.{why}"))
+            f"Which way is up is being judged from the subject's own body, "
+            f"not from the marker tag: the tag sits {tilt:.0f}° away from "
+            f"upright, which is normal, since a tag can be stuck up at any "
+            f"angle. The cost is that a lean the subject holds for the whole "
+            f"take will be shown standing straight. To have upright come "
+            f"from the room instead, lay one tag flat on the floor in the "
+            f"next shoot.{why}"))
 
     assumed = [cam for cam, k in rig.intr.items() if looks_assumed(k)]
     if assumed:
