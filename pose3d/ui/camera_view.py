@@ -282,6 +282,10 @@ class CameraView(QGraphicsView):
 
         `filled` flags joints whose 3D was interpolated across a one-frame
         dropout (pipeline.fill_gaps); they are drawn as hollow rings.
+
+        A joint this view has no detection for (NaN) is not dropped: it gets
+        a dashed PLACEHOLDER handle to drag onto the limb — see the NaN
+        branch below and `_placeholder_pos`.
         """
         self._scores = np.asarray(scores, float)
         self._corrected = corrected
@@ -305,6 +309,7 @@ class CameraView(QGraphicsView):
             # suppress the move signal while we set position programmatically
             # (QGraphicsItem is not a QObject; the Signal lives on item.signals)
             item.signals.blockSignals(True)
+            self._joint_shown[j] = True
             if np.isnan(p).any():
                 # The detector found nothing for this joint HERE. Hiding it
                 # was the same as deleting it: an invisible QGraphicsItem is
@@ -315,11 +320,9 @@ class CameraView(QGraphicsView):
                 # this view (else the middle of the picture), and let him drag
                 # it onto the limb: that drag commits through the ordinary
                 # `released` path, so the model records it as a correction.
-                self._joint_shown[j] = True
                 item.is_placeholder = True
                 item.setPos(self._placeholder_pos(j))
             else:
-                self._joint_shown[j] = True
                 item.is_placeholder = False
                 item.setPos(float(p[0]), float(p[1]))
                 self._last_seen[j] = QPointF(float(p[0]), float(p[1]))
@@ -508,7 +511,6 @@ class CameraView(QGraphicsView):
 
     def wheelEvent(self, event):
         self.zoom(1.15 if event.angleDelta().y() > 0 else 1 / 1.15)
-
 
     # --- panning: left-drag on empty area pans; left-drag on a joint moves it ---
     def mousePressEvent(self, event):
