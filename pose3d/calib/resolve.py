@@ -31,7 +31,7 @@ from pose3d.calib.extrinsics import (
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
 from pose3d.pipeline import (
-    CalibratedRig, _frame_order, read_frame_image, summarise_unreadable)
+    CalibratedRig, read_frame_image, summarise_unreadable)
 
 # ArUco dictionaries to try, most likely first (the client's tags are 6x6).
 _DICT_NAMES = [
@@ -293,14 +293,13 @@ def _approx_intrinsics(image: np.ndarray) -> Intrinsics:
 # --------------------------------------------------------------------------
 # tag observations
 # --------------------------------------------------------------------------
-#: This frame's image for `cam`, or None with the reason recorded.
-#:
-#: THE rule for every pass over a take's photographs, and it lives in
-#: `pipeline` because two passes each having their own is what the import
-#: broke on: the calibration skipped a 0-byte OneDrive placeholder and the
-#: detection right after it raised on the same file, so the import ended with
-#: "Import failed" and nothing written. Imported under the old private name
-#: so this module's own callers below read unchanged.
+# This frame's image for `cam`, or None with the reason recorded — THE rule
+# for every pass over a take's photographs, and it lives in `pipeline`
+# because two passes each having their own is what the import broke on: the
+# calibration skipped a 0-byte OneDrive placeholder and the detection right
+# after it raised on the same file, so the import ended with "Import failed"
+# and nothing written. Bound to the old private name so this module's own
+# callers below read unchanged.
 _read_frame_image = read_frame_image
 
 

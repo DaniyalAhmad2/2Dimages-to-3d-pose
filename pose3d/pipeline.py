@@ -698,11 +698,10 @@ def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
     the bone fit and the camera views read; the face points have no entry in
     it and no dot colour to explain one — their one override is `protect`,
     which the nose borrows from the HEAD joint it IS under the COCO-17
-    convention (see `face_protect`). They DO keep their own
-    `head_corrected`, but that records who placed a point, not whether the
-    two views agree about it, and a gate must not be overruled by the first
-    of those. The
-    verdict lives only in the 3D: a refused pair is NaN, and the
+    convention (see `face_protect`). They DO keep a `head_corrected` flag of
+    their own, but that records who placed a point, not whether the two views
+    agree about where it is, and a gate must not be overruled by the first of
+    those. The verdict lives only in the 3D: a refused pair is NaN, and the
     character falls back to the neck's own aim for that frame. `head2d` is
     left exactly as the detector and the user wrote it, so the next
     calibration — or a drag that reconciles the pair — reinstates the point

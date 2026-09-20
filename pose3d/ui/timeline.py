@@ -5,7 +5,6 @@ thumbnail and a status dot. currentChanged drives frame selection.
 """
 from __future__ import annotations
 
-import numpy as np
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QColor, QPixmap, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
