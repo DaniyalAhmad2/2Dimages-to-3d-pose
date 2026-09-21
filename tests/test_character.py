@@ -124,6 +124,51 @@ def test_a_missing_toe_leaves_the_foot_exactly_as_before():
 
 
 @needs_character()
+def test_a_foot_edge_weighs_one_in_the_scale_fit():
+    """An EXTREMITY edge weighs 1 in the uniform-scale fit, whatever its
+    parent weighs.
+
+    The legs weigh double there — feet not reaching the floor is the mismatch
+    the eye picks up first — and an edge takes the larger of its two ends'
+    weights, so the ankle→toe edge inherited the ankle's 2. A foot is not a
+    leg: one point each, often cropped, and it must not pull the whole
+    character's size around. Design section 3: "the two foot edges enter the
+    least squares with weight 1 (not the ankles' 2)".
+    """
+    from pose3d.geometry.bonefit import measure_bone_lengths
+    from pose3d.geometry.character import Character, _SCALE_WEIGHTS
+    ch = Character()
+    pose = sample_skeleton_3d()
+    # feet far longer than the rig's, so the weight they carry is legible in
+    # the fitted scale
+    for ankle, toe in ((Joint.LEFT_ANKLE, Joint.LEFT_TOE),
+                       (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE)):
+        pose[toe] = pose[ankle] + [0.0, 0.45, 0.0]
+    got = ch.fit_to_subject(pose[None])
+
+    sub = measure_bone_lengths(pose[None])
+    rig = ch.rig_bone_lengths()
+    toes = (int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE))
+
+    def fitted(foot_w):
+        """The same weighted least squares with the foot edges at `foot_w`."""
+        num = den = 0.0
+        for (a, b), rig_len in rig.items():
+            s = sub.get((a, b))
+            if not s or not np.isfinite(s):
+                continue
+            w = foot_w if b in toes else max(_SCALE_WEIGHTS.get(a, 1.0),
+                                             _SCALE_WEIGHTS.get(b, 1.0))
+            num += w * s * rig_len
+            den += w * s * s
+        return num / den
+
+    assert got == pytest.approx(fitted(1.0), rel=1e-12)
+    assert got != pytest.approx(fitted(2.0), rel=1e-9), \
+        "the foot edge is still carrying the ankle's weight"
+
+
+@needs_character()
 def test_pose_bone_matrices_reproduce_lbs():
     """The bone matrices sent to Blender must reproduce the live-view skinning
     exactly (setting pose_bone.matrix = M drives the identical deform), so the

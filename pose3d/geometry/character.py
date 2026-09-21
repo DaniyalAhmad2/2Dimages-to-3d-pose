@@ -44,7 +44,7 @@ from pathlib import Path
 import numpy as np
 
 from pose3d.core.skeleton import (
-    BONES, CORE_INDEX, Joint, NUM_HEAD_KP, NUM_JOINTS,
+    BONES, CORE_INDEX, EXTREMITY_JOINTS, Joint, NUM_HEAD_KP, NUM_JOINTS,
 )
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
@@ -410,6 +410,14 @@ _HEAD_FROM_RIG = {
 # is the mismatch the eye picks up first.
 _SCALE_WEIGHTS = {Joint.LEFT_KNEE: 2.0, Joint.RIGHT_KNEE: 2.0,
                   Joint.LEFT_ANKLE: 2.0, Joint.RIGHT_ANKLE: 2.0}
+
+# ...but an edge that ENDS at an extremity weighs 1 whatever its parent weighs.
+# An edge takes the larger of its two ends' weights, so ankle->toe would have
+# inherited the ankle's 2 and let one foot point — a single keypoint, often
+# cropped, and the shortest edge in the skeleton — pull the whole character's
+# size around twice as hard as the shin above it. The child decides, because
+# what the edge MEASURES is the extremity.
+_EXTREMITY_INDEX = frozenset(int(j) for j in EXTREMITY_JOINTS)
 
 
 def _align(a, b, ref=None):
@@ -807,7 +815,8 @@ class Character:
 
         A single UNIFORM scale, so the character changes size but never shape.
         It is the least-squares best match between the subject's median bone
-        lengths and the rig's own, weighted toward the legs. Fitting once per
+        lengths and the rig's own, weighted toward the legs and never toward
+        an extremity (`_SCALE_WEIGHTS`, `_EXTREMITY_INDEX`). Fitting once per
         take also stops the character pulsing: the scale used to be recomputed
         per frame from whichever joints were visible, so it jumped whenever the
         ankles dropped out.
@@ -824,7 +833,9 @@ class Character:
             sub_len = sub.get(key)
             if not sub_len or not np.isfinite(sub_len) or sub_len < 1e-9:
                 continue
-            w = max(_SCALE_WEIGHTS.get(key[0], 1.0), _SCALE_WEIGHTS.get(key[1], 1.0))
+            w = (1.0 if key[1] in _EXTREMITY_INDEX
+                 else max(_SCALE_WEIGHTS.get(key[0], 1.0),
+                          _SCALE_WEIGHTS.get(key[1], 1.0)))
             num += w * sub_len * rig_len
             den += w * sub_len * sub_len
         self._scale = float(num / den) if den > 1e-12 else None
