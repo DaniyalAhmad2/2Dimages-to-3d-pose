@@ -1102,11 +1102,16 @@ def test_bake_reproduces_the_shipped_asset(tmp_path):
 
     pose = sample_skeleton_3d()
     valid = ~np.isnan(pose).any(1)
-    va, _, ja = Character(Path(blend).with_suffix(".npz")).pose_and_joints(pose, valid)
+    ca = Character(Path(blend).with_suffix(".npz"))
+    va, _, ja = ca.pose_and_joints(pose, valid)
     vb, _, jb = Character(out).pose_and_joints(pose, valid)
     h = float(va[:, 2].max() - va[:, 2].min())
     assert np.abs(va - vb).max() / h < 1e-3
-    assert np.abs(ja - jb).max() / h < 1e-6
+    # over the joints the rig SOURCES: the toes hang off `foot.L/R`, which
+    # `_JOINT_FROM_RIG` does not read, so both rigs report them NaN — that is
+    # the two agreeing, but a NaN in the difference poisons the max.
+    sourced = ~np.isnan(np.asarray(ca.rest_joints(), float)).any(1)
+    assert np.abs(ja[sourced] - jb[sourced]).max() / h < 1e-6
 
 
 def test_rig_proportions_are_human():
