@@ -1166,7 +1166,11 @@ class Character:
             return self._scale
         core = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[CORE_INDEX]
         vpts = core[np.asarray(valid, bool)[CORE_INDEX]]
-        our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
+        # a frame whose ONLY valid joints are toes measures nothing: since the
+        # height became core-only, "some joints are valid" stopped implying
+        # "there is a height", and `ground_drop` calls this with no guard.
+        our_h = (float(vpts[:, 2].max() - vpts[:, 2].min())
+                 if vpts.size else 0.0) or 1.0
         return self.rig_h / our_h
 
     def _skin_matrices(self, up_pose, valid, head_pts=None):

@@ -1609,3 +1609,18 @@ def test_a_detected_toe_does_not_resize_the_character():
     assert ch._scale is None, "this measures the per-frame fallback"
     assert ch._frame_scale(pose, valid) == pytest.approx(
         ch._frame_scale(cropped, ~np.isnan(cropped).any(1)))
+
+
+def test_a_pose_with_nothing_but_toes_does_not_raise():
+    """`_frame_scale` measures the core set, so "some joints are valid" no
+    longer means "the height is measurable" — only the toes being valid
+    leaves it nothing to measure. `ground_drop` calls it with no guard of its
+    own, so an empty slice here is a crash in the 3D view, not a NaN.
+    """
+    ch = _ch()
+    pose = sample_skeleton_3d()
+    valid = np.zeros(pose.shape[0], bool)
+    valid[[int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]] = True
+
+    assert np.isfinite(ch._frame_scale(pose, valid))
+    assert np.isfinite(ch.ground_drop(pose, valid))
