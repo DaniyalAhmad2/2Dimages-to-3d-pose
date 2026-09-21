@@ -344,3 +344,61 @@ def test_a_new_log_is_stamped_and_never_backed_up(tmp_path):
     assert [c.joint for c in _read_corrections(tmp_path)] == [face_kp_id(1), 16]
     with sqlite3.connect(tmp_path / "corrections.sqlite") as conn:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == CORRECTIONS_SCHEMA
+
+
+def test_a_log_whose_rows_already_sit_at_the_fixed_base_is_only_stamped(tmp_path):
+    """The half-migrated state a killed build can leave behind: rows already
+    moved, `user_version` still 0. Moving them a SECOND time — to 185-189,
+    where nothing lives — is what the bounded predicate makes impossible: at
+    or above the base is already migrated, whatever the version says."""
+    from pose3d.core.io_project import (
+        CORRECTIONS_SCHEMA, LEGACY_BACKUP, _read_corrections)
+    from pose3d.core.skeleton import face_kp_id
+    _legacy_log(tmp_path, [("0001", "left", 6, 1, 2, 3, 4, ""),
+                           ("0001", "left", face_kp_id(0), 1, 2, 3, 4, ""),
+                           ("0002", "right", face_kp_id(4), 1, 2, 3, 4, "")])
+
+    got = _read_corrections(tmp_path)
+
+    assert [c.joint for c in got] == [6, face_kp_id(0), face_kp_id(4)]
+    assert not (tmp_path / LEGACY_BACKUP).exists(), \
+        "nothing was rewritten, so nothing needed a backup"
+    with sqlite3.connect(tmp_path / "corrections.sqlite") as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CORRECTIONS_SCHEMA
+
+
+def test_a_migration_killed_before_its_stamp_still_migrates_exactly_once(tmp_path):
+    """The rows and the version stamp are ONE transaction.
+
+    As two, a process killed between them left the face rows at the fixed
+    base with the version still 0, and the next open moved them again — the
+    client's eye and ear corrections landing 85 ids past anything that
+    exists. The kill is simulated by making the stamp itself fail.
+    """
+    from pose3d.core.io_project import (
+        CORRECTIONS_DB, _migrate_corrections, _read_corrections)
+    from pose3d.core.skeleton import face_kp_id
+
+    class _Killed(Exception):
+        pass
+
+    class _DiesOnTheStamp(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.strip().upper().startswith("PRAGMA USER_VERSION ="):
+                raise _Killed(sql)
+            return super().execute(sql, *args)
+
+    _legacy_log(tmp_path, [("0001", "left", 15, 1, 2, 3, 4, ""),
+                           ("0002", "right", 19, 1, 2, 3, 4, "")])
+    path = tmp_path / CORRECTIONS_DB
+    conn = sqlite3.connect(path, factory=_DiesOnTheStamp)
+    try:
+        _migrate_corrections(path, conn)
+    except _Killed:
+        pass
+    else:                                    # pragma: no cover - the guard
+        raise AssertionError("the stamp did not run")
+    conn.close()
+
+    assert [c.joint for c in _read_corrections(tmp_path)] == [face_kp_id(0),
+                                                              face_kp_id(4)]

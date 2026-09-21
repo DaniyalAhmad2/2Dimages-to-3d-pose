@@ -251,27 +251,43 @@ def _migrate_corrections(path: Path, conn: sqlite3.Connection) -> int:
     """Bring a log up to CORRECTIONS_SCHEMA; returns the rows rewritten.
 
     Runs on every open and costs one PRAGMA when there is nothing to do. A
-    log at version 0 that holds rows at or above the legacy joint count is
-    an old log whose face rows are about to be misread as body joints: it is
-    copied to LEGACY_BACKUP first (never overwritten if that exists), then
-    those rows move to the fixed base. A fresh, empty log is just stamped.
+    log at version 0 that holds rows in the OLD face band — at or above the
+    legacy joint count but below the fixed base — is an old log whose face
+    rows are about to be misread as body joints: it is copied to
+    LEGACY_BACKUP first (never overwritten if that exists), then those rows
+    move to the base. A fresh, empty log is just stamped.
+
+    Twice-safe in two ways, because the thing being rewritten is the
+    client's own work and a second pass would move it 85 ids past anything
+    that exists. The rows and the stamp are ONE transaction, so a process
+    killed mid-migration leaves the log exactly as it found it; and the band
+    is bounded above, so a row already at the base is never touched again
+    whatever the version says — a log half-migrated by an older build (rows
+    moved, version still 0) is therefore only stamped.
     """
     version = int(conn.execute("PRAGMA user_version").fetchone()[0])
     if version >= CORRECTIONS_SCHEMA:
         return 0
+    band = (_LEGACY_NUM_JOINTS, FACE_KP_BASE)
     n_old = int(conn.execute(
-        "SELECT COUNT(*) FROM corrections WHERE joint >= ?",
-        (_LEGACY_NUM_JOINTS,)).fetchone()[0])
+        "SELECT COUNT(*) FROM corrections WHERE joint >= ? AND joint < ?",
+        band).fetchone()[0])
     if n_old:
         backup = path.with_name(LEGACY_BACKUP)
         if not backup.exists():
             conn.commit()
             shutil.copy2(path, backup)
-        with conn:
-            conn.execute(
-                "UPDATE corrections SET joint = ? + (joint - ?) WHERE joint >= ?",
-                (FACE_KP_BASE, _LEGACY_NUM_JOINTS, _LEGACY_NUM_JOINTS))
+    # ONE transaction: `PRAGMA user_version` lives in the database header and
+    # rolls back with the UPDATE, so the rows and the version that describes
+    # them can never disagree on disk. (The UPDATE opens the transaction; the
+    # PRAGMA joins it. With nothing to move there is no transaction to join
+    # and the stamp stands alone, which is all it has to do.)
     with conn:
+        if n_old:
+            conn.execute(
+                "UPDATE corrections SET joint = ? + (joint - ?) "
+                "WHERE joint >= ? AND joint < ?",
+                (FACE_KP_BASE, _LEGACY_NUM_JOINTS, *band))
         conn.execute(f"PRAGMA user_version = {CORRECTIONS_SCHEMA}")
     return n_old
 
