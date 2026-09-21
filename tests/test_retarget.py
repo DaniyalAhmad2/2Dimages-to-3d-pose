@@ -25,6 +25,20 @@ def _ch(**kw):
     return Character(**kw)
 
 
+def _assert_rig_joints_finite(ch, joints):
+    """Every joint the rig can SOURCE comes back finite.
+
+    `pose_and_joints` states its own contract — "entries the rig cannot supply
+    are NaN" — and the toes are the first canonical joints that answers: they
+    hang off `foot.L/R`, which `_JOINT_FROM_RIG` does not read. So the check is
+    against the rig's own rest pose rather than against all NUM_JOINTS, and it
+    widens by itself the day the rig gains a source for them.
+    """
+    assert joints is not None
+    sourced = ~np.isnan(np.asarray(ch.rest_joints(), float)).any(1)
+    assert not np.isnan(np.asarray(joints, float)[sourced]).any()
+
+
 def _lean(pose, deg):
     a = np.radians(deg)
     R = np.array([[1, 0, 0], [0, np.cos(a), -np.sin(a)], [0, np.sin(a), np.cos(a)]])
@@ -257,7 +271,7 @@ def test_ik_pole_degenerate_falls_back_to_rest_bend():
     collinear = sub.copy()
     collinear[int(Joint.LEFT_KNEE)] = (hip + ankle) / 2.0     # exactly on the axis
     got = ch.posed_joints(collinear, ~np.isnan(collinear).any(1))
-    assert not np.isnan(got).any()
+    _assert_rig_joints_finite(ch, got)
 
     missing = sub.copy()
     missing[int(Joint.LEFT_KNEE)] = np.nan
@@ -688,7 +702,8 @@ def test_missing_head_leaves_the_neck_inherited(mode):
     pose[int(Joint.HEAD)] = np.nan
     skin, *_ = ch._skin_matrices(pose, ~np.isnan(pose).any(1))
     assert np.allclose(skin[ch.role["neck"]], skin[ch.role["chest"]])
-    assert not np.isnan(ch.posed_joints(pose, ~np.isnan(pose).any(1))).any()
+    _assert_rig_joints_finite(
+        ch, ch.posed_joints(pose, ~np.isnan(pose).any(1)))
 
 
 def test_in_nose_mode_the_ears_do_not_matter():
@@ -1031,7 +1046,7 @@ def test_sparse_pose_still_skins():
           int(Joint.LEFT_WRIST)]] = np.nan
     verts, faces, joints = ch.pose_and_joints(pose, ~np.isnan(pose).any(1))
     assert verts is not None and not np.isnan(verts).any()
-    assert joints is not None and not np.isnan(joints).any()
+    _assert_rig_joints_finite(ch, joints)
 
 
 # --- the drawn skeleton ----------------------------------------------------

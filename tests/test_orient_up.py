@@ -8,7 +8,7 @@ subject's own body line instead, and the UI says that is what it did.
 import numpy as np
 import pytest
 
-from pose3d.core.skeleton import Joint
+from pose3d.core.skeleton import NUM_JOINTS, Joint
 from pose3d.geometry.orient import (
     _frame_up, de_tilt_matrix, sequence_up,
 )
@@ -51,7 +51,7 @@ def test_levelling_stands_the_subject_up_whatever_the_world_frame():
 
 
 def test_no_usable_frames_returns_none():
-    assert sequence_up(np.full((2, 15, 3), np.nan)) is None
+    assert sequence_up(np.full((2, NUM_JOINTS, 3), np.nan)) is None
 
 
 def test_frame_up_ignores_the_nose():
@@ -462,7 +462,7 @@ def test_a_take_with_no_usable_poses_leaves_the_vertical_alone(tmp_path, recwarn
     save_rig(rig, calib, {"world_up": up.tolist(), "world_up_source": "camera up",
                           "world_up_spread_deg": spread})
 
-    blank = np.full((3, 15, 3), np.nan)
+    blank = np.full((3, NUM_JOINTS, 3), np.nan)
     assert sign_from_poses(up, blank) is None
     assert finalize_world_up(_project_with_poses(blank), calib) is None
     assert not [w for w in recwarn.list

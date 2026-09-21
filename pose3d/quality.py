@@ -59,6 +59,8 @@ BONE_NAMES: dict[tuple[int, int], str] = {
     (int(Joint.RIGHT_HIP), int(Joint.RIGHT_KNEE)): "R thigh",
     (int(Joint.LEFT_KNEE), int(Joint.LEFT_ANKLE)): "L shin",
     (int(Joint.RIGHT_KNEE), int(Joint.RIGHT_ANKLE)): "R shin",
+    (int(Joint.LEFT_ANKLE), int(Joint.LEFT_TOE)): "L foot",
+    (int(Joint.RIGHT_ANKLE), int(Joint.RIGHT_TOE)): "R foot",
 }
 
 # (label, left bone, right bone) — the same limb on both sides of one rigid
