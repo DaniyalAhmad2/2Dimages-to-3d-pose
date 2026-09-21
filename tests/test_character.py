@@ -118,7 +118,8 @@ def test_a_missing_toe_leaves_the_foot_exactly_as_before():
     valid = ~np.isnan(pose).any(1)
     skin = ch._skin_matrices(pose, valid)[0]
     for foot, shin in (("foot.L", "shin.L"), ("foot.R", "shin.R")):
-        assert np.allclose(skin[ch.role[foot]], skin[ch.role[shin]])
+        assert np.array_equal(skin[ch.role[foot]], skin[ch.role[shin]]), \
+            "an unseen toe leaves the foot on the shin's matrix bit for bit"
     j = ch.posed_joints(pose, valid)
     assert np.isfinite(j[Joint.LEFT_TOE]).all(), "the toe is read off the foot's tail"
 
