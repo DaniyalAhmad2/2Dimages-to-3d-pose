@@ -1169,7 +1169,8 @@ def _head_hint(project: ProjectData) -> str:
 
 def _recompute_note(stored: np.ndarray, now: np.ndarray) -> str:
     """The recompute-on-open sentence, with this take's own numbers."""
-    d = np.linalg.norm(now - stored, axis=2)
+    # take-wide numbers, so over the core set (as `quality.subject_height`)
+    d = np.linalg.norm(now[:, CORE_INDEX] - stored[:, CORE_INDEX], axis=2)
     d = d[np.isfinite(d)]
     if not d.size:
         return ""
@@ -1192,7 +1193,8 @@ def _body_height(poses: np.ndarray) -> float:
     up = sequence_up(poses)
     if up is None:
         return float("nan")
-    upright = poses @ de_tilt_matrix(up).T
+    # take-wide number, so over the core set (as `quality.subject_height`)
+    upright = (poses @ de_tilt_matrix(up).T)[:, CORE_INDEX]
     spans = [float(p[v, 2].max() - p[v, 2].min())
              for p, v in ((q, ~np.isnan(q).any(1)) for q in upright)
              if v.sum() >= 2]

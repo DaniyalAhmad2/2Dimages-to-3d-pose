@@ -262,8 +262,8 @@ the decisions it rests on, then the rulings made while it was implemented.
   used) and APPLIED to every joint, so a toe past the gate is still rejected — it just cannot
   widen the gate the body is judged by first. Cost if wrong: the rule lives in two layers, so a
   new take-wide number has to choose the core set in whichever layer computes it; and the
-  sidebar's "height" stays
-  head-to-ankle, about 5 % under the true sole-to-head figure — the definition it already had.
+  sidebar's "height" stays head-to-ankle, about 5 % under the true sole-to-head figure — the
+  definition it already had.
 - **`quality.BONE_NAMES` gained the two foot bones**, because it is a rig-wide invariant with one
   entry per `BONES` edge — the same kind of table as `bonefit._FALLBACK_LENGTHS` — not a take-wide
   number. The per-bone rows therefore name the feet; only the summary over them is core-only. Cost

@@ -1848,3 +1848,29 @@ def test_a_project_detected_before_the_toes_gets_one_hint(qapp):
         for cam in (CAM_LEFT, CAM_RIGHT):
             f.kp2d[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
     assert not ProjectModel(data3, rig3).predates_toes(), "COCO-17 cannot add toes"
+
+
+def test_the_recompute_banners_numbers_ignore_the_toes():
+    """The recompute-on-open banner quotes a median/max move and a % of the
+    figure's height — take-wide numbers, so over the core set like
+    `quality.subject_height`. The same take with its feet in frame must read
+    the same sentence."""
+    from pose3d.core.skeleton import Joint
+    from pose3d.ui.model import _body_height, _recompute_note
+
+    rng = np.random.default_rng(7)
+    stored = np.stack([sample_skeleton_3d() for _ in range(5)])
+    now = stored + rng.normal(0.0, 0.004, stored.shape)
+
+    toes = [int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]
+    cropped_stored, cropped_now = stored.copy(), now.copy()
+    cropped_stored[:, toes] = np.nan
+    cropped_now[:, toes] = np.nan
+
+    # a take whose toes moved a long way, and the same take with no toes
+    now[:, toes] += 0.5
+
+    assert _body_height(now) == pytest.approx(_body_height(cropped_now))
+    assert (_recompute_note(stored, now)
+            == _recompute_note(cropped_stored, cropped_now))
+    assert "% of the figure's height" in _recompute_note(stored, now)
