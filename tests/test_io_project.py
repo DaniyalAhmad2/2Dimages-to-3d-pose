@@ -405,3 +405,35 @@ def test_a_migration_killed_before_its_stamp_still_migrates_exactly_once(tmp_pat
 
     assert [c.joint for c in _read_corrections(tmp_path)] == [face_kp_id(0),
                                                               face_kp_id(4)]
+
+
+def test_a_fifteen_joint_project_loads_with_undetected_toes(tmp_path):
+    """Every project saved before the toes: 15 rows in every per-joint array.
+    They load with NaN toes, and — the one array that used to be truncated
+    instead of padded — a `corrected` flag vector of the full length."""
+    import json
+    from pose3d.core.skeleton import Joint
+    p = ProjectData(name="old", keypoint_model="halpe26", head_source="skull")
+    f = Frame(frame_id="0001")
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        f.kp2d[cam][:] = 1.0
+        f.corrected[cam][3] = True
+    p.frames.append(f)
+    save_project(p, tmp_path)
+    doc = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
+    fd = doc["frames"][0]
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        for key in ("kp2d", "scores", "kp2d_raw", "scores_raw", "corrected", "rejected"):
+            fd[key][cam] = fd[key][cam][:15]
+    for key in ("pose3d", "fitted3d", "filled"):
+        fd[key] = fd[key][:15]
+    (tmp_path / "project.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    g = load_project(tmp_path).frames[0]
+
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        assert g.kp2d[cam].shape == (NUM_JOINTS, 2)
+        assert np.isnan(g.kp2d[cam][Joint.LEFT_TOE]).all()
+        assert g.corrected[cam].shape == (NUM_JOINTS,) and g.corrected[cam][3]
+        assert not g.corrected[cam][Joint.LEFT_TOE]
+    assert g.pose3d.shape == (NUM_JOINTS, 3) and g.filled.shape == (NUM_JOINTS,)

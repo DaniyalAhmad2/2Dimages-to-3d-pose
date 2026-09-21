@@ -3,8 +3,9 @@ import numpy as np
 import pytest
 
 from pose3d.core.skeleton import (
-    BONES, COCO17_INDEX, DERIVED_MIDPOINT_PARENTS, HALPE26_HEAD_SOURCE,
-    HALPE26_INDEX, HALPE26_POLICY, HEAD_SOURCE, NUM_JOINTS, Joint,
+    BONES, COCO17_INDEX, CORE_INDEX, DERIVED_MIDPOINT_PARENTS,
+    HALPE26_HEAD_SOURCE, HALPE26_INDEX, HALPE26_POLICY, HEAD_SOURCE,
+    NUM_JOINTS, Joint,
     derive_joints, derived_joints, map_halpe26, rag_status,
 )
 
@@ -79,7 +80,7 @@ def _fake_halpe():
 
 
 def test_map_halpe26():
-    """The shipped policy: skull-vertex HEAD, derived NECK/PELVIS, no feet."""
+    """Shipped policy: skull-vertex HEAD, derived NECK/PELVIS, big toes only."""
     xy, sc = _fake_halpe()
     cxy, csc = map_halpe26(xy, sc)
 
@@ -108,10 +109,12 @@ def test_map_halpe26():
         assert np.allclose(cxy[joint], xy[COCO17_INDEX[name]])
         assert csc[joint] == sc[COCO17_INDEX[name]]
 
-    # the six foot keypoints have nowhere to go in the canonical set, and
-    # must not have leaked into some joint
-    for foot in ("left_big_toe", "right_big_toe", "left_small_toe",
-                 "right_small_toe", "left_heel", "right_heel"):
+    # the two big toes ARE mapped — one point per foot, the foot's direction
+    assert np.allclose(cxy[Joint.LEFT_TOE], xy[HALPE26_INDEX["left_big_toe"]])
+    assert np.allclose(cxy[Joint.RIGHT_TOE], xy[HALPE26_INDEX["right_big_toe"]])
+    assert csc[Joint.LEFT_TOE] == sc[HALPE26_INDEX["left_big_toe"]]
+    # the small toes and heels still have nowhere to go, and must not leak
+    for foot in ("left_small_toe", "right_small_toe", "left_heel", "right_heel"):
         assert not (cxy == xy[HALPE26_INDEX[foot]]).all(axis=1).any()
 
 
@@ -137,8 +140,11 @@ def test_head_neck_pelvis_policy():
     nose = map_halpe26(xy, sc, head="nose")
     assert np.allclose(nose[0][Joint.HEAD], xy[HALPE26_INDEX["nose"]])
     assert nose[1][Joint.HEAD] == sc[HALPE26_INDEX["nose"]]
-    # with head="nose" the mapping agrees with COCO-17's, joint for joint
-    assert np.allclose(nose[0], derive_joints(xy[:17], sc[:17])[0],
+    # with head="nose" the mapping agrees with COCO-17's over the core set,
+    # joint for joint — the toes are the one thing Halpe detects and COCO-17
+    # has no keypoint for, so the agreement is over CORE_JOINTS, not all 17
+    assert np.allclose(nose[0][CORE_INDEX],
+                       derive_joints(xy[:17], sc[:17])[0][CORE_INDEX],
                        equal_nan=True)
 
     # NECK/PELVIS: native is available but not shipped
@@ -201,3 +207,29 @@ def test_which_joints_a_layout_derives_is_the_policy_not_the_name():
     for joint, (a, b) in DERIVED_MIDPOINT_PARENTS.items():
         assert np.allclose(mapped[int(joint)],
                            0.5 * (mapped[int(a)] + mapped[int(b)]))
+
+
+def test_the_toes_are_appended_extremities_and_the_core_set_is_the_old_fifteen():
+    from pose3d.core.skeleton import (
+        CORE_INDEX, CORE_JOINTS, EXTREMITY_JOINTS, EXTREMITY_PARENT, BONES)
+    assert Joint.LEFT_TOE == 15 and Joint.RIGHT_TOE == 16 and NUM_JOINTS == 17
+    assert Joint.RIGHT_ANKLE == 14, "existing indices are a file format"
+    assert EXTREMITY_JOINTS == (Joint.LEFT_TOE, Joint.RIGHT_TOE)
+    assert CORE_JOINTS == tuple(Joint)[:15] and CORE_INDEX == list(range(15))
+    assert (Joint.LEFT_ANKLE, Joint.LEFT_TOE) in BONES
+    assert (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE) in BONES
+    assert EXTREMITY_PARENT == {Joint.LEFT_TOE: Joint.LEFT_ANKLE,
+                                Joint.RIGHT_TOE: Joint.RIGHT_ANKLE}
+
+
+def test_coco17_leaves_the_toes_undetected():
+    xy, sc = _fake_coco()
+    cxy, csc = derive_joints(xy, sc)
+    assert np.isnan(cxy[Joint.LEFT_TOE]).all() and np.isnan(cxy[Joint.RIGHT_TOE]).all()
+    assert csc[Joint.LEFT_TOE] == 0.0
+
+
+def test_every_bone_has_a_fallback_length():
+    from pose3d.geometry.bonefit import fallback_bone_lengths
+    lengths = fallback_bone_lengths()
+    assert set(lengths) == {(int(a), int(b)) for a, b in BONES}

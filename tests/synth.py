@@ -107,7 +107,7 @@ def cameras(geo) -> dict[str, tuple]:
 
 
 def sample_skeleton_3d(height=1.7):
-    """A plausible standing pose in canonical Joint order (15 joints), metres.
+    """A plausible standing pose in canonical Joint order (NUM_JOINTS joints), metres.
 
     Order matches pose3d.core.skeleton.Joint. `height` scales the whole figure
     about the ground plane, so the same pose serves both the 1.7 m human of
@@ -129,6 +129,8 @@ def sample_skeleton_3d(height=1.7):
         [0.11, 0.02, 0.52],   # RIGHT_KNEE
         [-0.12, 0.03, 0.08],  # LEFT_ANKLE
         [0.12, 0.03, 0.08],   # RIGHT_ANKLE
+        [-0.12, 0.20, 0.02],  # LEFT_TOE  (forward of the ankle, on the ground)
+        [0.12, 0.20, 0.02],   # RIGHT_TOE
     ], dtype=float)
     return pose * (height / 1.7)
 

@@ -211,7 +211,7 @@ def load_project(folder: str | Path) -> ProjectData:
             fr.scores_raw[c] = (_json_to_vec(raw_sc[c]) if raw_sc.get(c)
                                 else fr.scores[c].copy())
             fr.rejected[c] = _json_to_flags(rejected.get(c))
-            fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
+            fr.corrected[c] = _json_to_flags(fd["corrected"][c])
             fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
             fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)
             # absent before the key existed -> nothing was hand-placed, which

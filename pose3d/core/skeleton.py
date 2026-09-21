@@ -97,8 +97,11 @@ def extract_head(kp: np.ndarray, scores: np.ndarray):
 class Joint(IntEnum):
     """Canonical joint set used everywhere downstream of detection.
 
-    COCO-17 based; feet are intentionally excluded (they are unreliable when
-    the subject's feet are near/outside the frame).
+    COCO-17 based, plus the two big toes Halpe-26 detects — one point per
+    foot, so the foot has a direction (the client's build-17 question,
+    2026-09-21). Small toes and heels are still excluded. Members are
+    APPENDED, never inserted: the indices are the storage format of every
+    project.json and corrections.sqlite.
     """
     HEAD = 0          # Halpe-26: the skull vertex; COCO-17: the nose
     NECK = 1          # derived: midpoint(shoulders)
@@ -115,6 +118,8 @@ class Joint(IntEnum):
     RIGHT_KNEE = 12
     LEFT_ANKLE = 13
     RIGHT_ANKLE = 14
+    LEFT_TOE = 15     # Halpe-26: the left big toe; COCO-17: never detected
+    RIGHT_TOE = 16    # Halpe-26: the right big toe
 
 
 NUM_JOINTS = len(Joint)
@@ -137,7 +142,23 @@ BONES: list[tuple[Joint, Joint]] = [
     (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     (Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
     (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
+    (Joint.LEFT_ANKLE, Joint.LEFT_TOE),
+    (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE),
 ]
+
+#: The toes are EXTREMITIES: often cropped or hidden, one point each. They
+#: colour their own handle and dot and nothing else — every take-wide number
+#: and colour (`ui.model.frame_stat`, `quality.figure_height_px`, the
+#: timeline band, the joint-count messages) is computed over CORE_JOINTS, the
+#: set the app shipped with, so a take with its feet out of frame reads
+#: exactly as it did before the toes existed.
+EXTREMITY_JOINTS: tuple[Joint, ...] = (Joint.LEFT_TOE, Joint.RIGHT_TOE)
+CORE_JOINTS: tuple[Joint, ...] = tuple(j for j in Joint if j not in EXTREMITY_JOINTS)
+CORE_INDEX: list[int] = [int(j) for j in CORE_JOINTS]
+#: An extremity's parent (the ankle for a toe): where a camera view parks the
+#: placeholder for a toe it has never seen.
+EXTREMITY_PARENT: dict[Joint, Joint] = {
+    child: parent for parent, child in BONES if child in EXTREMITY_JOINTS}
 
 # Direct COCO-17 index for each canonical joint that maps 1:1 (derived = None).
 _DIRECT_FROM_COCO: dict[Joint, int] = {
@@ -175,6 +196,8 @@ MIXAMO_BONE: dict[Joint, str] = {
     Joint.RIGHT_KNEE: "mixamorig:RightLeg",
     Joint.LEFT_ANKLE: "mixamorig:LeftFoot",
     Joint.RIGHT_ANKLE: "mixamorig:RightFoot",
+    Joint.LEFT_TOE: "mixamorig:LeftToeBase",
+    Joint.RIGHT_TOE: "mixamorig:RightToeBase",
 }
 
 
@@ -201,8 +224,8 @@ def derive_joints(
     coco_xy = np.asarray(coco_xy, dtype=float).reshape(17, 2)
     coco_scores = np.asarray(coco_scores, dtype=float).reshape(17)
 
-    # NaN-init so unmapped joints (feet — COCO-17 has none) are excluded from
-    # triangulation rather than triangulated at (0, 0).
+    # NaN-init so unmapped joints (feet — COCO-17 has none, so the toes stay
+    # NaN) are excluded from triangulation rather than triangulated at (0, 0).
     xy = np.full((NUM_JOINTS, 2), np.nan, dtype=float)
     scores = np.zeros(NUM_JOINTS, dtype=float)
 
@@ -234,11 +257,14 @@ HALPE26_NAMES: list[str] = COCO17_NAMES + [
 HALPE26_INDEX: dict[str, int] = {n: i for i, n in enumerate(HALPE26_NAMES)}
 NUM_HALPE26 = len(HALPE26_NAMES)
 
-# The joints Halpe-26 and COCO-17 agree about, index for index. HEAD, NECK and
-# PELVIS are deliberately absent: those three are the policy (see map_halpe26).
+# The joints Halpe-26 and COCO-17 agree about, index for index, plus the two
+# big toes only Halpe has. HEAD, NECK and PELVIS are deliberately absent:
+# those three are the policy (see map_halpe26).
 _DIRECT_FROM_HALPE26: dict[Joint, int] = {
-    joint: idx for joint, idx in _DIRECT_FROM_COCO.items()
-    if joint is not Joint.HEAD
+    **{joint: idx for joint, idx in _DIRECT_FROM_COCO.items()
+       if joint is not Joint.HEAD},
+    Joint.LEFT_TOE: HALPE26_INDEX["left_big_toe"],
+    Joint.RIGHT_TOE: HALPE26_INDEX["right_big_toe"],
 }
 
 # Which Halpe index each policy takes for the three joints that have a choice.
@@ -297,8 +323,9 @@ def map_halpe26(kp: np.ndarray, scores: np.ndarray,
       and 0.08 mm at PELVIS) and are better conditioned (derived NECK
       epipolar 1.51 px against its parents' 3.86).
 
-    Feet (Halpe 20-25) are intentionally not mapped: the canonical joint set
-    has no foot joints.
+    The big toes (Halpe 20/21) map to `LEFT_TOE`/`RIGHT_TOE`; the small toes
+    and heels (22-25) are not mapped — one point per foot gives the foot a
+    direction, which is all the rig's foot bone can take.
 
     Parameters
     ----------
