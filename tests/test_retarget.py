@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pose3d.core.skeleton import BONES, Joint
+from pose3d.core.skeleton import BONES, CORE_INDEX, Joint
 from tests.gates import needs_character
 from tests.synth import rot_about as _rot_about, sample_skeleton_3d
 
@@ -36,6 +36,7 @@ def _assert_rig_joints_finite(ch, joints):
     """
     assert joints is not None
     sourced = ~np.isnan(np.asarray(ch.rest_joints(), float)).any(1)
+    assert sourced[CORE_INDEX].all(), "the rig must source every core joint"
     assert not np.isnan(np.asarray(joints, float)[sourced]).any()
 
 
@@ -1111,6 +1112,7 @@ def test_bake_reproduces_the_shipped_asset(tmp_path):
     # `_JOINT_FROM_RIG` does not read, so both rigs report them NaN — that is
     # the two agreeing, but a NaN in the difference poisons the max.
     sourced = ~np.isnan(np.asarray(ca.rest_joints(), float)).any(1)
+    assert sourced[CORE_INDEX].all(), "the rig must source every core joint"
     assert np.abs(ja[sourced] - jb[sourced]).max() / h < 1e-6
 
 
