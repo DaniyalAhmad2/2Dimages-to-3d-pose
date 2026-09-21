@@ -11,6 +11,7 @@ from pose3d.core.io_project import load_project, save_project
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, Frame, ProjectData
 from pose3d.core.skeleton import (
     COCO17_INDEX, HEAD_KP_NAMES, NUM_HEAD_KP, NUM_JOINTS, extract_head,
+    face_kp_id,
 )
 
 
@@ -178,7 +179,7 @@ def test_dragging_the_nose_updates_head3d_with_undo():
     before3d = f.head3d.copy()
     before2d = f.head2d[L].copy()
 
-    nose = NUM_JOINTS + 0                       # face point 0, offset convention
+    nose = face_kp_id(0)                       # face point 0, at the fixed base
     x, y = f.head2d[L][0]
     # 40 px ALONG the epipolar line (this rig's lines run near-horizontal):
     # a correction the two views still agree about, so the gate keeps it
@@ -207,7 +208,7 @@ def test_dragging_a_face_point_off_the_epipolar_line_drops_its_3d():
     m = _model_with_heads()
     f = m.frame()
     x, y = f.head2d[L][0]
-    m.set_joint_2d(L, NUM_JOINTS + 0, x, y + 200.0)      # across the lines
+    m.set_joint_2d(L, face_kp_id(0), x, y + 200.0)      # across the lines
 
     assert np.isnan(f.head3d[0]).all(), "a pair 200 px apart was triangulated"
     assert np.isfinite(f.head3d[1:]).all(), "the untouched face points were gated too"
@@ -249,13 +250,13 @@ def test_a_face_edit_is_a_correction_like_any_other(tmp_path):
     assert not f.has_corrections()
 
     x, y = f.head2d[L][0]
-    m.set_joint_2d(L, NUM_JOINTS + 0, x + 40.0, y)
+    m.set_joint_2d(L, face_kp_id(0), x + 40.0, y)
 
     assert f.head_corrected[L][0]
     assert f.has_corrections() and f.has_corrections(L)
     assert not f.corrected[L].any(), "a face edit must not flag a body joint"
     assert not f.has_corrections(CAM_RIGHT), "the other view was not edited"
-    assert [(c.cam, c.joint) for c in m.stack.log] == [(L, NUM_JOINTS + 0)]
+    assert [(c.cam, c.joint) for c in m.stack.log] == [(L, face_kp_id(0))]
 
     m.undo()
     assert not f.head_corrected[L][0] and not f.has_corrections()
@@ -287,7 +288,7 @@ def test_a_re_detect_keeps_a_hand_placed_face_point():
     f = m.frame()
     f.images = {CAM_LEFT: "l.png", CAM_RIGHT: "r.png"}
     x, y = f.head2d[L][0]
-    m.set_joint_2d(L, NUM_JOINTS + 0, x + 40.0, y)
+    m.set_joint_2d(L, face_kp_id(0), x + 40.0, y)
     placed = f.head2d[L][0].copy()
 
     detect_project(m.project, _Face(), lambda p: np.zeros((4, 4, 3), np.uint8),
@@ -439,7 +440,7 @@ def test_the_skull_convention_gives_the_nose_no_such_protection():
         "the skull convention synced the nose onto the HEAD vertex"
 
     x, y = f.head2d[L][0]
-    m.set_joint_2d(L, NUM_JOINTS + 0, x, y + 200.0)          # across the lines
+    m.set_joint_2d(L, face_kp_id(0), x, y + 200.0)          # across the lines
     assert np.isnan(f.head3d[0]).all(), \
         "the nose rode the HEAD joint's corrected flag past the face gate"
     assert np.isfinite(f.head3d[1:]).all(), "the untouched face points were gated"
@@ -504,10 +505,10 @@ def test_face_items_are_drawn_and_editable():
     p = _face_panel()
     assert len(p.view._face) == NUM_HEAD_KP, "all five face points are items"
     assert [it.joint_id for it in p.view._face] == list(FACE_KP_IDS)
-    assert FACE_KP_IDS[0] == NUM_JOINTS + HEAD_KP_INDEX["nose"]
+    assert FACE_KP_IDS[0] == face_kp_id(HEAD_KP_INDEX["nose"])
 
-    nose_id = NUM_JOINTS + HEAD_KP_INDEX["nose"]
-    eyes_ears = [NUM_JOINTS + k for k in range(1, NUM_HEAD_KP)]
+    nose_id = face_kp_id(HEAD_KP_INDEX["nose"])
+    eyes_ears = [face_kp_id(k) for k in range(1, NUM_HEAD_KP)]
 
     # the full matrix: head_source decides the nose dot, head_mode the rest
     for source in ("nose", "skull"):
@@ -535,13 +536,13 @@ def test_a_face_point_without_a_detection_is_never_drawn():
     head[2] = np.nan                            # a hidden eye stays hidden
 
     vis = _face_pose(p, "skull", "face", head)
-    assert not vis[NUM_JOINTS + 2]
-    assert vis[NUM_JOINTS + 1] and vis[NUM_JOINTS + 3] and vis[NUM_JOINTS + 4]
+    assert not vis[face_kp_id(2)]
+    assert vis[face_kp_id(1)] and vis[face_kp_id(3)] and vis[face_kp_id(4)]
 
     p.view.set_show_joints(False)
     p.view.set_show_joints(True)
     vis = {it.joint_id: it.isVisible() for it in p.view._face}
-    assert not vis[NUM_JOINTS + 2], "the joints toggle resurrected a NaN dot"
+    assert not vis[face_kp_id(2)], "the joints toggle resurrected a NaN dot"
 
     # and the same toggle may not resurrect a dot the MODE hides either
     _face_pose(p, "nose", "nose", head)

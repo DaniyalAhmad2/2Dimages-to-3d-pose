@@ -57,6 +57,30 @@ HEAD_KP_NAMES: list[str] = ["nose", "left_eye", "right_eye",
 NUM_HEAD_KP = len(HEAD_KP_NAMES)
 HEAD_KP_INDEX: dict[str, int] = {n: i for i, n in enumerate(HEAD_KP_NAMES)}
 
+#: Face keypoints share the body joints' integer id space — the correction
+#: stack, the camera views and the `joint` column of corrections.sqlite all
+#: address them with one int — at a FIXED offset. It used to be NUM_JOINTS
+#: itself, which made every stored eye and ear correction change meaning the
+#: day a body joint was appended (the toes, 2026-09-22). Body joints will
+#: never reach 100; this constant never changes again, and
+#: `io_project._migrate_corrections` moves the old rows here once.
+FACE_KP_BASE = 100
+
+
+def face_kp_id(k: int) -> int:
+    """The shared integer id of face keypoint `k` (0..NUM_HEAD_KP-1)."""
+    return FACE_KP_BASE + int(k)
+
+
+def is_face_kp(joint: int) -> bool:
+    """True for an id `face_kp_id` produced; False for any body joint."""
+    return int(joint) >= FACE_KP_BASE
+
+
+def face_kp_index(joint: int) -> int:
+    """The `k` behind a face id — the inverse of `face_kp_id`."""
+    return int(joint) - FACE_KP_BASE
+
 
 def extract_head(kp: np.ndarray, scores: np.ndarray):
     """(NUM_HEAD_KP, 2), (NUM_HEAD_KP,) face keypoints from a raw model output.

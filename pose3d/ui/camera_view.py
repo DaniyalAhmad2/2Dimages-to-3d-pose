@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from pose3d.core.skeleton import (
-    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS)
+    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS, face_kp_id,
+    face_kp_index)
 from pose3d.ui.model import STATE_OK
 from pose3d.ui.panels import (
     COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_label, accuracy_pct,
@@ -95,8 +96,8 @@ DASHED_STATES = ("missing",)
 # The face keypoints (nose, eyes, ears) that orient the character's head.
 # Drawn smaller and in one fixed accent colour: they are not part of the
 # skeleton, carry no accuracy banding, and exist to be nudged when the head
-# points the wrong way. Their item ids are offset by NUM_JOINTS — the single
-# convention the model and the correction stack share.
+# points the wrong way. Their item ids are `face_kp_id(k)` — the fixed base
+# the model and the correction stack share.
 #
 # An item exists for all five, but which of them the user SEES is decided per
 # frame by `set_pose` from the project's two head conventions, never here:
@@ -105,7 +106,7 @@ DASHED_STATES = ("missing",)
 # so a second dot on top of it would be one point drawn twice and draggable
 # to two places; and the eyes and ears steer nothing outside Face mode.
 FACE_COLOR = QColor(94, 200, 245)
-FACE_KP_IDS = tuple(range(NUM_JOINTS, NUM_JOINTS + NUM_HEAD_KP))
+FACE_KP_IDS = tuple(face_kp_id(k) for k in range(NUM_HEAD_KP))
 
 
 class _JointSignals(QObject):
@@ -189,7 +190,7 @@ class CameraView(QGraphicsView):
         self.setCursor(Qt.CursorShape.OpenHandCursor)   # hint: draggable to pan
         self._pixmap_item = None
         self._joints: list[JointItem] = []
-        self._face: list[JointItem] = []       # nose/eyes/ears, ids NUM_JOINTS..
+        self._face: list[JointItem] = []       # nose/eyes/ears, FACE_KP_IDS
         # per-face-item "this frame's conventions say draw it" flag. Kept
         # because `set_show_joints` knows nothing about either convention: it
         # may only hide dots and un-hide the ones that were shown, never
@@ -237,7 +238,7 @@ class CameraView(QGraphicsView):
         for jid in FACE_KP_IDS:
             item = JointItem(jid, radius=FACE_HANDLE_R)
             item.setBrush(QBrush(FACE_COLOR))
-            k = jid - NUM_JOINTS
+            k = face_kp_index(jid)
             # the nose turns the head in BOTH modes; the eyes and ears steer
             # it only in Face mode, and the tooltip says which is which
             what = ("turns the character's head" if HEAD_KP_NAMES[k] == "nose"
@@ -295,7 +296,7 @@ class CameraView(QGraphicsView):
         self._corrected = corrected
         self._filled = filled
         for item in self._face:
-            k = item.joint_id - NUM_JOINTS
+            k = face_kp_index(item.joint_id)
             q = None if head_xy is None else head_xy[k]
             wanted = (head_source == "skull" if HEAD_KP_NAMES[k] == "nose"
                       else head_mode == "face")

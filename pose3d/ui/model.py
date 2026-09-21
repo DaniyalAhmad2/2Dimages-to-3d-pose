@@ -18,6 +18,7 @@ from pose3d.core.project import (
 )
 from pose3d.core.skeleton import (
     DERIVED_MIDPOINT_PARENTS, Joint, NUM_JOINTS, derived_joints,
+    face_kp_index, is_face_kp,
 )
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
@@ -704,8 +705,9 @@ class ProjectModel(QObject):
     def _resolve_joint(self, joint: int, cam: str, frame=None) -> None:
         """Re-triangulate one edited point and re-fit the frame it belongs to.
 
-        `joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
-        (the camera views and the correction stack share this convention).
+        A face id (`skeleton.face_kp_id`) addresses face keypoint
+        `face_kp_index(joint)`; the camera views and the correction stack
+        share this convention.
         `cam` is the view whose 2D was edited; a derived joint is re-derived
         in that view only, since that is the only one whose parents moved.
 
@@ -723,7 +725,7 @@ class ProjectModel(QObject):
         # same targets and land in the same place
         self._targets()
         f = self.frame() if frame is None else frame
-        if joint >= NUM_JOINTS:
+        if is_face_kp(joint):
             # THE CROSS-VIEW GATE APPLIES HERE TOO, exactly as it does to a
             # dragged canonical joint in `_retriangulate`: one helper, so a
             # drag and the next recompute cannot reach different `head3d`.

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 import numpy as np
 
 from pose3d.core.project import Correction, Frame
-from pose3d.core.skeleton import NUM_JOINTS
+from pose3d.core.skeleton import face_kp_index, is_face_kp
 
 
 @dataclass
@@ -35,12 +35,13 @@ class CorrectionStack:
 
     def apply(self, frame_id: str, cam: str, joint: int,
               x: float, y: float, ts: str = "") -> Edit:
-        """`joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
-        (nose/eyes/ears) — the one index convention shared with the camera
-        views and the SQLite log, whose integer column simply extends."""
+        """A face id (`skeleton.face_kp_id(k)`, at the fixed FACE_KP_BASE)
+        addresses face keypoint k (nose/eyes/ears); anything below it is a
+        body joint. The one convention shared with the camera views and the
+        SQLite log, whose integer column simply extends."""
         f = self.frames_by_id[frame_id]
-        if joint >= NUM_JOINTS:
-            k = joint - NUM_JOINTS
+        if is_face_kp(joint):
+            k = face_kp_index(joint)
             old = tuple(f.head2d[cam][k])
             edit = Edit(frame_id, cam, joint, (float(old[0]), float(old[1])),
                         (float(x), float(y)), float(f.head_scores[cam][k]),
@@ -69,8 +70,8 @@ class CorrectionStack:
             return None
         e = self._undo.pop()
         f = self.frames_by_id[e.frame_id]
-        if e.joint >= NUM_JOINTS:
-            k = e.joint - NUM_JOINTS
+        if is_face_kp(e.joint):
+            k = face_kp_index(e.joint)
             f.head2d[e.cam][k] = e.old_xy
             f.head_scores[e.cam][k] = e.old_score
             f.head_corrected[e.cam][k] = e.old_corrected
@@ -86,8 +87,8 @@ class CorrectionStack:
             return None
         e = self._redo.pop()
         f = self.frames_by_id[e.frame_id]
-        if e.joint >= NUM_JOINTS:
-            f.set_head_kp(e.cam, e.joint - NUM_JOINTS,
+        if is_face_kp(e.joint):
+            f.set_head_kp(e.cam, face_kp_index(e.joint),
                           e.new_xy[0], e.new_xy[1], score=1.0, corrected=True)
         else:
             f.set_kp(e.cam, e.joint, e.new_xy[0], e.new_xy[1],
