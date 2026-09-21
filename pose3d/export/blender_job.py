@@ -19,7 +19,9 @@ deterministic and consumes joint world positions directly (no IK solver).
 
 Blender 5.x specifics handled here:
 - mp4: set image_settings.media_type='VIDEO' BEFORE file_format='FFMPEG'.
-- BVH exporter has no frame_step arg in 5.x.
+- BVH exporter has no frame_step arg in 5.x, and no axis arguments: the file
+  is armature space as it stands, so `export_bvh` writes from a rotated
+  throwaway copy to get the Y-up file every importer assumes.
 - FBX/BVH addons are enabled by default; we enable defensively anyway.
 """
 import argparse
@@ -139,12 +141,51 @@ def enable_addons():
 
 
 def export_bvh(arm_obj, path, scene):
-    bpy.ops.object.select_all(action="DESELECT")
-    arm_obj.select_set(True)
-    bpy.context.view_layer.objects.active = arm_obj
-    bpy.ops.export_anim.bvh(
-        filepath=path, frame_start=scene.frame_start, frame_end=scene.frame_end,
-        rotate_mode="NATIVE", root_transform_only=False, global_scale=1.0)
+    """Write the armature's animation as a Y-up BVH.
+
+    Blender's BVH exporter writes armature space as it stands — Z-up here —
+    and has no axis option, while its importer (and Unity, Unreal,
+    MotionBuilder) assumes the mocap convention, Y-up, and turns the file 90°
+    about X on the way in: the client's build-17 note was a character "lying
+    flat" after a default import. The FBX already ships Y-up through the
+    exporter's own axis arguments, so only this file was wrong.
+
+    The rotation is applied to a THROWAWAY COPY of the armature, never to the
+    one the FBX bake and the render read: the copy shares the action, its
+    rest pose is rotated rigidly (`Armature.transform` rotates every bone's
+    local frame with it), and the pose-bone channels — quaternions, and the
+    hips' location, which is bone-local — are untouched, so the world motion
+    turns with the rest pose and nothing else in the scene moves. The
+    object's own rotation is folded in as well: the exporter ignores
+    `matrix_world`, and a rig posed through `arm_inv @ W` is upright only in
+    world space. `pose3d.export.bvh.FILE_TO_WORLD` is the inverse.
+    """
+    import math
+    tmp = arm_obj.copy()
+    try:
+        tmp.data = arm_obj.data.copy()
+        tmp.name = arm_obj.name + ".bvh_yup"
+        scene.collection.objects.link(tmp)
+        world_rot = arm_obj.matrix_world.to_quaternion().to_matrix().to_4x4()
+        tmp.data.transform(Matrix.Rotation(-math.pi / 2, 4, "X") @ world_rot)
+        tmp.matrix_world = Matrix.Identity(4)
+        bpy.context.view_layer.update()
+        bpy.ops.object.select_all(action="DESELECT")
+        tmp.select_set(True)
+        bpy.context.view_layer.objects.active = tmp
+        bpy.ops.export_anim.bvh(
+            filepath=path, frame_start=scene.frame_start,
+            frame_end=scene.frame_end, rotate_mode="NATIVE",
+            root_transform_only=False, global_scale=1.0)
+    finally:
+        # whatever failed, the throwaway goes and the original stays: the
+        # armature data is removed only if it is the copy's own, never the
+        # rig's (which `tmp` still points at if `data.copy()` itself failed)
+        data = tmp.data
+        bpy.data.objects.remove(tmp, do_unlink=True)
+        if data is not arm_obj.data:
+            bpy.data.armatures.remove(data)
+        bpy.context.view_layer.objects.active = arm_obj
 
 
 def export_fbx(arm_obj, path):
@@ -916,9 +957,12 @@ def main():
     jmat, bmat = _materials()
 
     # 1) BVH from the FK armature (skeletal mocap format needs a bone hierarchy)
-    rest = rest_positions(frames)
+    # — built from the same uprighted frames as the FBX and the render, so
+    # `export_bvh`'s world-to-file rotation starts from an upright figure
+    # whatever axis the input called "up" (it used to take the raw frames)
+    rest = rest_positions(rframes)
     arm_obj, bbc = build_armature(rest, bones, joint_names)
-    animate(arm_obj, frames, bones, bbc, rest)
+    animate(arm_obj, rframes, bones, bbc, rest)
     scene.frame_start = 1; scene.frame_end = len(frames)
     export_bvh(arm_obj, os.path.join(args.outdir, args.name + ".bvh"), scene)
     _delete([arm_obj])                     # keep it out of the FBX/render

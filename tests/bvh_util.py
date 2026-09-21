@@ -9,10 +9,13 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import numpy as np
+
 from pose3d.export.bvh import (  # noqa: F401  (re-exported for the tests)
-    HOLD, SEGMENT, Bvh, Joint, channel_overshoot, euler_to_quat,
-    expected_frames, keyframe_rows, parse, quat_angle_deg, quat_to_matrix,
-    similarity, similarity_error, stepped_holds,
+    FILE_TO_WORLD, FILE_UP, HOLD, SEGMENT, Bvh, Joint, channel_overshoot,
+    euler_to_quat, expected_frames, file_to_world, keyframe_rows, parse,
+    quat_angle_deg, quat_to_matrix, similarity, similarity_error,
+    stepped_holds,
 )
 
 # The delivered export of the client take (`assets/Imported_Session.bvh`, which

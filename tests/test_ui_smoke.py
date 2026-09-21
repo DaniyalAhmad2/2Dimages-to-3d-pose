@@ -1583,18 +1583,85 @@ def test_the_arrows_stop_at_the_ends_of_the_take(qapp):
     assert win.model.current == len(win.model.project.frames) - 1
 
 
-def test_a_spinbox_keeps_its_own_arrow_keys(qapp):
-    """The scale field is a number the user is typing: stepping the frame out
-    from under it would put the correction on the wrong frame."""
+def test_the_arrow_keys_step_frames_even_while_a_number_box_has_focus(qapp):
+    """The client's rule after build 17 (2026-09-21): "the left and right
+    arrows should only move the frame left and right, regardless of what's
+    been clicked". The one place the first cut withheld them was a focused
+    number box, which Qt lets claim the arrows before any window shortcut
+    sees them — so the window has to get in front of the box, not just
+    behind it. Up/Down and the digits stay the box's own."""
     from PySide6.QtCore import Qt
     win = _keyboard_window()
     win.model.set_frame(4)
+    box = win.sidebar.scale_value
+    box.setFocus()
+    value = box.value()
+
+    _press(win, Qt.Key.Key_Right)
+    assert win.model.current == 5, "the number box kept the arrow key"
+    _press(win, Qt.Key.Key_Left)
+    assert win.model.current == 4
+    _press(win, Qt.Key.Key_End)
+    assert win.model.current == len(win.model.project.frames) - 1
+    _press(win, Qt.Key.Key_Home)
+    assert win.model.current == 0
+    assert box.value() == value, "stepping frames must not edit the number"
+    assert box.hasFocus(), "the box keeps the focus; only the frame moved"
+
+
+def test_the_keypad_arrows_step_frames_too(qapp):
+    """A full-size keyboard's numeric keypad sends Left/Right with the
+    KeypadModifier when NumLock is off; those are arrow keys to the person
+    pressing them. Shift+arrow (text selection in a box) stays untouched."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    win = _keyboard_window()
+    win.model.set_frame(4)
+    win.cam_left.view.setFocus()
+
+    QTest.keyClick(win.windowHandle(), Qt.Key.Key_Right,
+                   Qt.KeyboardModifier.KeypadModifier)
+    assert win.model.current == 5, "the keypad's Right did nothing"
+    QTest.keyClick(win.windowHandle(), Qt.Key.Key_Left,
+                   Qt.KeyboardModifier.KeypadModifier)
+    assert win.model.current == 4
 
     win.sidebar.scale_value.setFocus()
-    _press(win, Qt.Key.Key_Right)
-    _press(win, Qt.Key.Key_Home)
+    QTest.keyClick(win.windowHandle(), Qt.Key.Key_Left,
+                   Qt.KeyboardModifier.ShiftModifier)
+    assert win.model.current == 4, "Shift+Left is the box's text selection"
 
-    assert win.model.current == 4, "the window stole the field's arrow keys"
+    # nor does a modified Home/End reach the window's own key handler
+    win.cam_left.view.setFocus()
+    QTest.keyClick(win.windowHandle(), Qt.Key.Key_End,
+                   Qt.KeyboardModifier.ShiftModifier)
+    assert win.model.current == 4, "Shift+End stepped the frame"
+
+
+def test_keys_typed_into_a_dialog_over_the_window_do_not_step_frames(qapp):
+    """Getting in front of every widget must stop at this window's edge: an
+    arrow pressed in a dialog (a file picker, a message box) belongs to the
+    dialog. The dialog is a separate top-level window, so its focus widget's
+    window is not ours."""
+    from PySide6.QtCore import Qt
+    from PySide6.QtTest import QTest
+    from PySide6.QtWidgets import QApplication, QDialog, QLineEdit, QVBoxLayout
+    win = _keyboard_window()
+    win.model.set_frame(4)
+
+    dlg = QDialog(win)
+    edit = QLineEdit("12", dlg)
+    QVBoxLayout(dlg).addWidget(edit)
+    dlg.show()
+    dlg.activateWindow()
+    edit.setFocus()
+    QApplication.processEvents()
+    try:
+        QTest.keyClick(dlg.windowHandle(), Qt.Key.Key_Right)
+        QTest.keyClick(dlg.windowHandle(), Qt.Key.Key_Home)
+        assert win.model.current == 4, "a dialog's arrow keys stepped the frame"
+    finally:
+        dlg.close()
 
 
 def test_escape_still_leaves_the_fullscreen_3d_view(qapp):

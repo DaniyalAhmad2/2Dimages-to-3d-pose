@@ -22,6 +22,28 @@ from pathlib import Path
 
 import numpy as np
 
+#: The file's vertical axis. The export writes the BVH Y-up — the mocap
+#: convention Blender's own importer (and Unity, Unreal, MotionBuilder)
+#: assumes — while the app, the view and the FBX bake work Z-up. Blender's
+#: exporter writes armature space as it stands and has no axis option, so the
+#: export rotates a throwaway copy of the armature before writing (see
+#: `blender_job.export_bvh`); the client's build-17 note was a character
+#: "lying flat" after a default import.
+FILE_UP = "Y"
+
+#: Rotation taking file coordinates back to the app's Z-up world:
+#: (x, y, z)_file -> (x, -z, y)_world, i.e. +90° about X. Its inverse is what
+#: the export applied.
+FILE_TO_WORLD = np.array([[1.0, 0.0, 0.0],
+                          [0.0, 0.0, -1.0],
+                          [0.0, 1.0, 0.0]])
+
+
+def file_to_world(points: np.ndarray) -> np.ndarray:
+    """Points (…, 3) read from the file, in the app's Z-up world frame."""
+    return np.asarray(points, float) @ FILE_TO_WORLD.T
+
+
 @dataclass
 class Joint:
     name: str

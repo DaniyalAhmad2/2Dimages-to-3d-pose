@@ -468,12 +468,16 @@ def test_the_exported_character_turns_with_the_subject(fresh):
 
     bl, br = _shoulder_bone(ls), _shoulder_bone(rs)
     hips_yaw, file_yaw, cap_yaw = [], [], []
+    # the file is Y-up (the mocap convention Blender's importer assumes);
+    # yaw is measured about the world's vertical, so read the file back
+    # into world coordinates first
+    W = bvh_util.FILE_TO_WORLD
     for k, (row, _last) in enumerate(bvh_util.keyframe_rows(bvh, len(seq))):
         d = upright[k][rs] - upright[k][ls]
         cap_yaw.append(np.arctan2(d[1], d[0]))
-        R = bvh.world_rotations(row)[hips]
+        R = W @ bvh.world_rotations(row)[hips]
         hips_yaw.append(np.arctan2(R[1, 0], R[0, 0]))
-        fk = bvh.forward_kinematics(row)
+        fk = bvh_util.file_to_world(bvh.forward_kinematics(row))
         e = fk[br] - fk[bl]
         file_yaw.append(np.arctan2(e[1], e[0]))
 
@@ -488,6 +492,64 @@ def test_the_exported_character_turns_with_the_subject(fresh):
             (f"the {what} turns through {np.ptp(got):.2f} deg while the "
              f"subject turns through {np.ptp(cap):.2f}: drift "
              f"{np.abs(drift).max():.2f} deg")
+
+
+@needs_blender()
+@needs_character()
+def test_the_bvh_is_written_y_up(fresh):
+    """The client's build-17 note (2026-09-21): "when importing into blender
+    it imports at a 90 degree angle so the character is lying flat".
+
+    Blender's BVH exporter writes armature space as it stands — Z-up — and
+    has no axis option, while its importer (and Unity, Unreal, MotionBuilder)
+    assumes the mocap convention, Y-up, and rotates the file 90° about X on
+    the way in. So the file is written Y-up: the figure's height runs along
+    the file's +Y, and reading it back through `file_to_world` restores the
+    app's Z-up frame the other export gates are stated in.
+    """
+    seq, bvh = fresh
+    ch, upright, _ref = _placement(seq)
+    hips = bvh.index("hips")
+    b, which = ch._joint_src[int(Joint.HEAD)]
+    head = bvh.index(ch.bone_names[b])
+    rows = [row for row, _last in bvh_util.keyframe_rows(bvh, len(seq))]
+    up = np.mean([bvh.forward_kinematics(r)[head] - bvh.forward_kinematics(r)[hips]
+                  for r in rows], axis=0)
+    assert bvh_util.FILE_UP == "Y"
+    assert np.argmax(np.abs(up)) == 1 and up[1] > 0, \
+        f"head-above-hips runs along {up.round(3)} in the file, not +Y"
+    # and the same vector, read back into world coordinates, is the app's +Z
+    up_w = bvh_util.file_to_world(up[None])[0]
+    assert np.argmax(np.abs(up_w)) == 2 and up_w[2] > 0, up_w.round(3)
+
+
+@pytest.fixture(scope="module")
+def fresh_without_a_character(tmp_path_factory):
+    """The same take exported with no character asset — the FK stick-figure
+    path in `blender_job.main()`, which no other test reaches."""
+    out = tmp_path_factory.mktemp("fresh_nochar")
+    seq = _travelling_motion()
+    res = export_animation(seq, out, name="stick", fps=30, render_video=False,
+                           timeout=500, character=None)
+    assert res.ok, f"rc={res.returncode}\nSTDERR:\n{res.stderr[-2000:]}"
+    return seq, bvh_util.parse(res.bvh)
+
+
+@needs_blender()
+def test_the_bvh_is_written_y_up_without_a_character_too(fresh_without_a_character):
+    """`export_bvh` is shared by both paths; this one builds its armature
+    from the uprighted frames the FBX and render already used, so the file
+    stands up whichever axis the input called "up"."""
+    seq, bvh = fresh_without_a_character
+    head = bvh.index(Joint.HEAD.name)
+    ankles = [bvh.index(Joint.LEFT_ANKLE.name), bvh.index(Joint.RIGHT_ANKLE.name)]
+    ups = []
+    for row in range(bvh.n_frames):
+        fk = bvh.forward_kinematics(row)
+        ups.append(fk[head] - (fk[ankles[0]] + fk[ankles[1]]) / 2)
+    up = np.mean(ups, axis=0)
+    assert np.argmax(np.abs(up)) == 1 and up[1] > 0, \
+        f"head-above-ankles runs along {up.round(3)} in the file, not +Y"
 
 
 @needs_blender()

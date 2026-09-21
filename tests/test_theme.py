@@ -55,6 +55,78 @@ def _luma(img, x, y):
     return 0.299 * c.red() + 0.587 * c.green() + 0.114 * c.blue()
 
 
+def test_the_gauge_numbers_fit_inside_the_ring(qapp):
+    """The client's build-17 note (2026-09-21): "the 78/73% is not fully
+    visible - i dont know what it says". Two percentages at 16 pt bold are
+    wider than the ~74 px circle the arcs leave at the gauge's minimum
+    height, so the first and last digits were clipped. The font now fits the
+    text to the circle: the widest text the gauge can show fits at its
+    smallest geometry, and a short one keeps the full size."""
+    from PySide6.QtGui import QFont, QFontMetrics
+
+    from pose3d.app import apply_dark_theme
+    from pose3d.ui.panels import PoseAccuracyGauge, fit_point_size
+
+    apply_dark_theme(qapp)                 # the stylesheet's font, as shipped
+    g = PoseAccuracyGauge()
+    g.resize(470, g.minimumHeight())      # the pose card's shape at design size
+    g.show()
+    qapp.processEvents()
+    width = g.text_width()
+    assert width > 0
+
+    widest = "100 / 100%"
+    size = fit_point_size(widest, width, g.font(), device=g)
+    f = QFont(g.font()); f.setPointSize(size); f.setBold(True)
+    assert QFontMetrics(f, g).horizontalAdvance(widest) <= width, \
+        f"{widest!r} at {size} pt still overflows {width} px"
+    assert size >= 9, "unreadable: the fit went below the floor"
+    assert fit_point_size("99%", width, g.font(), device=g) == 16, \
+        "a short text keeps the full size"
+
+    # and the ink itself. `drawText(rect, …)` CLIPS to its rect, so clipped
+    # text leaves narrower ink, never ink outside the box — "inside the box"
+    # would pass on the old code. The proof is that the painted span is the
+    # span the same text leaves when nothing clips it.
+    g.set_cameras({"left": 100.0, "right": 100.0})
+    img = _render(g, size=(470, g.minimumHeight()))
+    base = g._base(); cy = int(base.center().y())
+    left, right = int(base.left()) + g.INNER_INSET, int(base.right()) - g.INNER_INSET
+
+    def _ink(image, x0, x1, y0, y1):
+        return [x for x in range(x0, x1) for y in range(y0, y1)
+                if min(image.pixelColor(x, y).red(), image.pixelColor(x, y).green(),
+                       image.pixelColor(x, y).blue()) > 200]
+
+    ink = _ink(img, int(base.left()), int(base.right()), cy - 12, cy + 12)
+    assert ink, "no text was painted at all"
+    assert min(ink) > left and max(ink) < right, \
+        f"text ink spans {min(ink)}..{max(ink)} px, box is {left}..{right}"
+
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtGui import QImage, QPainter
+
+    from pose3d.ui.panels import COL_TEXT
+    # the reference is set at the size the gauge ACTUALLY painted, so a
+    # paint that ignored the fit (16 pt, clipped) is measured against its
+    # own unclipped width, not the fitted one — a 38 px miss, not 6
+    painted = g.painted_point_size()
+    assert painted == size, f"painted at {painted} pt, fit said {size}"
+    f.setPointSize(painted)
+    free = QImage(600, 80, QImage.Format.Format_RGB32); free.fill(0xff000000)
+    p = QPainter(free); p.setFont(f); p.setPen(COL_TEXT)
+    p.drawText(QRectF(0, 0, 600, 80),
+               Qt.AlignmentFlag.AlignCenter | Qt.TextFlag.TextDontClip, widest)
+    p.end()
+    unclipped = _ink(free, 0, 600, 0, 80)
+    # a few pixels of antialiasing differ between a widget grab and a plain
+    # image; a clip is never that small — the old code lost 39 px, and the
+    # wrong-family fit the helper's docstring warns about loses 14
+    assert abs((max(ink) - min(ink)) - (max(unclipped) - min(unclipped))) <= 4, \
+        (f"the gauge painted {max(ink) - min(ink) + 1} px of ink where the "
+         f"unclipped text spans {max(unclipped) - min(unclipped) + 1} px")
+
+
 def test_the_accuracy_gauge_stays_readable_on_a_light_host(light_host):
     """Regression guard: the gauge overrides paintEvent, so the stylesheet
     background is never drawn for it. It used to inherit the host's window

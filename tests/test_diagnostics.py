@@ -489,6 +489,10 @@ CLIENT_COMPLAINTS = {
     "P13 path too long": "path",
     "corrections kept across sessions": "correction",
     "marker size in centimetres": "centimetre",
+    # build-17 feedback, 2026-09-21
+    "P14 BVH imports lying flat in Blender": "upright",
+    "P15 the accuracy dial's numbers are cut off": "accuracy dial",
+    "P16 arrow keys even in a number box": "number box",
 }
 
 
@@ -500,7 +504,7 @@ def test_the_release_note_answers_every_complaint_the_client_made():
 
 #: The GitHub release the note describes. Bump it with every resubmission, so
 #: a note that still names the previous build fails here before it is sent.
-RELEASE_BUILD = "build-18"
+RELEASE_BUILD = "build-19"
 
 
 def test_the_release_note_names_the_build_that_carries_it():

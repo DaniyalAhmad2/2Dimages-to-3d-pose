@@ -192,6 +192,19 @@ against the delivered behaviour once they merge:
   heights, not the single lowest frame**, so one bad ankle cannot push the whole character down
   through the floor or bob it against the ground. Cost if wrong: a take genuinely captured off
   the ground sits at a small constant offset, visible and correctable.
+- **The frame keys are the window's everywhere, a number box included** (client, 2026-09-21,
+  on build 17: "regardless of what's been clicked"). The first cut let a focused spin box keep
+  Left/Right; Qt withholds a window shortcut from such a box anyway, so an application-level
+  event filter now hands the frame keys to the window before the focus widget sees them, and
+  stops at the window's edge (a dialog's arrows stay the dialog's). Cost if wrong: a cursor
+  that cannot be moved inside the height box with the arrows; Up/Down and the digits still work.
+- **The BVH is written Y-up.** Blender's BVH exporter writes armature space (Z-up) and has no
+  axis option; its importer — and Unity, Unreal, MotionBuilder — assumes the mocap convention
+  and turned the delivered file 90° so the character lay flat. The export rotates a throwaway
+  copy of the armature before writing; the FBX (already Y-up through the exporter's axis
+  arguments) and the render are untouched, and the export-matches-view gates read the file back
+  through `bvh.FILE_TO_WORLD`. Cost if wrong: a tool that expected the old Z-up file — none is
+  known; the delivered fixture keeps its historical numbers.
 - **Ruling: a photograph that cannot be read costs its pair, never the import.** Calibration
   skips the pair and says so; detection keeps the frame with that view marked missing (no 2D
   points for it) so the other view and the rest of the take are untouched; the import summary

@@ -9,7 +9,7 @@ hub.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
     QScrollArea, QSplitter, QToolButton, QVBoxLayout, QWidget,
@@ -128,6 +128,36 @@ def _file_identity(path):
     except OSError:
         return None
     return (stat.st_mtime_ns, stat.st_size)
+
+
+class _FrameKeyFilter(QObject):
+    """Hands the frame keys to the window before the focus widget sees them.
+
+    Installed on the application, because a focused number box claims
+    Left/Right through ShortcutOverride before any window shortcut can fire,
+    and the client's answer to build 17 was that the arrows should move the
+    frame "regardless of what's been clicked". Only a KeyPress for a widget
+    inside THIS window is taken: a dialog over it is its own top-level window
+    and keeps its keys. When the ordinary window shortcut has already fired,
+    Qt sends no KeyPress at all, so a key never steps twice.
+    """
+
+    def __init__(self, window):
+        super().__init__(window)          # dies with the window
+        self._window = window
+
+    def eventFilter(self, obj, event):
+        # the keypad's arrows (NumLock off) carry KeypadModifier and match no
+        # shortcut, so they only ever arrive here — and they are arrow keys
+        if (event.type() == QEvent.Type.KeyPress
+                and (event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier)
+                == Qt.KeyboardModifier.NoModifier
+                and event.key() in self._window.FRAME_KEYS
+                and isinstance(obj, QWidget)
+                and obj.window() is self._window
+                and self._window._step_frame(event.key())):
+            return True
+        return super().eventFilter(obj, event)
 
 
 class MainWindow(QMainWindow):
@@ -380,13 +410,17 @@ class MainWindow(QMainWindow):
         # accepts the arrows to orbit its camera (pyqtgraph) and a
         # QGraphicsView accepts them to nudge its scrollbars, so from the two
         # panels the client corrects joints in they never reached the window
-        # at all. A focused line edit or spin box still keeps them — it
-        # claims them first, through ShortcutOverride.
+        # at all. A focused number box claims them earlier still, through
+        # ShortcutOverride, before any shortcut can fire — so the filter
+        # below takes the KeyPress on its way to the box. One or the other
+        # fires for a given key, never both.
         from PySide6.QtGui import QKeySequence, QShortcut
         for key in self.FRAME_KEYS:
             sc = QShortcut(QKeySequence(key), self)
             sc.setContext(Qt.ShortcutContext.WindowShortcut)
             sc.activated.connect(lambda k=key: self._step_frame(k))
+        self._frame_keys = _FrameKeyFilter(self)
+        QCoreApplication.instance().installEventFilter(self._frame_keys)
 
         self.model.frameChanged.connect(self._on_frame_changed)
         self.model.pose3dChanged.connect(self.view3d.set_pose)
@@ -1222,20 +1256,17 @@ class MainWindow(QMainWindow):
 
     @guarded
     def _step_frame(self, key) -> bool:
-        """Act on one of FRAME_KEYS. True if this key moved the frame."""
-        # A local import: this function's diff stays inside this function.
-        from PySide6.QtWidgets import QAbstractSpinBox, QLineEdit
+        """Act on one of FRAME_KEYS. True if this key moved the frame.
 
+        Whatever has the focus. The first cut let a focused number box keep
+        its arrows (a half-typed height, the reasoning went); the client's
+        answer to build 17 was that "the left and right arrows should only
+        move the frame left and right, regardless of what's been clicked" —
+        so the box keeps Up/Down and its digits, and the frame keys are the
+        window's everywhere (`_FrameKeyFilter` is what gets them there).
+        """
         n = len(self.model.project.frames)
         if key not in self.FRAME_KEYS or not n:
-            return False
-        # a number the user is typing owns its own arrows — stepping the
-        # frame out from under a half-entered marker size or height would put
-        # the next correction on a different frame than the one on screen.
-        # (Qt already withholds the shortcut from a focused line edit, which
-        # claims these keys via ShortcutOverride; this also covers the plain
-        # key-propagation path, and says the rule out loud.)
-        if isinstance(self.focusWidget(), (QAbstractSpinBox, QLineEdit)):
             return False
         step = {Qt.Key.Key_Left: -1, Qt.Key.Key_Right: 1}.get(key)
         if step is not None:
@@ -1245,9 +1276,11 @@ class MainWindow(QMainWindow):
         return True
 
     def keyPressEvent(self, event):
+        plain = ((event.modifiers() & ~Qt.KeyboardModifier.KeypadModifier)
+                 == Qt.KeyboardModifier.NoModifier)
         if event.key() == Qt.Key.Key_Escape and self._fs_active:
             self._toggle_fullscreen()
-        elif not self._step_frame(event.key()):
+        elif not (plain and self._step_frame(event.key())):
             super().keyPressEvent(event)
 
     # --- refresh ---

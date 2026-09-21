@@ -1,4 +1,4 @@
-# Pose3D — what changed in build-18
+# Pose3D — what changed in build-19
 
 Everything you reported is answered below: what you said, what changed, and the
 quickest way to check it for yourself. Nothing here needs a technical step.
@@ -55,8 +55,12 @@ me `pose3d-diagnostics.txt`. It names the exact file that is missing.
 - **"You have to be on the exact pixel of the joint to move it."** The joint
   handles are larger and easier to see and grab. *Check: drag a knee.*
 - **"The left and right keys should move you between frames."** The arrow keys
-  step through the frames, in both camera views and the 3D view. *Check: press
-  left and right.*
+  step through the frames wherever you last clicked — either camera view, the
+  3D view, the film strip, even a number box — and Home/End jump to the first
+  and last frame. *Check: press left and right.*
+- **"The 78/73% is not fully visible."** The accuracy dial's two numbers (left
+  camera / right camera) now fit inside the ring at any size. *Check: the dial
+  reads "NN / NN%" with nothing cut off.*
 - **Joints the detector could not find.** A missing joint now appears as a
   red dashed handle you can drag into place instead of simply not being there,
   and the 3D view colours every joint the same way the photographs do (green
@@ -73,6 +77,10 @@ me `pose3d-diagnostics.txt`. It names the exact file that is missing.
   The export is written from the same poses you are looking at in the app, so
   the BVH, the FBX and the MP4 show the take you processed. *Check: export
   your kick take and open the BVH in Blender.*
+- **"When importing into Blender it imports at a 90 degree angle."** The BVH
+  is now written the way Blender (and Unity, Unreal) expect, so it imports
+  standing upright with the default settings. *Check: File → Import → Motion
+  Capture (.bvh), change nothing.*
 - **Saving and reopening.** A project saves to a folder and reopens from
   **File → Open Project**, with your corrections and your settings as you left
   them. *Check: reopen yesterday's project.*

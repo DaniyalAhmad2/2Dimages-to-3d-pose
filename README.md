@@ -140,7 +140,8 @@ on your own machine immediately.
 5. **Export** — writes to the folder you choose:
    - `<name>.mp4` — video of the animated character
    - `<name>.fbx` — the character with a rigged, re-poseable armature
-   - `<name>.bvh` — motion capture data
+   - `<name>.bvh` — motion capture data (Y-up, the mocap convention: imports
+     upright in Blender, Unity and Unreal with their default settings)
 
 ---
 

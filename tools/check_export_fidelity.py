@@ -191,11 +191,12 @@ def report_facing(bvh, character, up, valid, holds, out) -> None:
             continue
         d = up[k][rs] - up[k][ls]
         cap_yaw.append(np.arctan2(d[1], d[0]))
-        R = bvh.world_rotations(row)[hips]
+        # the file is Y-up; read it back into the app's Z-up world first
+        R = bvh_util.FILE_TO_WORLD @ bvh.world_rotations(row)[hips]
         # the hips bone's own +X axis, projected on the ground plane
         hip_yaw.append(np.arctan2(R[1, 0], R[0, 0]))
         if bl is not None and br is not None:
-            fk = bvh.forward_kinematics(row)
+            fk = bvh_util.file_to_world(bvh.forward_kinematics(row))
             e = fk[br] - fk[bl]
             sh_yaw.append(np.arctan2(e[1], e[0]))
         h = up[k][int(Joint.RIGHT_HIP)] - up[k][int(Joint.LEFT_HIP)]

@@ -196,6 +196,33 @@ class _StackedRow(QWidget):
         self._v.setText(v)
 
 
+def fit_point_size(text: str, width_px: float, base: QFont, start: int = 16,
+                   floor: int = 9, bold: bool = True, device=None) -> int:
+    """The largest point size, from `start` down to `floor`, at which `text`
+    set in `base`'s family fits in `width_px`; `floor` if none does.
+    `device` is the paint device the text will be drawn on, so the metrics
+    are the painter's own.
+
+    The gauge's centre used to draw "78 / 73%" at 16 pt regardless, and at
+    the gauge's minimum height that is wider than the circle the arcs leave,
+    so the client saw the first and last digits cut off (2026-09-21: "i dont
+    know what it says").
+
+    `base` must be the WIDGET's font (`self.font()`), not a bare `QFont()`: a
+    painter resolves an unset family against the widget it paints, and the
+    stylesheet gives every widget Segoe UI — 102 px for "62 / 47%" at 16 pt
+    where the application default measured 86. A fit measured in the wrong
+    family clipped exactly as before.
+    """
+    from PySide6.QtGui import QFontMetrics
+    for size in range(int(start), int(floor) - 1, -1):
+        f = QFont(base); f.setPointSize(size); f.setBold(bold)
+        fm = QFontMetrics(f, device) if device is not None else QFontMetrics(f)
+        if fm.horizontalAdvance(text) <= width_px:
+            return size
+    return int(floor)
+
+
 class PoseAccuracyGauge(QWidget):
     """Circular gauge: one arc per camera, never one averaged number.
 
@@ -208,11 +235,29 @@ class PoseAccuracyGauge(QWidget):
 
     # camera key -> arc inset in px. Outer ring is LEFT.
     ARCS = ((CAM_LEFT, 0.0), (CAM_RIGHT, 16.0))
+    #: The centre text's box, inset from the ring's bounding square. The inner
+    #: arc sits 16 px in and is 8 px wide, so its inner edge is 20 px in; the
+    #: text starts just inside that.
+    INNER_INSET = 24
 
     def __init__(self):
         super().__init__()
         self.setMinimumHeight(150)
         self._pct: dict[str, float] = {}
+
+    def _base(self) -> QRectF:
+        """The square the arcs are drawn in, at the current widget size."""
+        side = min(self.width(), self.height()) - 16
+        return QRectF((self.width() - side) / 2, 8, side, side)
+
+    def text_width(self) -> float:
+        """How wide the centre text may be at the current size."""
+        return self._base().width() - 2 * self.INNER_INSET
+
+    def painted_point_size(self) -> int | None:
+        """The point size the last paint used for the centre text (None
+        before the first paint) — what a test compares the ink against."""
+        return getattr(self, "_painted_pt", None)
 
     def set_cameras(self, pct: dict):
         self._pct = {k: float(v) for k, v in dict(pct).items()}
@@ -233,8 +278,7 @@ class PoseAccuracyGauge(QWidget):
         # native window colour — light, on a Windows machine in light mode —
         # and the near-white readout below became unreadable.
         p.fillRect(self.rect(), COL_PANEL)
-        side = min(self.width(), self.height()) - 16
-        base = QRectF((self.width() - side) / 2, 8, side, side)
+        base = self._base()
         for cam, inset in self.ARCS:
             rect = base.adjusted(inset, inset, -inset, -inset)
             p.setPen(QPen(QColor(40, 44, 56), 8))
@@ -248,14 +292,22 @@ class PoseAccuracyGauge(QWidget):
             # start at top (90deg), clockwise
             p.drawArc(rect, 90 * 16, -int(360 * 16 * max(val, 0.0) / 100.0))
 
-        inner = base.adjusted(30, 30, -30, -30)
+        i = self.INNER_INSET
+        inner = base.adjusted(i, i, -i, -i)
         p.setPen(COL_TEXT)
-        f = QFont(); f.setPointSize(16); f.setBold(True); p.setFont(f)
         shown = " / ".join(
             "--" if np.isnan(self._pct.get(cam, float("nan")))
             else f"{self._pct[cam]:.0f}"
             for cam, _ in self.ARCS)
-        p.drawText(inner, Qt.AlignmentFlag.AlignCenter, f"{shown}%")
+        text = f"{shown}%"
+        # sized to the circle, in the font that will actually be painted, so
+        # two three-digit numbers are never clipped
+        f = QFont(self.font())
+        self._painted_pt = fit_point_size(text, inner.width(), self.font(),
+                                          device=self)
+        f.setPointSize(self._painted_pt)
+        f.setBold(True); p.setFont(f)
+        p.drawText(inner, Qt.AlignmentFlag.AlignCenter, text)
         worst = self._worst()
         f2 = QFont(); f2.setPointSize(9); p.setFont(f2)
         p.setPen(acc_color(worst))
