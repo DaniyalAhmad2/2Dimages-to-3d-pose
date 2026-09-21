@@ -167,7 +167,7 @@ def test_a_face_only_edit_turns_the_frames_dot_purple(qapp, tmp_path):
     model.set_frame(1)
     assert win.timeline.status(1) == "green"
 
-    eye = face_kp_id(1)              # left eye: face point 1
+    eye = face_kp_id(1)               # left eye: face point 1
     handle = win.cam_left.view._face[1]
     assert handle.isVisible() and handle.joint_id == eye, \
         "this face point is not one the user can drag"

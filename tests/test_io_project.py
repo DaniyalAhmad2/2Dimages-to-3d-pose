@@ -1,4 +1,6 @@
 """Phase 1 verification: project save/reload round-trip (NaN-aware) + log."""
+import sqlite3
+
 import numpy as np
 
 from pose3d.core.io_project import (
@@ -282,9 +284,6 @@ def test_a_project_written_before_the_raw_arrays_still_loads(tmp_path):
     assert np.allclose(g.kp2d[CAM_LEFT][Joint.HEAD], (100.5, 200.5))
 
 
-import sqlite3
-
-
 def _legacy_log(folder, rows):
     """A corrections.sqlite exactly as every build before the toes wrote it:
     no user_version, face rows carrying joint = 15 + k."""
@@ -302,10 +301,14 @@ def _legacy_log(folder, rows):
 
 
 def test_the_face_ids_have_a_fixed_base_that_is_not_the_joint_count():
+    from pose3d.core.io_project import _LEGACY_NUM_JOINTS
     from pose3d.core.skeleton import (
         FACE_KP_BASE, NUM_HEAD_KP, NUM_JOINTS, face_kp_id, face_kp_index,
         is_face_kp)
     assert FACE_KP_BASE == 100 and NUM_JOINTS < FACE_KP_BASE
+    # the count on the day the old convention was retired, frozen: the
+    # migration reads files written back then, and NUM_JOINTS has moved since
+    assert _LEGACY_NUM_JOINTS == 15
     for k in range(NUM_HEAD_KP):
         assert is_face_kp(face_kp_id(k)) and face_kp_index(face_kp_id(k)) == k
     for j in range(NUM_JOINTS):

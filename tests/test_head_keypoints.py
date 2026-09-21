@@ -179,7 +179,7 @@ def test_dragging_the_nose_updates_head3d_with_undo():
     before3d = f.head3d.copy()
     before2d = f.head2d[L].copy()
 
-    nose = face_kp_id(0)                       # face point 0, at the fixed base
+    nose = face_kp_id(0)                        # face point 0, at the fixed base
     x, y = f.head2d[L][0]
     # 40 px ALONG the epipolar line (this rig's lines run near-horizontal):
     # a correction the two views still agree about, so the gate keeps it
@@ -208,7 +208,7 @@ def test_dragging_a_face_point_off_the_epipolar_line_drops_its_3d():
     m = _model_with_heads()
     f = m.frame()
     x, y = f.head2d[L][0]
-    m.set_joint_2d(L, face_kp_id(0), x, y + 200.0)      # across the lines
+    m.set_joint_2d(L, face_kp_id(0), x, y + 200.0)       # across the lines
 
     assert np.isnan(f.head3d[0]).all(), "a pair 200 px apart was triangulated"
     assert np.isfinite(f.head3d[1:]).all(), "the untouched face points were gated too"
