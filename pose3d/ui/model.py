@@ -17,7 +17,8 @@ from pose3d.core.project import (
     CAM_LEFT, CAM_RIGHT, CAMERAS, PIPELINE_VERSION, ProjectData,
 )
 from pose3d.core.skeleton import (
-    DERIVED_MIDPOINT_PARENTS, Joint, NUM_JOINTS, derived_joints,
+    CORE_INDEX, DERIVED_MIDPOINT_PARENTS, EXTREMITY_JOINTS, Joint, NUM_JOINTS,
+    derived_joints, face_kp_index, is_face_kp,
 )
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
@@ -704,8 +705,9 @@ class ProjectModel(QObject):
     def _resolve_joint(self, joint: int, cam: str, frame=None) -> None:
         """Re-triangulate one edited point and re-fit the frame it belongs to.
 
-        `joint >= NUM_JOINTS` addresses face keypoint `joint - NUM_JOINTS`
-        (the camera views and the correction stack share this convention).
+        A face id (`skeleton.face_kp_id`) addresses face keypoint
+        `face_kp_index(joint)`; the camera views and the correction stack
+        share this convention.
         `cam` is the view whose 2D was edited; a derived joint is re-derived
         in that view only, since that is the only one whose parents moved.
 
@@ -723,7 +725,7 @@ class ProjectModel(QObject):
         # same targets and land in the same place
         self._targets()
         f = self.frame() if frame is None else frame
-        if joint >= NUM_JOINTS:
+        if is_face_kp(joint):
             # THE CROSS-VIEW GATE APPLIES HERE TOO, exactly as it does to a
             # dragged canonical joint in `_retriangulate`: one helper, so a
             # drag and the next recompute cannot reach different `head3d`.
@@ -940,6 +942,17 @@ class ProjectModel(QObject):
                 for c in CAMERAS}
         return self._figure_h_px
 
+    def predates_toes(self) -> bool:
+        """True for a Halpe-26 project detected before the toe joints
+        existed: every toe of every frame is NaN in both views. Such a take
+        can gain its toes from Run Detection; a COCO-17 take cannot, and a
+        take that has any toe was detected by this build."""
+        idx = [int(j) for j in EXTREMITY_JOINTS]
+        if self.project.keypoint_model != "halpe26" or not self.project.frames:
+            return False
+        return all(np.isnan(f.kp2d[c][idx]).all()
+                   for f in self.project.frames for c in CAMERAS)
+
     def invalidate_readouts(self) -> None:
         """Drop the cached take-wide numbers (figure height, take quality).
 
@@ -1109,13 +1122,22 @@ def worst_per_joint(errors, stage: str):
 
 
 def frame_stat(per_joint):
-    """One number for a frame: the MEDIAN joint, not the worst.
+    """One number for a frame: the MEDIAN CORE joint, not the worst.
 
     The worst of 15 joints is a max over 15 samples; on a good take it is red
     almost every frame, which is how the old timeline managed to be red 21
     times out of 26 (and green never) and tell the user nothing.
+
+    Over CORE_JOINTS only: the toes are extremities that are often out of
+    frame, and a take whose feet are cropped must read exactly as it did
+    before they existed. They keep their own handle and dot colour.
+
+    A per-joint array that is not a whole skeleton is taken as given — a
+    caller that has already cut the set down is not cut down again.
     """
     a = np.asarray(per_joint, float)
+    if a.size == NUM_JOINTS:
+        a = a[CORE_INDEX]
     a = a[np.isfinite(a)]
     return float(np.median(a)) if a.size else float("nan")
 
@@ -1147,7 +1169,8 @@ def _head_hint(project: ProjectData) -> str:
 
 def _recompute_note(stored: np.ndarray, now: np.ndarray) -> str:
     """The recompute-on-open sentence, with this take's own numbers."""
-    d = np.linalg.norm(now - stored, axis=2)
+    # take-wide numbers, so over the core set (as `quality.subject_height`)
+    d = np.linalg.norm(now[:, CORE_INDEX] - stored[:, CORE_INDEX], axis=2)
     d = d[np.isfinite(d)]
     if not d.size:
         return ""
@@ -1170,7 +1193,8 @@ def _body_height(poses: np.ndarray) -> float:
     up = sequence_up(poses)
     if up is None:
         return float("nan")
-    upright = poses @ de_tilt_matrix(up).T
+    # take-wide number, so over the core set (as `quality.subject_height`)
+    upright = (poses @ de_tilt_matrix(up).T)[:, CORE_INDEX]
     spans = [float(p[v, 2].max() - p[v, 2].min())
              for p, v in ((q, ~np.isnan(q).any(1)) for q in upright)
              if v.sum() >= 2]

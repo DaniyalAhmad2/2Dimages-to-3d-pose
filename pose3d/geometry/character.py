@@ -43,7 +43,9 @@ from pathlib import Path
 
 import numpy as np
 
-from pose3d.core.skeleton import BONES, Joint, NUM_HEAD_KP, NUM_JOINTS
+from pose3d.core.skeleton import (
+    BONES, CORE_INDEX, EXTREMITY_JOINTS, Joint, NUM_HEAD_KP, NUM_JOINTS,
+)
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
@@ -236,6 +238,10 @@ _DIRECT = {
     "shin.L": (Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
     "thigh.R": (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
+    # one point per foot: the foot aims from the ankle at the big toe when
+    # it is seen, and rides the shin's matrix — today's behaviour — when not
+    "foot.L": (Joint.LEFT_ANKLE, Joint.LEFT_TOE),
+    "foot.R": (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE),
 }
 
 # Limb chains: (upper role, lower role, mid joint, end joint). When the mid
@@ -257,10 +263,11 @@ _IK_CHAINS = (
 #
 # For `upper_arm` and `thigh` the roll IS a measurement: the elbow and the knee
 # are hinges, so the plane the limb bends in genuinely fixes the parent bone's
-# spin. For `forearm` and `shin` it is a CONVENTION — forearm pronation and
-# shin twist are never observed (there are no hand or foot keypoints), so those
-# bones simply carry the hinge plane on. A future reader must not read a small
-# roll error on a forearm as accuracy.
+# spin. For `forearm`, `shin` and `foot` it is a CONVENTION — forearm pronation
+# and shin twist are never observed (there are no hand keypoints, and the
+# foot's one point fixes its aim, not its spin), so those bones simply carry
+# the hinge plane on. A future reader must not read a small roll error on a
+# forearm as accuracy.
 _SHOULDER_LINE = (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)
 _HIP_LINE = (Joint.LEFT_HIP, Joint.RIGHT_HIP)
 
@@ -284,6 +291,13 @@ _BEND_REF = {
                     Joint.RIGHT_ANKLE, _HIP_LINE),
     "shin.R":      (Joint.RIGHT_HIP, Joint.RIGHT_KNEE,
                     Joint.RIGHT_ANKLE, _HIP_LINE),
+    # the foot's own spin is not observable from one toe point, so it carries
+    # the leg's bend plane on exactly as the shin does — same three joints,
+    # same hemisphere fix, and the same silence when the leg is straight
+    "foot.L":      (Joint.LEFT_HIP, Joint.LEFT_KNEE,
+                    Joint.LEFT_ANKLE, _HIP_LINE),
+    "foot.R":      (Joint.RIGHT_HIP, Joint.RIGHT_KNEE,
+                    Joint.RIGHT_ANKLE, _HIP_LINE),
 }
 
 # role -> the captured line the bone's roll follows directly. The pelvis and
@@ -293,9 +307,9 @@ _BEND_REF = {
 #
 # `neck`/`head` are not here: the neck's roll is the FACE, which is a
 # different measurement (see `_FACE_REF` below), and the head bone rides the
-# neck. `clavicle.*`, `hand.*` and `foot.*` get no reference either — they
-# have no keypoints of their own, so once the parent's roll is right theirs is
-# inherited right.
+# neck. `clavicle.*` and `hand.*` get no reference — they have no keypoints of
+# their own, so once the parent's roll is right theirs is inherited right;
+# `foot.*` follows the leg's bend plane like the shin (see `_BEND_REF`).
 _LINE_REF = {"hips": _HIP_LINE, "spine": _HIP_LINE, "chest": _SHOULDER_LINE}
 
 # role -> the torso line its REST face direction is measured against. The
@@ -361,6 +375,12 @@ _JOINT_FROM_RIG = {
     Joint.RIGHT_KNEE: (("shin.R", "head"), ("thigh.R", "tail")),
     Joint.LEFT_ANKLE: (("foot.L", "head"), ("shin.L", "tail")),
     Joint.RIGHT_ANKLE: (("foot.R", "head"), ("shin.R", "tail")),
+    # the toes are the only canonical joints read off a TAIL: the foot bones
+    # are leaves, so their tails are where the rig's toes are — and reading
+    # them back here is what puts the toes in the 3D view, in `fitted3d` and
+    # inside the export-matches-view gate
+    Joint.LEFT_TOE: (("foot.L", "tail"),),
+    Joint.RIGHT_TOE: (("foot.R", "tail"),),
 }
 
 # Where HEAD is read back from, per head_source. A nose HEAD has no counterpart
@@ -390,6 +410,14 @@ _HEAD_FROM_RIG = {
 # is the mismatch the eye picks up first.
 _SCALE_WEIGHTS = {Joint.LEFT_KNEE: 2.0, Joint.RIGHT_KNEE: 2.0,
                   Joint.LEFT_ANKLE: 2.0, Joint.RIGHT_ANKLE: 2.0}
+
+# ...but an edge that ENDS at an extremity weighs 1 whatever its parent weighs.
+# An edge takes the larger of its two ends' weights, so ankle->toe would have
+# inherited the ankle's 2 and let one foot point — a single keypoint, often
+# cropped, and the shortest edge in the skeleton — pull the whole character's
+# size around twice as hard as the shin above it. The child decides, because
+# what the edge MEASURES is the extremity.
+_EXTREMITY_INDEX = frozenset(int(j) for j in EXTREMITY_JOINTS)
 
 
 def _align(a, b, ref=None):
@@ -787,7 +815,8 @@ class Character:
 
         A single UNIFORM scale, so the character changes size but never shape.
         It is the least-squares best match between the subject's median bone
-        lengths and the rig's own, weighted toward the legs. Fitting once per
+        lengths and the rig's own, weighted toward the legs and never toward
+        an extremity (`_SCALE_WEIGHTS`, `_EXTREMITY_INDEX`). Fitting once per
         take also stops the character pulsing: the scale used to be recomputed
         per frame from whichever joints were visible, so it jumped whenever the
         ankles dropped out.
@@ -804,7 +833,9 @@ class Character:
             sub_len = sub.get(key)
             if not sub_len or not np.isfinite(sub_len) or sub_len < 1e-9:
                 continue
-            w = max(_SCALE_WEIGHTS.get(key[0], 1.0), _SCALE_WEIGHTS.get(key[1], 1.0))
+            w = (1.0 if key[1] in _EXTREMITY_INDEX
+                 else max(_SCALE_WEIGHTS.get(key[0], 1.0),
+                          _SCALE_WEIGHTS.get(key[1], 1.0)))
             num += w * sub_len * rig_len
             den += w * sub_len * sub_len
         self._scale = float(num / den) if den > 1e-12 else None
@@ -1152,11 +1183,23 @@ class Character:
 
     def _frame_scale(self, up_pose, valid):
         """The uniform scale for one frame: the take-wide fit once
-        `fit_to_subject` has run, else this frame's own height ratio."""
+        `fit_to_subject` has run, else this frame's own height ratio.
+
+        The height is measured over CORE_INDEX — this is the 3D twin of
+        `quality.figure_height_px`, and it is sized the same way for the same
+        reason. The toes sit below the ankles, so counting them made a take
+        whose feet are in frame size the character differently from the same
+        take with its feet cropped.
+        """
         if self._scale is not None:
             return self._scale
-        vpts = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[valid]
-        our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
+        core = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[CORE_INDEX]
+        vpts = core[np.asarray(valid, bool)[CORE_INDEX]]
+        # a frame whose ONLY valid joints are toes measures nothing: since the
+        # height became core-only, "some joints are valid" stopped implying
+        # "there is a height", and `ground_drop` calls this with no guard.
+        our_h = (float(vpts[:, 2].max() - vpts[:, 2].min())
+                 if vpts.size else 0.0) or 1.0
         return self.rig_h / our_h
 
     def _skin_matrices(self, up_pose, valid, head_pts=None):

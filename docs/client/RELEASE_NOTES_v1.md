@@ -66,6 +66,12 @@ me `pose3d-diagnostics.txt`. It names the exact file that is missing.
   and the 3D view colours every joint the same way the photographs do (green
   seen, amber unsure, red missing, purple corrected). *Check: a frame where an
   arm is hidden.*
+- **"Does the program not detect toe position?"** It does now: one point per
+  foot, the big toe, so the character's foot points where the figure's toes
+  point. A toe the detector could not see is a red dashed handle under the
+  ankle that you can drag into place. Projects made before this build show
+  those handles until you press Run Detection once. *Check: a side-on frame —
+  the foot follows the toe.*
 - **Corrections that vanished.** Your corrections are saved with the project
   and are still there when you reopen it, including after the 3D is
   recalculated. *Check: correct a joint, close the app, open the project

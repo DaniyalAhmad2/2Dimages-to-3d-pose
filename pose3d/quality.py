@@ -34,7 +34,9 @@ from pose3d import pipeline as pl
 # `pose3d.app._load_rig` used to be a second copy of the same folder contract.
 from pose3d.calib.rigio import load_rig            # noqa: F401  (re-export)
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
-from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, Joint
+from pose3d.core.skeleton import (
+    BONES, CORE_INDEX, EXTREMITY_JOINTS, JOINT_NAMES, NUM_JOINTS, Joint,
+)
 from pose3d.geometry.bonefit import measure_bone_lengths
 from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import de_tilt_matrix, sequence_up
@@ -42,6 +44,11 @@ from pose3d.geometry.placement import ground_datum, take_floor
 from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, reprojection_error,
 )
+
+#: `EXTREMITY_JOINTS` as plain ints, to test a bone key's child against.
+_EXTREMITY_SET: frozenset[int] = frozenset(int(j) for j in EXTREMITY_JOINTS)
+#: `CORE_INDEX` as a membership test, for the per-joint loops below.
+_CORE_SET: frozenset[int] = frozenset(CORE_INDEX)
 
 # Human-readable name per canonical bone (audit table T1's row labels).
 BONE_NAMES: dict[tuple[int, int], str] = {
@@ -59,6 +66,8 @@ BONE_NAMES: dict[tuple[int, int], str] = {
     (int(Joint.RIGHT_HIP), int(Joint.RIGHT_KNEE)): "R thigh",
     (int(Joint.LEFT_KNEE), int(Joint.LEFT_ANKLE)): "L shin",
     (int(Joint.RIGHT_KNEE), int(Joint.RIGHT_ANKLE)): "R shin",
+    (int(Joint.LEFT_ANKLE), int(Joint.LEFT_TOE)): "L foot",
+    (int(Joint.RIGHT_ANKLE), int(Joint.RIGHT_TOE)): "R foot",
 }
 
 # (label, left bone, right bone) — the same limb on both sides of one rigid
@@ -141,9 +150,12 @@ def subject_height(poses: np.ndarray) -> float:
     THE denominator for every "% of body height" in the repo. Not the full 3D
     span (which includes the subject's motion across the take) and not the
     nose-to-ankle distance; a per-frame vertical extent, taken at the median.
+
+    Head-to-ankle span by definition — the toes are extremities; height to the
+    sole belongs to the heel/toe floor cut.
     """
     heights = []
-    for p in de_tilted(poses):
+    for p in de_tilted(poses)[:, CORE_INDEX]:
         v = ~np.isnan(p).any(1)
         if v.sum() >= 2:
             heights.append(float(p[v, 2].max() - p[v, 2].min()))
@@ -157,8 +169,11 @@ def figure_height_px(kp2d: np.ndarray) -> float:
     The two cameras are 2:1 apart in resolution, so a pixel error means twice
     as much in the right view as in the left. Every px figure is reported
     against this per-camera denominator as well as raw.
+
+    The toes are left out so the denominator, and every percentage built on
+    it, does not move when a foot comes into frame.
     """
-    kp2d = np.asarray(kp2d, float).reshape(-1, NUM_JOINTS, 2)
+    kp2d = np.asarray(kp2d, float).reshape(-1, NUM_JOINTS, 2)[:, CORE_INDEX]
     heights = []
     for f in kp2d:
         ys = f[np.isfinite(f).all(1), 1]
@@ -208,7 +223,12 @@ def bone_length_stats(poses: np.ndarray) -> dict:
             "asym_pct": (float(100.0 * abs(lm - rm) / ((lm + rm) / 2))
                          if ok else float("nan")),
         }
-    finite = [v["cv_pct"] for v in bones.values() if np.isfinite(v["cv_pct"])]
+    # The per-bone rows cover every edge; the take-wide summary is the core
+    # ones. An edge into an extremity is one badly detected toe away from
+    # reporting a rigid mannequin as a wobbling one, and it is absent
+    # altogether on every take detected before toe points existed.
+    finite = [v["cv_pct"] for key, v in bones.items()
+              if np.isfinite(v["cv_pct"]) and key[1] not in _EXTREMITY_SET]
     return {
         "bones": bones,
         "symmetry": sym,
@@ -237,6 +257,12 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
     The body keypoints played no part in the calibration, so this is an
     independent test of the extrinsics/intrinsics — but only of their mutual
     consistency: a focal error shared by both cameras largely cancels in F.
+
+    The per-joint rows cover every joint; the take-wide summary — and with it
+    `threshold_px` and `frac_over_threshold` — is over the core set, because
+    that is how the gate itself is sized (`pipeline.epipolar_threshold`: sized
+    from CORE, applied to all 17). The sidebar's gate line and the tooltip
+    have to read the number the gate used, so the two move together.
     """
     L = np.asarray(kp2d[CAM_LEFT], float)
     R = np.asarray(kp2d[CAM_RIGHT], float)
@@ -252,10 +278,12 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
                                   rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
             if np.isfinite(e):
                 vals.append(e)
-                dl, dr = _point_line_px(L[t, j], R[t, j], F)
-                d_left.append(dl)
-                d_right.append(dr)
-        allv.extend(vals)
+                if j in _CORE_SET:
+                    dl, dr = _point_line_px(L[t, j], R[t, j], F)
+                    d_left.append(dl)
+                    d_right.append(dr)
+        if j in _CORE_SET:
+            allv.extend(vals)
         per[JOINT_NAMES[j]] = {
             "n": len(vals),
             "median_px": _nanstat(vals, np.median),
@@ -330,7 +358,12 @@ def reprojection(poses: np.ndarray, kp2d: dict[str, np.ndarray], rig,
                 "max_px": float(col.max()) if col.size else float("nan"),
                 "median_pct_figure": _pct(m, fh),
             }
-        flat = errs[np.isfinite(errs)]
+        # per-joint rows over every joint, the camera's summary over the core
+        # set: `median_pct_figure` divides by `figure_height_px`, which is the
+        # core bbox, so a numerator over all 17 would compare two different
+        # figures.
+        flat = errs[:, CORE_INDEX]
+        flat = flat[np.isfinite(flat)]
         med = float(np.median(flat)) if flat.size else float("nan")
         out[cam] = {
             "per_joint": per,
@@ -364,23 +397,30 @@ def gap_stats(project: ProjectData) -> dict:
     still counts as missing HERE — it is a hole the cameras left — while
     `filled` says how many of those holes the fit was nonetheless given a
     value for. The two are meant to be read together.
+
+    Every count here is over CORE_INDEX. A toe is an extremity: a project
+    detected before toe points existed has two NaN toes in every frame, and
+    they are not holes in a reconstruction that never claimed them. Counting
+    them would move this readout on a take the client has already accepted,
+    and move it again the day a foot comes into frame.
     """
     missing, rejected, undetected, filled = [], 0, 0, 0
     for f in project.frames:
         p = np.asarray(f.pose3d, float).reshape(NUM_JOINTS, 3)
-        for j in range(NUM_JOINTS):
+        for j in CORE_INDEX:
             if np.isnan(p[j]).all():
                 missing.append((f.frame_id, JOINT_NAMES[j]))
         for c in CAMERAS:
-            undetected += int(
-                np.isnan(np.asarray(f.kp2d[c], float)).any(1).sum())
+            undetected += int(np.isnan(
+                np.asarray(f.kp2d[c], float)[CORE_INDEX]).any(1).sum())
             mask = f.rejected.get(c) if hasattr(f, "rejected") else None
             if mask is not None:
-                rejected += int(np.count_nonzero(np.asarray(mask, bool)))
+                rejected += int(np.count_nonzero(
+                    np.asarray(mask, bool)[CORE_INDEX]))
         flags = getattr(f, "filled", None)
         if flags is not None:
-            filled += int(np.count_nonzero(flags))
-    total = max(1, len(project.frames) * NUM_JOINTS)
+            filled += int(np.count_nonzero(np.asarray(flags, bool)[CORE_INDEX]))
+    total = max(1, len(project.frames) * len(CORE_INDEX))
     return {
         "missing": missing,
         "n_missing": len(missing),
@@ -459,7 +499,13 @@ def retarget_error(character, up: np.ndarray, height: float, scale: float,
             "max_pct_height": _pct(
                 float(col.max()) if col.size else float("nan"), height),
         }
-    flat = dists[np.isfinite(dists)]
+    # The per-joint rows above cover every joint; the take-wide summary below
+    # is the core set. A toe is the joint most often cropped, blurred or
+    # hallucinated, so letting its residual into the number the sidebar shows
+    # would make the client's accuracy reading depend on whether the feet were
+    # in shot — the thing the core-set rule exists to prevent.
+    flat = dists[:, CORE_INDEX]
+    flat = flat[np.isfinite(flat)]
     bend_stats = {
         label: {"n": len(vals),
                 "median_deg": float(np.median(vals)) if vals else float("nan"),

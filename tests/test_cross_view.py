@@ -97,6 +97,32 @@ def test_triangulate_reports_what_it_threw_away(geo):
     assert triangulate_project(data, rig) == 1
 
 
+def test_a_rejected_toe_is_not_in_the_number_the_user_reads(geo):
+    """The note's numerator and its denominator must be the same set.
+
+    The denominator is the core set (`rejection_note`), and
+    `quality.gap_stats["rejected"]` is core-only too, so a rejected toe
+    counted into the numerator would both inflate the percentage and make the
+    two readouts disagree about the same take. The MASK still records it: the
+    handle goes red, which is the toe colouring its own dot and nothing else.
+    """
+    from pose3d.core.skeleton import CORE_INDEX
+    from pose3d.pipeline import rejection_note
+
+    rig, data, _ = _rig_and_project(geo)
+    f = data.frames[0]
+    toe = int(Joint.LEFT_TOE)
+    f.kp2d[CAM_LEFT][toe] = f.kp2d[CAM_LEFT][int(Joint.LEFT_KNEE)]
+    f.scores[CAM_LEFT][toe] = 0.3
+
+    dropped = validate_cross_view(data, rig)
+
+    assert f.rejected[CAM_LEFT][toe], "the gate must still mask the toe"
+    assert not f.rejected[CAM_LEFT][CORE_INDEX].any()
+    assert dropped == 0
+    assert rejection_note(dropped, len(data.frames)) == ""
+
+
 def test_the_rejection_note_only_fires_when_it_matters():
     """One note, owned by the pipeline that owns the policy, so the import
     dialog and the recalculate status line cannot drift apart."""
@@ -506,3 +532,47 @@ def test_losing_a_joint_narrows_the_gate_onto_the_takes_own_tail():
     # ...and on THIS take the narrowing costs no good pair: the same two the
     # clean gate refuses, and no more
     assert validate_cross_view(damaged, rig) <= 6   # today 2
+
+
+def test_the_gate_is_sized_by_the_core_set_and_applied_to_every_joint():
+    """Detected toes must not be able to widen the gate for the body.
+
+    The gate is `clip(6 x median Sampson, 25 px, the per-image allowance)`, and
+    the median decides which CORE keypoints get dropped. A big toe is the
+    noisiest point the detector produces — small, often motion-blurred, and
+    frequently half out of frame — so letting it into the median buys the body
+    a looser gate for nothing: on the client take, Run Detection alone moved
+    the threshold 28.049 -> 28.998 px with no other change.
+
+    Sized from the core set, APPLIED to all 17: a toe past the gate is still
+    rejected, it just cannot widen it first.
+    """
+    from pose3d.core.skeleton import CORE_INDEX
+    from pose3d.core.io_project import load_project
+    from pose3d.calib.rigio import load_rig
+
+    rig = load_rig(FIXTURE / "calibration")
+    blind = load_project(FIXTURE)                 # the take as delivered: NaN toes
+    assert np.isnan(blind.frames[0].kp2d[CAM_LEFT][int(Joint.LEFT_TOE)]).all()
+    base = epipolar_threshold(rig, blind)
+
+    # the same take, its toes now detected and wildly inconsistent across views
+    seen = load_project(FIXTURE)
+    for f in seen.frames:
+        for toe in (int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)):
+            f.kp2d[CAM_LEFT][toe] = f.kp2d[CAM_LEFT][int(Joint.HEAD)]
+            f.kp2d[CAM_RIGHT][toe] = f.kp2d[CAM_RIGHT][int(Joint.RIGHT_WRIST)]
+            f.scores[CAM_LEFT][toe] = f.scores[CAM_RIGHT][toe] = 0.9
+
+    assert epipolar_threshold(rig, seen) == pytest.approx(base), \
+        "the toes sized the gate the body is judged by"
+
+    # and the toes are still GATED: each one is past the threshold, and the
+    # lower-confidence view of it is masked
+    dropped = validate_cross_view(seen, rig)
+    f0 = seen.frames[0]
+    assert (f0.rejected[CAM_LEFT][int(Joint.LEFT_TOE)]
+            or f0.rejected[CAM_RIGHT][int(Joint.LEFT_TOE)])
+    assert not f0.rejected[CAM_LEFT][CORE_INDEX].any()
+    assert dropped == validate_cross_view(blind, rig), \
+        "a rejected toe is not in the count the user reads"

@@ -12,6 +12,7 @@ JSON stores NaN as null so the file stays valid JSON; load restores NaN.
 from __future__ import annotations
 
 import json
+import shutil
 import sqlite3
 from contextlib import closing
 from pathlib import Path, PurePosixPath
@@ -21,10 +22,19 @@ import numpy as np
 from pose3d.core.project import (
     CAMERAS, Correction, Frame, ProjectData,
 )
-from pose3d.core.skeleton import NUM_HEAD_KP, NUM_JOINTS
+from pose3d.core.skeleton import FACE_KP_BASE, NUM_HEAD_KP, NUM_JOINTS
 
 PROJECT_JSON = "project.json"
 CORRECTIONS_DB = "corrections.sqlite"
+#: `PRAGMA user_version` of corrections.sqlite. 0 is every log written before
+#: face ids had a fixed base (face rows carry joint = 15 + k); at
+#: CORRECTIONS_SCHEMA they carry `skeleton.face_kp_id(k)`.
+CORRECTIONS_SCHEMA = 2
+#: NUM_JOINTS on the day the old convention was retired — a literal on
+#: purpose: the migration reads OLD files, and NUM_JOINTS has since grown.
+_LEGACY_NUM_JOINTS = 15
+#: The untouched copy the migration leaves beside the log, once.
+LEGACY_BACKUP = "corrections.sqlite.pre-toes"
 
 
 def _arr_to_json(a: np.ndarray) -> list:
@@ -201,7 +211,7 @@ def load_project(folder: str | Path) -> ProjectData:
             fr.scores_raw[c] = (_json_to_vec(raw_sc[c]) if raw_sc.get(c)
                                 else fr.scores[c].copy())
             fr.rejected[c] = _json_to_flags(rejected.get(c))
-            fr.corrected[c] = np.array(fd["corrected"][c][:NUM_JOINTS], dtype=bool)
+            fr.corrected[c] = _json_to_flags(fd["corrected"][c])
             fr.head2d[c] = _json_to_arr(head2d.get(c), 2, NUM_HEAD_KP)
             fr.head_scores[c] = _json_to_vec(head_sc.get(c), NUM_HEAD_KP)
             # absent before the key existed -> nothing was hand-placed, which
@@ -237,13 +247,60 @@ def load_project(folder: str | Path) -> ProjectData:
 
 # --- correction log (SQLite; append-only, seeds the v2 learning loop) -------
 
+def _migrate_corrections(path: Path, conn: sqlite3.Connection) -> int:
+    """Bring a log up to CORRECTIONS_SCHEMA; returns the rows rewritten.
+
+    Runs on every open and costs one PRAGMA when there is nothing to do. A
+    log at version 0 that holds rows in the OLD face band — at or above the
+    legacy joint count but below the fixed base — is an old log whose face
+    rows are about to be misread as body joints: it is copied to
+    LEGACY_BACKUP first (never overwritten if that exists), then those rows
+    move to the base. A fresh, empty log is just stamped.
+
+    Twice-safe in two ways, because the thing being rewritten is the
+    client's own work and a second pass would move it 85 ids past anything
+    that exists. The rows and the stamp are ONE transaction, so a process
+    killed mid-migration leaves the log exactly as it found it; and the band
+    is bounded above, so a row already at the base is never touched again
+    whatever the version says — a log half-migrated by an older build (rows
+    moved, version still 0) is therefore only stamped.
+    """
+    version = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if version >= CORRECTIONS_SCHEMA:
+        return 0
+    band = (_LEGACY_NUM_JOINTS, FACE_KP_BASE)
+    n_old = int(conn.execute(
+        "SELECT COUNT(*) FROM corrections WHERE joint >= ? AND joint < ?",
+        band).fetchone()[0])
+    if n_old:
+        backup = path.with_name(LEGACY_BACKUP)
+        if not backup.exists():
+            conn.commit()
+            shutil.copy2(path, backup)
+    # ONE transaction: `PRAGMA user_version` lives in the database header and
+    # rolls back with the UPDATE, so the rows and the version that describes
+    # them can never disagree on disk. (The UPDATE opens the transaction; the
+    # PRAGMA joins it. With nothing to move there is no transaction to join
+    # and the stamp stands alone, which is all it has to do.)
+    with conn:
+        if n_old:
+            conn.execute(
+                "UPDATE corrections SET joint = ? + (joint - ?) "
+                "WHERE joint >= ? AND joint < ?",
+                (FACE_KP_BASE, _LEGACY_NUM_JOINTS, *band))
+        conn.execute(f"PRAGMA user_version = {CORRECTIONS_SCHEMA}")
+    return n_old
+
+
 def _connect(folder: Path) -> sqlite3.Connection:
-    conn = sqlite3.connect(folder / CORRECTIONS_DB)
+    path = folder / CORRECTIONS_DB
+    conn = sqlite3.connect(path)
     conn.execute(
         """CREATE TABLE IF NOT EXISTS corrections (
                id INTEGER PRIMARY KEY AUTOINCREMENT,
                frame_id TEXT, cam TEXT, joint INTEGER,
                old_x REAL, old_y REAL, new_x REAL, new_y REAL, ts TEXT)""")
+    _migrate_corrections(path, conn)
     return conn
 
 

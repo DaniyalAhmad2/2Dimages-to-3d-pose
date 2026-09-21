@@ -167,3 +167,23 @@ def test_a_save_keeps_a_correction_it_never_saw(tmp_path):
     # the row written while this session held its edit in memory came first
     stored = load_project(tmp_path).corrections
     assert {(c.cam, c.joint) for c in stored} == {(CAM_LEFT, 2), (CAM_RIGHT, 9)}
+
+
+def test_a_face_id_edits_the_face_point_and_a_body_id_the_body(tmp_path):
+    from pose3d.core.corrections import CorrectionStack
+    from pose3d.core.project import CAM_LEFT, Frame
+    from pose3d.core.skeleton import NUM_JOINTS, face_kp_id
+    f = Frame(frame_id="0001")
+    stack = CorrectionStack({"0001": f})
+
+    stack.apply("0001", CAM_LEFT, face_kp_id(2), 10.0, 20.0)
+    assert tuple(f.head2d[CAM_LEFT][2]) == (10.0, 20.0)
+    assert f.head_corrected[CAM_LEFT][2]
+    assert np.isnan(f.kp2d[CAM_LEFT]).all(), "a face id must not touch a body joint"
+
+    stack.apply("0001", CAM_LEFT, NUM_JOINTS - 1, 30.0, 40.0)
+    assert tuple(f.kp2d[CAM_LEFT][NUM_JOINTS - 1]) == (30.0, 40.0)
+    assert f.corrected[CAM_LEFT][NUM_JOINTS - 1]
+
+    stack.undo(); stack.undo()
+    assert np.isnan(f.head2d[CAM_LEFT][2]).all() and not f.head_corrected[CAM_LEFT][2]

@@ -184,3 +184,178 @@ def test_symmetry_flags_at_five_percent_not_three(baseline):
     loud = copy.copy(baseline)
     loud.symmetry = {"thigh": {"asym_pct": 5.6}}
     assert len(symmetry_notes(loud)) == 1
+
+
+# --- the toes are extremities: no take-wide number counts them -------------
+
+def test_a_never_detected_toe_is_not_a_gap_in_the_reconstruction():
+    """`gap_stats` is a take-wide readout, so it runs over CORE_INDEX.
+
+    Every project detected before the toes existed has two NaN toes in every
+    frame. Counting them would report 2 + 2*n_frames holes and an `undetected`
+    of 4*n_frames on a take the client has already accepted — a number that
+    moves the day a foot comes into frame, which is exactly what the core-set
+    rule exists to prevent.
+    """
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT, Frame, ProjectData
+    from pose3d.core.skeleton import CORE_INDEX, EXTREMITY_JOINTS
+    from pose3d.quality import gap_stats
+
+    p = ProjectData(name="pre-toes", keypoint_model="halpe26")
+    for fid in ("0001", "0002"):
+        f = Frame(frame_id=fid)
+        f.pose3d[CORE_INDEX] = 1.0               # every core joint reconstructed
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam][CORE_INDEX] = 1.0        # and detected in both views
+        p.frames.append(f)                       # the toes stay NaN throughout
+
+    g = gap_stats(p)
+    assert g["n_missing"] == 0 and g["missing"] == []
+    assert g["missing_pct"] == 0.0
+    assert g["undetected"] == 0
+
+    # and a CORE joint that is genuinely absent is still counted
+    p.frames[0].pose3d[int(Joint.LEFT_WRIST)] = np.nan
+    assert gap_stats(p)["n_missing"] == 1
+    # the denominator is the core set, not every joint
+    assert gap_stats(p)["missing_pct"] == 100.0 / (2 * len(CORE_INDEX))
+    assert len(EXTREMITY_JOINTS) == 2
+
+
+def test_the_figure_height_denominator_does_not_move_when_a_foot_appears():
+    """`figure_height_px` is the denominator of every px percentage the client
+    reads, so a foot coming into frame must not change it."""
+    from pose3d.core.skeleton import CORE_INDEX, NUM_JOINTS
+    from pose3d.quality import figure_height_px
+
+    kp = np.full((3, NUM_JOINTS, 2), np.nan)
+    kp[:, CORE_INDEX, 0] = 10.0
+    kp[:, CORE_INDEX, 1] = np.linspace(100.0, 400.0, len(CORE_INDEX))
+    without = figure_height_px(kp)
+    assert without == pytest.approx(300.0)
+
+    kp[:, int(Joint.LEFT_TOE)] = (10.0, 900.0)   # a toe well below the bbox
+    kp[:, int(Joint.RIGHT_TOE)] = (10.0, 900.0)
+    assert figure_height_px(kp) == pytest.approx(without)
+
+
+def test_the_subject_height_is_head_to_ankle_whether_or_not_the_toes_are_seen():
+    """`subject_height` is THE denominator of every "% of body height" the
+    client reads, and the Set-scale math on top of it. A take that happens to
+    have its feet in frame must not measure a different subject."""
+    from pose3d.core.skeleton import NUM_JOINTS
+    from pose3d.quality import subject_height
+    from tests.synth import sample_skeleton_3d
+
+    with_toes = np.stack([sample_skeleton_3d() for _ in range(3)])
+    assert np.isfinite(with_toes[:, int(Joint.LEFT_TOE)]).all(), "fixture"
+    assert (with_toes[0, int(Joint.LEFT_TOE), 2]
+            < with_toes[0, int(Joint.LEFT_ANKLE), 2]), "the toes are lower"
+
+    cropped = with_toes.copy()
+    cropped[:, [int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]] = np.nan
+
+    assert subject_height(with_toes) == pytest.approx(subject_height(cropped))
+    assert with_toes.shape[1] == NUM_JOINTS
+
+
+def test_a_wild_foot_bone_does_not_move_the_take_wide_bone_cv():
+    """`median_cv_pct`/`max_cv_pct` are the sidebar's bone-spread row — a
+    take-wide summary, so over core edges only. The foot bone keeps its own
+    row in the table (the toes colour their own dot), but one badly detected
+    toe must not be able to report a rigid mannequin as a wobbling one."""
+    from pose3d.core.skeleton import NUM_JOINTS
+    from pose3d.quality import bone_length_stats
+    from tests.synth import sample_skeleton_3d
+
+    rigid = np.stack([sample_skeleton_3d() for _ in range(6)])
+    steady = bone_length_stats(rigid)
+
+    wobbly = rigid.copy()
+    for i in range(len(wobbly)):                 # a foot that changes length
+        wobbly[i, int(Joint.LEFT_TOE), 1] += 0.15 * i
+        wobbly[i, int(Joint.RIGHT_TOE), 1] += 0.15 * i
+    got = bone_length_stats(wobbly)
+
+    foot = (int(Joint.LEFT_ANKLE), int(Joint.LEFT_TOE))
+    assert got["bones"][foot]["cv_pct"] > 20.0, "the row must still report it"
+    assert got["median_cv_pct"] == pytest.approx(steady["median_cv_pct"])
+    assert got["max_cv_pct"] == pytest.approx(steady["max_cv_pct"])
+    assert rigid.shape[1] == NUM_JOINTS
+
+
+def test_a_toe_residual_does_not_move_the_take_wide_retarget_error():
+    """`retarget_pct_height["median_pct_height"]` is the sidebar's retarget
+    row, so it is a take-wide number over the core set.
+
+    Once the rig reads the toes off the foot bones' tails they acquire a
+    residual like any other joint — and a foot is the joint most often
+    cropped, blurred or hallucinated, so letting it into the summary would
+    make the client's accuracy reading depend on whether the feet were in
+    shot. The per-joint row still reports it.
+    """
+    from pose3d.core.skeleton import NUM_JOINTS
+    from pose3d.quality import retarget_error, subject_height
+    from tests.synth import sample_skeleton_3d
+
+    class _Rig:
+        """Reproduces its input exactly, except at the toes."""
+
+        def __init__(self, offset):
+            self.offset = offset
+
+        def posed_joints(self, p, valid, head_pts=None):
+            J = np.array(p, float)
+            J[[int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)], 0] += self.offset
+            return J
+
+    up = np.stack([sample_skeleton_3d() for _ in range(4)])
+    h = subject_height(up)
+
+    exact = retarget_error(_Rig(0.0), up, h, 1.0)
+    wild = retarget_error(_Rig(0.4), up, h, 1.0)          # 0.4 m off, per toe
+
+    assert wild["per_joint"]["LEFT_TOE"]["median_pct_height"] > 20.0, \
+        "the per-joint row must still report the toe"
+    for key in ("median_m", "median_pct_height", "p90_pct_height"):
+        assert wild[key] == pytest.approx(exact[key]), key
+
+    # and the same take with the toes never detected reads identically
+    cropped = up.copy()
+    cropped[:, [int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]] = np.nan
+    blind = retarget_error(_Rig(0.4), cropped, h, 1.0)
+    for key in ("median_m", "median_pct_height", "p90_pct_height"):
+        assert wild[key] == pytest.approx(blind[key]), key
+    assert up.shape[1] == NUM_JOINTS
+
+
+def test_a_toe_reprojection_residual_does_not_move_the_camera_summary():
+    """`reprojection`'s take-wide row divides by `figure_height_px`, which is
+    already the core bbox, so its numerator must be the same set or the
+    percentage compares two different figures."""
+    from pose3d.core.skeleton import CORE_INDEX
+    from pose3d.quality import figure_height_px, reprojection
+
+    p = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    pipeline.triangulate_project(p, rig)
+    poses = np.stack([f.pose3d for f in p.frames])
+    kp2d = {c: np.stack([f.kp2d[c] for f in p.frames]) for c in CAMERAS}
+    fh = {c: figure_height_px(kp2d[c]) for c in CAMERAS}
+
+    base = reprojection(poses, kp2d, rig, fh)
+
+    # give the toes a 3D position and a 2D observation that disagree wildly
+    loud_poses, loud_kp = poses.copy(), {c: kp2d[c].copy() for c in CAMERAS}
+    for toe in (int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)):
+        loud_poses[:, toe] = loud_poses[:, int(Joint.LEFT_ANKLE)]
+        for c in CAMERAS:
+            loud_kp[c][:, toe] = loud_kp[c][:, int(Joint.HEAD)]
+    loud = reprojection(loud_poses, loud_kp, rig, fh)
+
+    assert loud["left"]["per_joint"]["LEFT_TOE"]["n"] > 0, "the row is live"
+    assert loud["left"]["per_joint"]["LEFT_TOE"]["median_px"] > 50.0
+    for cam in CAMERAS:
+        for key in ("median_px", "p90_px", "max_px", "median_pct_figure"):
+            assert loud[cam][key] == pytest.approx(base[cam][key]), (cam, key)
+    assert len(CORE_INDEX) == 15

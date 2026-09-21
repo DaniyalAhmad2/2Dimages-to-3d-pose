@@ -128,20 +128,27 @@ def test_one_bad_frame_does_not_lose_the_take():
 
 
 def test_sparse_frame_uses_lm():
-    """A frame with 5 joints missing must fit on the fast solver.
+    """A frame with a limb's worth of joints missing must fit on the fast solver.
 
-    Levenberg-Marquardt refuses an under-determined problem, and with all 15
-    joints as variables a 10-joint frame is one. Freezing the joints no
+    Levenberg-Marquardt refuses an under-determined problem, and with every
+    joint as a variable a 10-joint frame is one. Freezing the joints no
     observation can pin removes their variables (and their bone residuals, so
     a frozen joint cannot drag an observed one), which puts the frame back on
     lm: 746.78 ms -> ~6 ms measured on the client's take.
+
+    The toes go with the ankles: an ankle whose knee AND toe are observed is
+    pinned from both sides and is a VARIABLE, not a dangling joint, so leaving
+    them in would measure a different frame from the one this test is about.
     """
     import time
 
     gt = sample_skeleton_3d()
     target = measure_bone_lengths(gt[None])
     raw = gt.copy()
-    missing = [int(j) for j in (6, 7, 11, 13, 14)]      # wrists, knee, ankles
+    missing = [int(j) for j in (Joint.LEFT_WRIST, Joint.RIGHT_WRIST,
+                                Joint.LEFT_KNEE, Joint.LEFT_ANKLE,
+                                Joint.RIGHT_ANKLE, Joint.LEFT_TOE,
+                                Joint.RIGHT_TOE)]
     raw[missing] = np.nan
 
     observed = ~np.isnan(raw).any(1)

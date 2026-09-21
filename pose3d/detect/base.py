@@ -22,8 +22,9 @@ class Detection:
     xy: np.ndarray       # (NUM_JOINTS, 2) pixel coords (NaN if not found)
     scores: np.ndarray   # (NUM_JOINTS,) confidence in [0, 1]
     # Face keypoints (nose/eyes/ears), carried alongside rather than inside the
-    # canonical set so NUM_JOINTS stays 15. None from detectors that have no
-    # notion of a face (e.g. the manual one). See skeleton.extract_head.
+    # canonical set so NUM_JOINTS is the skeleton's own count (17 with the
+    # toes). None from detectors that have no notion of a face (e.g. the
+    # manual one). See skeleton.extract_head.
     head_xy: np.ndarray | None = None       # (NUM_HEAD_KP, 2)
     head_scores: np.ndarray | None = None   # (NUM_HEAD_KP,)
 

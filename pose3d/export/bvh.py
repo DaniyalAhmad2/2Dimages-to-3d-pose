@@ -53,6 +53,14 @@ class Joint:
     # index of this joint's first column in the motion matrix
     first_channel: int
     children: list[int] = field(default_factory=list)
+    #: A leaf joint's End Site OFFSET, i.e. where its bone ENDS, in the same
+    #: parent-rotated frame as `offset`. An End Site has no channels and no
+    #: motion columns, so it is not a joint of its own here — every caller
+    #: indexes `Bvh.joints` in step with the motion matrix — but a leaf bone's
+    #: tail is a real rig point (the character's toes ARE the foot bones'
+    #: tails), so the file's answer for it is kept rather than thrown away:
+    #: `pos[i] + rot[i] @ end_offset` is that tail in world space.
+    end_offset: np.ndarray | None = None
 
 
 @dataclass
@@ -185,6 +193,13 @@ def parse(path: Path | str) -> Bvh:
         elif key == "OFFSET" and stack and stack[-1] >= 0 and pending is not None:
             joints[stack[-1]].offset = np.array([float(v) for v in tok[1:4]])
             pending = None          # consumed by the joint we just opened
+        elif key == "OFFSET" and len(stack) > 1 and stack[-1] < 0 \
+                and stack[-2] >= 0:
+            # the OFFSET inside an End Site block: the enclosing leaf bone's
+            # tail. Kept on that joint (see `Joint.end_offset`) rather than
+            # added as a row, so `joints`, `forward_kinematics` and every
+            # channel index stay exactly what they were.
+            joints[stack[-2]].end_offset = np.array([float(v) for v in tok[1:4]])
         elif key == "CHANNELS" and stack and stack[-1] >= 0:
             j = joints[stack[-1]]
             j.channels = tok[2:2 + int(tok[1])]

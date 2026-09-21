@@ -20,8 +20,8 @@ from pose3d.calib.extrinsics import Extrinsics
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, ProjectData
 from pose3d.core.skeleton import (
-    DERIVED_MIDPOINT_PARENTS, JOINT_NAMES, Joint, NUM_HEAD_KP, NUM_JOINTS,
-    derived_joints,
+    CORE_INDEX, DERIVED_MIDPOINT_PARENTS, EXTREMITY_JOINTS, JOINT_NAMES,
+    Joint, NUM_HEAD_KP, NUM_JOINTS, derived_joints,
 )
 from pose3d.detect.base import KeypointDetector
 from pose3d.geometry.bonefit import (
@@ -31,6 +31,9 @@ from pose3d.geometry.bonefit import (
 from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, triangulate_points,
 )
+
+#: `CORE_INDEX` as a membership test, for the per-joint loops below.
+_CORE_SET: frozenset[int] = frozenset(CORE_INDEX)
 
 
 class Cancelled(Exception):
@@ -435,8 +438,10 @@ def epipolar_threshold(rig: CalibratedRig,
                        project: ProjectData | None = None) -> float:
     """Pixels of epipolar disagreement tolerated by the cross-view gate.
 
-    Data-driven when a project is supplied: clip(6 x median Sampson, 25 px,
-    1.4 % of the SMALLER image's diagonal). The image-only rule this replaces
+    Data-driven when a project is supplied: clip(6 x median Sampson over the
+    CORE joints, 25 px, 1.4 % of the SMALLER image's diagonal) — sized from
+    the core set and applied to every joint, see the loop below. The
+    image-only rule this replaces
     was 71.5 px on the client take against an observed median of 4.91 px —
     14.6x the data, 3x its p99, and provably inert: it rejected 0 of 388 pairs
     and caught the ankle-on-knee hallucination its own docstring names in only
@@ -452,9 +457,16 @@ def epipolar_threshold(rig: CalibratedRig,
     ceiling = min(per_image_allowances(rig).values())
     if project is None or not project.frames:
         return float(ceiling)
+    # SIZED from the core set, APPLIED to all 17. A big toe is the noisiest
+    # point the detector produces — small, often motion-blurred, frequently
+    # half out of frame — and this median decides which CORE keypoints get
+    # dropped. On the client take, Run Detection alone moved the threshold
+    # 28.049 -> 28.998 px with nothing else changed. The toes are still gated
+    # (`validate_cross_view` judges every joint); they just do not buy the
+    # body a looser gate first.
     dists = []
     for frame in project.frames:
-        for j in range(NUM_JOINTS):
+        for j in CORE_INDEX:
             e = epipolar_distance(
                 frame.kp2d[CAM_LEFT][j], frame.kp2d[CAM_RIGHT][j],
                 rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],
@@ -603,7 +615,12 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
     back. The mask is rebuilt from scratch here on every call, so a recompute
     with a better rig reinstates every observation it no longer objects to.
 
-    Returns the number of observations rejected.
+    Returns the number of CORE observations rejected. Every rejection is
+    masked, toes included — the mask is what colours a handle — but the count
+    is the one the user is told (`rejection_note`, whose denominator is the
+    core set, and `quality.gap_stats["rejected"]`, which is core-only for the
+    same reason). A take whose toes the gate refuses must not read as a worse
+    calibration than the same take with its feet out of frame.
     """
     if epi_thr is None:
         epi_thr = epipolar_threshold(rig, project)
@@ -618,7 +635,9 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
         for c in (CAM_LEFT, CAM_RIGHT):
             frame.rejected[c][:] = False
         for j in range(NUM_JOINTS):
-            dropped += _judge(frame, j, rig, F, epi_thr, allow)
+            # judged on every joint, counted on the core ones
+            n = _judge(frame, j, rig, F, epi_thr, allow)
+            dropped += n if j in _CORE_SET else 0
     return dropped
 
 
@@ -754,8 +773,13 @@ _REJECT_NOTE_FRAC = 0.15
 
 def rejection_note(dropped: int, n_frames: int) -> str:
     """One sentence for the user about keypoints the cross-view check threw
-    away, or "" when the amount is unremarkable."""
-    total = max(1, n_frames * NUM_JOINTS)
+    away, or "" when the amount is unremarkable.
+
+    The denominator is the core set: a toe the detector never produced was
+    never rejected either, and the percentage the client reads must not move
+    because the skeleton grew a joint.
+    """
+    total = max(1, n_frames * len(CORE_INDEX))
     frac = dropped / total
     if frac < _REJECT_NOTE_FRAC:
         return ""
@@ -962,13 +986,21 @@ def bone_length_targets(project: ProjectData) -> tuple[dict, list[str]]:
     a residual whether or not the joint it belongs to is being solved for, so
     an unmeasurable bone used to drag every observed joint around it toward a
     skeleton 14x the size of the client's mannequin.
+
+    The REPORT names core bones only. A bone into an extremity is unmeasurable
+    on every take detected before toe points existed, so listing it would put
+    two lines the user can do nothing about in front of every project they
+    own. The fit is unchanged: those bones still get their fallback target,
+    and a toe no view saw is frozen out of the solve anyway.
     """
     raw = np.stack([f.pose3d for f in project.frames]) if project.frames \
         else np.zeros((0, NUM_JOINTS, 3))
     measured = measure_bone_lengths(raw)
     fb = fallback_bone_lengths(reference_from_measured(measured))
+    extremity = {int(j) for j in EXTREMITY_JOINTS}
     fallen = [f"{JOINT_NAMES[a]}-{JOINT_NAMES[b]}"
-              for (a, b), v in measured.items() if v <= 1e-6]
+              for (a, b), v in measured.items()
+              if v <= 1e-6 and int(b) not in extremity]
     return {k: (v if v > 1e-6 else fb[k]) for k, v in measured.items()}, fallen
 
 

@@ -23,6 +23,12 @@ from PySide6.QtWidgets import (
 HEAD_MODE_ITEMS = (("nose", "Head: nose"),
                    ("face", "Head: face (nose + ears)"))
 
+#: Shown once on opening a Halpe-26 project whose toes were never detected —
+#: every project saved before the toe joints existed. Nothing is re-detected
+#: uninvited; Run Detection adds them.
+TOES_HINT = ("This project was detected before toe points existed — "
+             "Run Detection adds them.")
+
 
 from pose3d.core.names import safe_name
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT
@@ -187,7 +193,8 @@ class MainWindow(QMainWindow):
         set_default_head_mode(getattr(model.project, "head_mode", "nose"))
         self.setWindowTitle("Pose3D — Animation Dashboard")
         self.resize(*_initial_size())
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage(
+            TOES_HINT if self.model.predates_toes() else "Ready", 15000)
 
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -983,7 +990,7 @@ class MainWindow(QMainWindow):
         from PySide6.QtWidgets import QMessageBox
         from pose3d.ui import filedialog
         import numpy as np
-        from pose3d.core.skeleton import NUM_JOINTS
+        from pose3d.core.skeleton import CORE_INDEX, CORE_JOINTS
         if self._busy():
             return
         frames = self.model.project.frames
@@ -991,9 +998,11 @@ class MainWindow(QMainWindow):
         # gap fill interpolated is posed and exported, but it is not something
         # the cameras saw, so it does not count towards "the two views gave us
         # a figure". Counting it here would let a take whose every other frame
-        # is an interpolation report a full skeleton.
-        per_frame = [int((~np.isnan(f.fitted3d).any(1)
-                          & ~np.asarray(f.filled, bool)).sum())
+        # is an interpolation report a full skeleton. Over the CORE joints:
+        # the toes are extremities, often cropped, and a take whose feet are
+        # out of frame must not be called sparse for it.
+        per_frame = [int((~np.isnan(f.fitted3d[CORE_INDEX]).any(1)
+                          & ~np.asarray(f.filled, bool)[CORE_INDEX]).sum())
                      for f in frames]
         total = sum(per_frame)
         if not frames or total == 0:
@@ -1008,7 +1017,7 @@ class MainWindow(QMainWindow):
         if avg < 5:   # too few joints to look like a figure
             go = QMessageBox.question(
                 self, "Sparse reconstruction",
-                f"Only about {avg:.0f} of {NUM_JOINTS} joints were reconstructed "
+                f"Only about {avg:.0f} of {len(CORE_JOINTS)} joints were reconstructed "
                 "per frame, so the video will look almost empty.\n\n"
                 "This is a calibration/data issue — commonly approximate "
                 "intrinsics, or the two views being too different so joints get "

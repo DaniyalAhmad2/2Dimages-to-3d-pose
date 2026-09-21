@@ -1772,3 +1772,105 @@ def test_undoing_a_correction_clears_the_filmstrip_dot(qapp):
     win.model.undo()
 
     assert win.timeline.status(3) != "corrected"
+
+
+def test_missing_toes_do_not_change_the_frame_band_or_the_dial(qapp):
+    """The toes are extremities: a frame whose every core joint is good and
+    whose toes the detector never saw reads exactly as it did before the
+    toes existed — its dot, its dial, its figure height."""
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+    from pose3d.core.skeleton import Joint
+    from pose3d.ui.model import frame_stat, worst_per_joint
+    win = _keyboard_window(n=4)
+    m = win.model
+    before_h = dict(m.figure_h_px())
+    errs_before = m._accuracy(1)
+    stat_before = frame_stat(worst_per_joint(errs_before, "measured"))
+
+    for f in m.project.frames:
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+            f.scores[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = 0.0
+        f.pose3d[[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+        f.fitted3d[[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+    m.invalidate_readouts()
+
+    assert m.figure_h_px() == pytest.approx(before_h, rel=1e-9)
+    stat_after = frame_stat(worst_per_joint(m._accuracy(1), "measured"))
+    assert stat_after == pytest.approx(stat_before, rel=1e-9)
+    win._refresh_timeline_status()
+    assert win.timeline.status(1) != "red" or not np.isfinite(stat_before)
+
+    # And the core-set cut is only taken on a WHOLE skeleton: a caller that
+    # hands frame_stat an already-filtered array gets the median of what it
+    # passed, not a CORE_INDEX slice of somebody else's joints.
+    assert frame_stat(np.array([1.0, 3.0, 7.0])) == pytest.approx(3.0)
+
+
+def test_frame_stat_takes_its_median_over_the_core_joints():
+    """The rule the test above protects, with numbers that can move it.
+
+    The synthetic take reprojects almost exactly, so every joint's residual
+    is the same number there and no median can shift. Here the residuals are
+    a spread and the two toes are the worst of them: counted, they would drag
+    the frame's median up a whole joint.
+    """
+    from pose3d.core.skeleton import CORE_JOINTS, NUM_JOINTS
+    from pose3d.ui.model import frame_stat
+    per_joint = np.arange(1.0, NUM_JOINTS + 1.0)        # toes last, worst
+    assert frame_stat(per_joint) == pytest.approx(
+        float(np.median(np.arange(1.0, len(CORE_JOINTS) + 1.0))))
+
+
+def test_a_project_detected_before_the_toes_gets_one_hint(qapp):
+    from PySide6.QtWidgets import QApplication
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+    from pose3d.core.skeleton import Joint
+    from pose3d.ui.main_window import MainWindow, TOES_HINT
+    from pose3d.ui.model import ProjectModel
+    data, rig, _ = _long_project(3)
+    data.keypoint_model = "halpe26"
+    for f in data.frames:
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+    model = ProjectModel(data, rig)
+    assert model.predates_toes()
+    win = MainWindow(model)
+    win.show(); QApplication.processEvents()
+    assert win.statusBar().currentMessage() == TOES_HINT
+
+    data2, rig2, _ = _long_project(3)
+    data2.keypoint_model = "halpe26"
+    assert not ProjectModel(data2, rig2).predates_toes(), "toes present: no hint"
+    data3, rig3, _ = _long_project(3)
+    data3.keypoint_model = "coco17"
+    for f in data3.frames:
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+    assert not ProjectModel(data3, rig3).predates_toes(), "COCO-17 cannot add toes"
+
+
+def test_the_recompute_banners_numbers_ignore_the_toes():
+    """The recompute-on-open banner quotes a median/max move and a % of the
+    figure's height — take-wide numbers, so over the core set like
+    `quality.subject_height`. The same take with its feet in frame must read
+    the same sentence."""
+    from pose3d.core.skeleton import Joint
+    from pose3d.ui.model import _body_height, _recompute_note
+
+    rng = np.random.default_rng(7)
+    stored = np.stack([sample_skeleton_3d() for _ in range(5)])
+    now = stored + rng.normal(0.0, 0.004, stored.shape)
+
+    toes = [int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]
+    cropped_stored, cropped_now = stored.copy(), now.copy()
+    cropped_stored[:, toes] = np.nan
+    cropped_now[:, toes] = np.nan
+
+    # a take whose toes moved a long way, and the same take with no toes
+    now[:, toes] += 0.5
+
+    assert _body_height(now) == pytest.approx(_body_height(cropped_now))
+    assert (_recompute_note(stored, now)
+            == _recompute_note(cropped_stored, cropped_now))
+    assert "% of the figure's height" in _recompute_note(stored, now)

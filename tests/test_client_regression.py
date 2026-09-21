@@ -277,7 +277,9 @@ def test_the_fixture_still_carries_the_pose_the_client_was_sent(delivered,
     sent = np.array([[[np.nan if v is None else v for v in xyz]
                       for xyz in doc["frames"][f.frame_id]]
                      for f in delivered.frames], dtype=float)
-    shown = np.stack([f.fitted3d for f in delivered.frames])
+    # the archive is frozen at the joints that existed when it was written, so
+    # the live pose is compared over its rows (the core set) and no others
+    shown = np.stack([f.fitted3d for f in delivered.frames])[:, :sent.shape[1]]
     worst = float(np.nanmax(np.linalg.norm(sent - shown, axis=2)))
     pct = 100.0 * worst / quality.subject_height_m
     # today 19.6 % of height: the lag the client complained about, now measured

@@ -1,4 +1,6 @@
 """Phase 1 verification: project save/reload round-trip (NaN-aware) + log."""
+import sqlite3
+
 import numpy as np
 
 from pose3d.core.io_project import (
@@ -280,3 +282,158 @@ def test_a_project_written_before_the_raw_arrays_still_loads(tmp_path):
     # back-filled, not aliased: writing one must not write the other
     g.kp2d_raw[CAM_LEFT][Joint.HEAD] = (0.0, 0.0)
     assert np.allclose(g.kp2d[CAM_LEFT][Joint.HEAD], (100.5, 200.5))
+
+
+def _legacy_log(folder, rows):
+    """A corrections.sqlite exactly as every build before the toes wrote it:
+    no user_version, face rows carrying joint = 15 + k."""
+    conn = sqlite3.connect(folder / "corrections.sqlite")
+    conn.execute(
+        """CREATE TABLE corrections (
+               id INTEGER PRIMARY KEY AUTOINCREMENT,
+               frame_id TEXT, cam TEXT, joint INTEGER,
+               old_x REAL, old_y REAL, new_x REAL, new_y REAL, ts TEXT)""")
+    conn.executemany(
+        "INSERT INTO corrections (frame_id,cam,joint,old_x,old_y,new_x,new_y,ts) "
+        "VALUES (?,?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+
+def test_the_face_ids_have_a_fixed_base_that_is_not_the_joint_count():
+    from pose3d.core.io_project import _LEGACY_NUM_JOINTS
+    from pose3d.core.skeleton import (
+        FACE_KP_BASE, NUM_HEAD_KP, NUM_JOINTS, face_kp_id, face_kp_index,
+        is_face_kp)
+    assert FACE_KP_BASE == 100 and NUM_JOINTS < FACE_KP_BASE
+    # the count on the day the old convention was retired, frozen: the
+    # migration reads files written back then, and NUM_JOINTS has moved since
+    assert _LEGACY_NUM_JOINTS == 15
+    for k in range(NUM_HEAD_KP):
+        assert is_face_kp(face_kp_id(k)) and face_kp_index(face_kp_id(k)) == k
+    for j in range(NUM_JOINTS):
+        assert not is_face_kp(j)
+
+
+def test_an_old_log_has_its_face_rows_moved_to_the_fixed_base_once(tmp_path):
+    from pose3d.core.io_project import (
+        CORRECTIONS_SCHEMA, LEGACY_BACKUP, _read_corrections)
+    from pose3d.core.skeleton import face_kp_id
+    _legacy_log(tmp_path, [("0001", "left", 6, 1, 2, 3, 4, ""),
+                           ("0001", "left", 15, 1, 2, 3, 4, ""),
+                           ("0002", "right", 19, 1, 2, 3, 4, "")])
+
+    got = _read_corrections(tmp_path)
+
+    assert [c.joint for c in got] == [6, face_kp_id(0), face_kp_id(4)]
+    assert (tmp_path / LEGACY_BACKUP).exists(), "no backup of the old log"
+    with sqlite3.connect(tmp_path / "corrections.sqlite") as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CORRECTIONS_SCHEMA
+    # reading again rewrites nothing: the migration ran exactly once
+    assert [c.joint for c in _read_corrections(tmp_path)] == [c.joint for c in got]
+
+
+def test_a_new_log_is_stamped_and_never_backed_up(tmp_path):
+    from pose3d.core.io_project import (
+        CORRECTIONS_SCHEMA, LEGACY_BACKUP, _read_corrections, append_correction)
+    from pose3d.core.project import Correction
+    from pose3d.core.skeleton import face_kp_id
+    append_correction(tmp_path, Correction("0001", "left", face_kp_id(1),
+                                           (0.0, 0.0), (1.0, 1.0), ""))
+    append_correction(tmp_path, Correction("0001", "left", 16,
+                                           (0.0, 0.0), (1.0, 1.0), ""))
+
+    assert not (tmp_path / LEGACY_BACKUP).exists()
+    assert [c.joint for c in _read_corrections(tmp_path)] == [face_kp_id(1), 16]
+    with sqlite3.connect(tmp_path / "corrections.sqlite") as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CORRECTIONS_SCHEMA
+
+
+def test_a_log_whose_rows_already_sit_at_the_fixed_base_is_only_stamped(tmp_path):
+    """The half-migrated state a killed build can leave behind: rows already
+    moved, `user_version` still 0. Moving them a SECOND time — to 185-189,
+    where nothing lives — is what the bounded predicate makes impossible: at
+    or above the base is already migrated, whatever the version says."""
+    from pose3d.core.io_project import (
+        CORRECTIONS_SCHEMA, LEGACY_BACKUP, _read_corrections)
+    from pose3d.core.skeleton import face_kp_id
+    _legacy_log(tmp_path, [("0001", "left", 6, 1, 2, 3, 4, ""),
+                           ("0001", "left", face_kp_id(0), 1, 2, 3, 4, ""),
+                           ("0002", "right", face_kp_id(4), 1, 2, 3, 4, "")])
+
+    got = _read_corrections(tmp_path)
+
+    assert [c.joint for c in got] == [6, face_kp_id(0), face_kp_id(4)]
+    assert not (tmp_path / LEGACY_BACKUP).exists(), \
+        "nothing was rewritten, so nothing needed a backup"
+    with sqlite3.connect(tmp_path / "corrections.sqlite") as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == CORRECTIONS_SCHEMA
+
+
+def test_a_migration_killed_before_its_stamp_still_migrates_exactly_once(tmp_path):
+    """The rows and the version stamp are ONE transaction.
+
+    As two, a process killed between them left the face rows at the fixed
+    base with the version still 0, and the next open moved them again — the
+    client's eye and ear corrections landing 85 ids past anything that
+    exists. The kill is simulated by making the stamp itself fail.
+    """
+    from pose3d.core.io_project import (
+        CORRECTIONS_DB, _migrate_corrections, _read_corrections)
+    from pose3d.core.skeleton import face_kp_id
+
+    class _Killed(Exception):
+        pass
+
+    class _DiesOnTheStamp(sqlite3.Connection):
+        def execute(self, sql, *args):
+            if sql.strip().upper().startswith("PRAGMA USER_VERSION ="):
+                raise _Killed(sql)
+            return super().execute(sql, *args)
+
+    _legacy_log(tmp_path, [("0001", "left", 15, 1, 2, 3, 4, ""),
+                           ("0002", "right", 19, 1, 2, 3, 4, "")])
+    path = tmp_path / CORRECTIONS_DB
+    conn = sqlite3.connect(path, factory=_DiesOnTheStamp)
+    try:
+        _migrate_corrections(path, conn)
+    except _Killed:
+        pass
+    else:                                    # pragma: no cover - the guard
+        raise AssertionError("the stamp did not run")
+    conn.close()
+
+    assert [c.joint for c in _read_corrections(tmp_path)] == [face_kp_id(0),
+                                                              face_kp_id(4)]
+
+
+def test_a_fifteen_joint_project_loads_with_undetected_toes(tmp_path):
+    """Every project saved before the toes: 15 rows in every per-joint array.
+    They load with NaN toes, and — the one array that used to be truncated
+    instead of padded — a `corrected` flag vector of the full length."""
+    import json
+    from pose3d.core.skeleton import Joint
+    p = ProjectData(name="old", keypoint_model="halpe26", head_source="skull")
+    f = Frame(frame_id="0001")
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        f.kp2d[cam][:] = 1.0
+        f.corrected[cam][3] = True
+    p.frames.append(f)
+    save_project(p, tmp_path)
+    doc = json.loads((tmp_path / "project.json").read_text(encoding="utf-8"))
+    fd = doc["frames"][0]
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        for key in ("kp2d", "scores", "kp2d_raw", "scores_raw", "corrected", "rejected"):
+            fd[key][cam] = fd[key][cam][:15]
+    for key in ("pose3d", "fitted3d", "filled"):
+        fd[key] = fd[key][:15]
+    (tmp_path / "project.json").write_text(json.dumps(doc), encoding="utf-8")
+
+    g = load_project(tmp_path).frames[0]
+
+    for cam in (CAM_LEFT, CAM_RIGHT):
+        assert g.kp2d[cam].shape == (NUM_JOINTS, 2)
+        assert np.isnan(g.kp2d[cam][Joint.LEFT_TOE]).all()
+        assert g.corrected[cam].shape == (NUM_JOINTS,) and g.corrected[cam][3]
+        assert not g.corrected[cam][Joint.LEFT_TOE]
+    assert g.pose3d.shape == (NUM_JOINTS, 3) and g.filled.shape == (NUM_JOINTS,)

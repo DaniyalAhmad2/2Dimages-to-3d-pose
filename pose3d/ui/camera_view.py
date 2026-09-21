@@ -15,7 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from pose3d.core.skeleton import (
-    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS)
+    BONES, EXTREMITY_PARENT, HEAD_KP_NAMES, JOINT_NAMES, Joint, NUM_HEAD_KP,
+    NUM_JOINTS, face_kp_id, face_kp_index)
 from pose3d.ui.model import STATE_OK
 from pose3d.ui.panels import (
     COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_label, accuracy_pct,
@@ -95,8 +96,8 @@ DASHED_STATES = ("missing",)
 # The face keypoints (nose, eyes, ears) that orient the character's head.
 # Drawn smaller and in one fixed accent colour: they are not part of the
 # skeleton, carry no accuracy banding, and exist to be nudged when the head
-# points the wrong way. Their item ids are offset by NUM_JOINTS — the single
-# convention the model and the correction stack share.
+# points the wrong way. Their item ids are `face_kp_id(k)` — the fixed base
+# the model and the correction stack share.
 #
 # An item exists for all five, but which of them the user SEES is decided per
 # frame by `set_pose` from the project's two head conventions, never here:
@@ -105,7 +106,7 @@ DASHED_STATES = ("missing",)
 # so a second dot on top of it would be one point drawn twice and draggable
 # to two places; and the eyes and ears steer nothing outside Face mode.
 FACE_COLOR = QColor(94, 200, 245)
-FACE_KP_IDS = tuple(range(NUM_JOINTS, NUM_JOINTS + NUM_HEAD_KP))
+FACE_KP_IDS = tuple(face_kp_id(k) for k in range(NUM_HEAD_KP))
 
 
 class _JointSignals(QObject):
@@ -189,7 +190,7 @@ class CameraView(QGraphicsView):
         self.setCursor(Qt.CursorShape.OpenHandCursor)   # hint: draggable to pan
         self._pixmap_item = None
         self._joints: list[JointItem] = []
-        self._face: list[JointItem] = []       # nose/eyes/ears, ids NUM_JOINTS..
+        self._face: list[JointItem] = []       # nose/eyes/ears, FACE_KP_IDS
         # per-face-item "this frame's conventions say draw it" flag. Kept
         # because `set_show_joints` knows nothing about either convention: it
         # may only hide dots and un-hide the ones that were shown, never
@@ -237,7 +238,7 @@ class CameraView(QGraphicsView):
         for jid in FACE_KP_IDS:
             item = JointItem(jid, radius=FACE_HANDLE_R)
             item.setBrush(QBrush(FACE_COLOR))
-            k = jid - NUM_JOINTS
+            k = face_kp_index(jid)
             # the nose turns the head in BOTH modes; the eyes and ears steer
             # it only in Face mode, and the tooltip says which is which
             what = ("turns the character's head" if HEAD_KP_NAMES[k] == "nose"
@@ -295,7 +296,7 @@ class CameraView(QGraphicsView):
         self._corrected = corrected
         self._filled = filled
         for item in self._face:
-            k = item.joint_id - NUM_JOINTS
+            k = face_kp_index(item.joint_id)
             q = None if head_xy is None else head_xy[k]
             wanted = (head_source == "skull" if HEAD_KP_NAMES[k] == "nose"
                       else head_mode == "face")
@@ -340,11 +341,27 @@ class CameraView(QGraphicsView):
 
         The last position this view had for the joint — for a dropout mid-take
         that is the previous frame's, a few pixels from where the limb really
-        is — else the middle of the image, the one point always on screen.
+        is. A toe never seen in this view parks just below its ankle (the
+        cursor is already there when a foot needs fixing). Else the middle of
+        the image, the one point always on screen.
+
+        That drop has to be a real distance. An unreadable frame still leaves
+        a pixmap item behind — an empty one, zero high — and a toe dropped
+        zero pixels sits exactly ON the ankle: two handles at one point, and
+        the one on top is the only one `itemAt` answers, so the ankle becomes
+        the joint the user cannot grab. With no image to measure, the centre
+        below.
         """
         prev = self._last_seen.get(j)
         if prev is not None:
             return QPointF(prev)
+        h = (self._pixmap_item.boundingRect().height()
+             if self._pixmap_item is not None else 0.0)
+        parent = EXTREMITY_PARENT.get(Joint(j))
+        if h and parent is not None:
+            anchor = self._joints[int(parent)]
+            if anchor.isVisible() and not anchor.is_placeholder:
+                return QPointF(anchor.pos().x(), anchor.pos().y() + 0.05 * h)
         if self._pixmap_item is not None:
             r = self._pixmap_item.boundingRect()
             if r.width() and r.height():
