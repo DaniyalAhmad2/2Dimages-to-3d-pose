@@ -282,3 +282,80 @@ def test_a_wild_foot_bone_does_not_move_the_take_wide_bone_cv():
     assert got["median_cv_pct"] == pytest.approx(steady["median_cv_pct"])
     assert got["max_cv_pct"] == pytest.approx(steady["max_cv_pct"])
     assert rigid.shape[1] == NUM_JOINTS
+
+
+def test_a_toe_residual_does_not_move_the_take_wide_retarget_error():
+    """`retarget_pct_height["median_pct_height"]` is the sidebar's retarget
+    row, so it is a take-wide number over the core set.
+
+    Once the rig reads the toes off the foot bones' tails they acquire a
+    residual like any other joint — and a foot is the joint most often
+    cropped, blurred or hallucinated, so letting it into the summary would
+    make the client's accuracy reading depend on whether the feet were in
+    shot. The per-joint row still reports it.
+    """
+    from pose3d.core.skeleton import NUM_JOINTS
+    from pose3d.quality import retarget_error, subject_height
+    from tests.synth import sample_skeleton_3d
+
+    class _Rig:
+        """Reproduces its input exactly, except at the toes."""
+
+        def __init__(self, offset):
+            self.offset = offset
+
+        def posed_joints(self, p, valid, head_pts=None):
+            J = np.array(p, float)
+            J[[int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)], 0] += self.offset
+            return J
+
+    up = np.stack([sample_skeleton_3d() for _ in range(4)])
+    h = subject_height(up)
+
+    exact = retarget_error(_Rig(0.0), up, h, 1.0)
+    wild = retarget_error(_Rig(0.4), up, h, 1.0)          # 0.4 m off, per toe
+
+    assert wild["per_joint"]["LEFT_TOE"]["median_pct_height"] > 20.0, \
+        "the per-joint row must still report the toe"
+    for key in ("median_m", "median_pct_height", "p90_pct_height"):
+        assert wild[key] == pytest.approx(exact[key]), key
+
+    # and the same take with the toes never detected reads identically
+    cropped = up.copy()
+    cropped[:, [int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]] = np.nan
+    blind = retarget_error(_Rig(0.4), cropped, h, 1.0)
+    for key in ("median_m", "median_pct_height", "p90_pct_height"):
+        assert wild[key] == pytest.approx(blind[key]), key
+    assert up.shape[1] == NUM_JOINTS
+
+
+def test_a_toe_reprojection_residual_does_not_move_the_camera_summary():
+    """`reprojection`'s take-wide row divides by `figure_height_px`, which is
+    already the core bbox, so its numerator must be the same set or the
+    percentage compares two different figures."""
+    from pose3d.core.skeleton import CORE_INDEX
+    from pose3d.quality import figure_height_px, reprojection
+
+    p = load_project(FIXTURE)
+    rig = load_rig(FIXTURE / "calibration")
+    pipeline.triangulate_project(p, rig)
+    poses = np.stack([f.pose3d for f in p.frames])
+    kp2d = {c: np.stack([f.kp2d[c] for f in p.frames]) for c in CAMERAS}
+    fh = {c: figure_height_px(kp2d[c]) for c in CAMERAS}
+
+    base = reprojection(poses, kp2d, rig, fh)
+
+    # give the toes a 3D position and a 2D observation that disagree wildly
+    loud_poses, loud_kp = poses.copy(), {c: kp2d[c].copy() for c in CAMERAS}
+    for toe in (int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)):
+        loud_poses[:, toe] = loud_poses[:, int(Joint.LEFT_ANKLE)]
+        for c in CAMERAS:
+            loud_kp[c][:, toe] = loud_kp[c][:, int(Joint.HEAD)]
+    loud = reprojection(loud_poses, loud_kp, rig, fh)
+
+    assert loud["left"]["per_joint"]["LEFT_TOE"]["n"] > 0, "the row is live"
+    assert loud["left"]["per_joint"]["LEFT_TOE"]["median_px"] > 50.0
+    for cam in CAMERAS:
+        for key in ("median_px", "p90_px", "max_px", "median_pct_figure"):
+            assert loud[cam][key] == pytest.approx(base[cam][key]), (cam, key)
+    assert len(CORE_INDEX) == 15

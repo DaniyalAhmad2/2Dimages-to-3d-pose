@@ -255,6 +255,14 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
     The body keypoints played no part in the calibration, so this is an
     independent test of the extrinsics/intrinsics — but only of their mutual
     consistency: a focal error shared by both cameras largely cancels in F.
+
+    This is the ONE take-wide summary here that is NOT over the core set, and
+    deliberately: `threshold_px` and `frac_over_threshold` report the gate the
+    take was actually judged by, and `pipeline.epipolar_threshold` sizes that
+    gate from the median over EVERY joint. Narrowing this side alone would
+    make the row misreport the applied gate; narrowing both would change which
+    observations the gate rejects, which is a decision about the gate and not
+    about a readout. The pair moves together or not at all.
     """
     L = np.asarray(kp2d[CAM_LEFT], float)
     R = np.asarray(kp2d[CAM_RIGHT], float)
@@ -348,7 +356,12 @@ def reprojection(poses: np.ndarray, kp2d: dict[str, np.ndarray], rig,
                 "max_px": float(col.max()) if col.size else float("nan"),
                 "median_pct_figure": _pct(m, fh),
             }
-        flat = errs[np.isfinite(errs)]
+        # per-joint rows over every joint, the camera's summary over the core
+        # set: `median_pct_figure` divides by `figure_height_px`, which is the
+        # core bbox, so a numerator over all 17 would compare two different
+        # figures.
+        flat = errs[:, CORE_INDEX]
+        flat = flat[np.isfinite(flat)]
         med = float(np.median(flat)) if flat.size else float("nan")
         out[cam] = {
             "per_joint": per,
@@ -484,7 +497,13 @@ def retarget_error(character, up: np.ndarray, height: float, scale: float,
             "max_pct_height": _pct(
                 float(col.max()) if col.size else float("nan"), height),
         }
-    flat = dists[np.isfinite(dists)]
+    # The per-joint rows above cover every joint; the take-wide summary below
+    # is the core set. A toe is the joint most often cropped, blurred or
+    # hallucinated, so letting its residual into the number the sidebar shows
+    # would make the client's accuracy reading depend on whether the feet were
+    # in shot — the thing the core-set rule exists to prevent.
+    flat = dists[:, CORE_INDEX]
+    flat = flat[np.isfinite(flat)]
     bend_stats = {
         label: {"n": len(vals),
                 "median_deg": float(np.median(vals)) if vals else float("nan"),
