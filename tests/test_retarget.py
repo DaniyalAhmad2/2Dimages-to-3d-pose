@@ -29,10 +29,11 @@ def _assert_rig_joints_finite(ch, joints):
     """Every joint the rig can SOURCE comes back finite.
 
     `pose_and_joints` states its own contract — "entries the rig cannot supply
-    are NaN" — and the toes are the first canonical joints that answers: they
-    hang off `foot.L/R`, which `_JOINT_FROM_RIG` does not read. So the check is
+    are NaN" — and the toes were the first canonical joints that answered: a
+    rig without `foot.L/R` has nowhere to read them from. So the check is
     against the rig's own rest pose rather than against all NUM_JOINTS, and it
-    widens by itself the day the rig gains a source for them.
+    widened by itself the day the bundled rig gained a source for them (the
+    foot bones' tails), which is why it now covers the toes too.
     """
     assert joints is not None
     sourced = ~np.isnan(np.asarray(ch.rest_joints(), float)).any(1)
@@ -1108,9 +1109,9 @@ def test_bake_reproduces_the_shipped_asset(tmp_path):
     vb, _, jb = Character(out).pose_and_joints(pose, valid)
     h = float(va[:, 2].max() - va[:, 2].min())
     assert np.abs(va - vb).max() / h < 1e-3
-    # over the joints the rig SOURCES: the toes hang off `foot.L/R`, which
-    # `_JOINT_FROM_RIG` does not read, so both rigs report them NaN — that is
-    # the two agreeing, but a NaN in the difference poisons the max.
+    # over the joints the rig SOURCES, whatever they are on the rig in hand:
+    # a rig without `foot.L/R` reports the toes NaN, and two rigs agreeing on
+    # NaN still poison the max of the difference.
     sourced = ~np.isnan(np.asarray(ca.rest_joints(), float)).any(1)
     assert sourced[CORE_INDEX].all(), "the rig must source every core joint"
     assert np.abs(ja[sourced] - jb[sourced]).max() / h < 1e-6
@@ -1338,12 +1339,21 @@ def _roll_error_undirected(ch, pose, role):
     one: taking |dot| makes this measurement independent of the hemisphere rule
     the production code uses to sign it, which is what keeps this a check of
     the roll rather than a restatement of the convention. Returns (bend, err),
-    or None when the frame cannot supply the plane.
+    or None when the frame cannot supply the plane, or when the bone was not
+    AIMED on it.
+
+    A bone is rolled only where it is aimed: with no captured target
+    `_skin_matrices` hands it its parent's matrix whole (`skin[b] = base`) and
+    the roll never runs. For the four limb bones the aim target is one of the
+    three joints the plane already needs, so that costs nothing; for `foot.*`
+    it is the big toe, which a take detected before toes existed never has.
     """
-    from pose3d.geometry.character import _BEND_REF, _proj_perp, _unit
+    from pose3d.geometry.character import _BEND_REF, _DIRECT, _proj_perp, _unit
     valid = ~np.isnan(pose).any(1)
     ja, jm, jb, _ = _BEND_REF[role]
     if not all(valid[int(x)] for x in (ja, jm, jb)):
+        return None
+    if not valid[int(_DIRECT[role][1])]:
         return None
     v1 = _unit(pose[int(jm)] - pose[int(ja)])
     v2 = _unit(pose[int(jb)] - pose[int(jm)])
@@ -1392,18 +1402,50 @@ def test_roll_error_is_zero_where_the_bend_plane_exists():
     ch = _ch(head_source=fixture_head_source())
     ch.fit_to_subject(poses)
     worst = 0.0
+    gated = []
     for role in _BEND_REF:
         measured = [_roll_error_undirected(ch, p, role) for p in poses]
         errs = [err for m in measured if m is not None
                 for bend, err in [m] if bend >= _ROLL_BEND_FULL_DEG]
-        assert errs, f"{role}: the take never bends this limb past full weight"
+        if not errs:
+            continue        # never aimed past full weight on this take
         # measured: worst median 6.6e-15 deg, worst max 2.9e-14 deg
         # over the eight bones — zero to floating point, not merely small
         # (7.1e-15 / 2.6e-14 on the COCO-17 workspace copy this used to read)
         assert float(np.median(errs)) <= 1e-6, f"{role} median"
         assert float(np.max(errs)) <= 1e-6, f"{role} max"
         worst = max(worst, float(np.max(errs)))
+        gated.append(role)
     assert worst <= 1e-6
+    # ...and the take has to have exercised every bone it CAN. Its feet were
+    # detected before toe points existed, so `foot.*` is never aimed on it and
+    # never rolled — it rides the shin's matrix, which is exactly what
+    # test_a_missing_toe_leaves_the_foot_exactly_as_before pins. Spelling the
+    # exemption out keeps the old "every bone in the table" guarantee for the
+    # eight limb bones instead of letting an unmeasured one pass silently.
+    assert gated == [r for r in _BEND_REF if not r.startswith("foot.")], gated
+
+
+def test_the_aimed_foot_carries_the_legs_bend_plane():
+    """The half of the foot's rotation the aim cannot see, on a take that has
+    toes — which the client fixture above, detected before toe points existed,
+    never does.
+
+    One toe point fixes the foot's pitch and yaw; its spin about that aim is
+    not observed at all, so the foot carries the leg's bend plane on exactly
+    as the shin does. Bent leg, toe seen: the same gate the shin is held to.
+    """
+    from pose3d.geometry.character import _ROLL_BEND_FULL_DEG
+    ch = _ch()
+    pose = sample_skeleton_3d()
+    # sit the left leg back: a 60 deg knee, with the toe ahead of the ankle
+    pose[int(Joint.LEFT_ANKLE)] = [-0.11, -0.25, 0.35]
+    pose[int(Joint.LEFT_TOE)] = [-0.11, -0.16, 0.28]
+    ch.fit_to_subject(pose[None])
+    bend, err = _roll_error_undirected(ch, pose, "foot.L")
+    assert bend >= _ROLL_BEND_FULL_DEG, bend        # the plane is defined
+    # measured 2.4e-15 deg, against the shin's 1.1e-15 on the same pose
+    assert err <= 1e-6, err
 
 
 def test_a_missing_wrist_falls_back_to_weight_zero():
