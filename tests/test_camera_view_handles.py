@@ -355,3 +355,31 @@ def test_a_placeholder_can_actually_be_GRABBED_and_dragged(qapp, tmp_path):
     cam, jid, pos = seen[0]
     assert (cam, jid) == ("left", gone)
     assert abs(pos.x() - want.x()) < 2 and abs(pos.y() - want.y()) < 2
+
+
+# --- 3. an extremity the view has NEVER seen parks by its parent ----------
+
+def _view_with_pose(tmp_path):
+    """A client-sized view and a pose for it, NOT yet applied.
+
+    The pose is the caller's to edit before `set_pose`, so a joint it NaNs is
+    one this view has never had a position for — the case
+    `_placeholder_pos` has to answer without a `_last_seen` entry.
+    """
+    return _client_view(tmp_path), _xy()
+
+
+def test_a_never_seen_toe_is_parked_under_its_ankle(qapp, tmp_path):
+    """A toe the view has never had a position for parks just below the
+    ankle it belongs to, not in the middle of the picture: that is where the
+    user's cursor already is when the foot needs fixing."""
+    from pose3d.core.skeleton import Joint
+    view, pose = _view_with_pose(tmp_path)          # the file's helper
+    pose[Joint.LEFT_TOE] = np.nan
+    view.set_pose(pose, _scores())
+    toe = view._joints[int(Joint.LEFT_TOE)]
+    ankle = view._joints[int(Joint.LEFT_ANKLE)]
+    assert toe.is_placeholder
+    assert abs(toe.pos().x() - ankle.pos().x()) < 1e-6
+    assert toe.pos().y() > ankle.pos().y(), "below the ankle, in image coordinates"
+    assert toe.pos().y() - ankle.pos().y() <= 0.1 * view._pixmap_item.boundingRect().height()
