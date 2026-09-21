@@ -283,6 +283,12 @@ the decisions it rests on, then the rulings made while it was implemented.
   measured to a single toe point is the least reliable edge in the set. The client take's fitted
   scale is bit-identical at 110.1025 with its toes NaN. Cost if wrong: a take with clean toes
   scales a fraction differently from one without.
+- **The foot's roll follows the leg's bend plane, through the shin's own `_BEND_REF` reference**
+  — not a minimal rotation from the parent. One toe point fixes where the foot AIMS and says
+  nothing about its spin about that aim, so the foot carries the leg's bend plane on exactly as
+  the shin does: same three joints (hip, knee, ankle), same hemisphere fix, same silence when
+  the leg is straight. Cost if wrong: a foot that twists with the leg instead of the toe, which
+  one point cannot distinguish anyway.
 - **The BVH reader keeps each End Site as `Joint.end_offset` on its parent**, not as a joint of
   its own, so the export-matches-view gate can compare bone TAILS — which is where the foot's aim
   shows. The written file is unchanged: 19 bones, Y-up, no toe bone, so the client's Blender
