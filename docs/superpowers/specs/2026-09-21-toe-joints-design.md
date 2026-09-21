@@ -88,11 +88,12 @@ on any take, whether or not its feet are in frame.
 
 - `_JOINT_FROM_RIG` gains `Joint.LEFT_TOE: (("foot.L", "tail"),)`, `RIGHT_TOE` likewise, so
   `posed_joints`, `fitted3d` and the export-vs-view gate all read the toe from the foot's tail.
-- `_skin_matrices`: `foot.L/R` gain a target. When the toe joint is finite, the foot's matrix is
-  the shin's matrix rotated **minimally** (the shortest rotation taking the inherited foot axis
-  onto ankle→toe) — rotation only, rest length preserved, head fixed at the ankle. When the toe is
-  NaN or rejected, exactly today's `skin[b] = base`. No roll reference: the foot keeps the shin's
-  twist, which is what one point can determine.
+- `_skin_matrices`: `foot.L/R` gain a target. When the toe joint is finite, the foot aims from
+  the ankle at the toe through the ordinary `_DIRECT` path — rotation only, rest length
+  preserved, head fixed at the ankle — and its roll follows the leg's bend plane through the same
+  `_BEND_REF` entry the shin uses (amended at planning: "the shin's twist" is, in this codebase,
+  the leg's bend-plane roll, not a minimal rotation from the parent). When the toe is NaN or
+  rejected, exactly today's `skin[b] = base`.
 - `fit_to_subject`: the two foot edges enter the least squares with weight 1 (not the ankles' 2);
   a NaN median (no toes in the take) contributes nothing, so a take without feet gets the scale
   it gets today, to the last digit.
