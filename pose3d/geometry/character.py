@@ -238,6 +238,10 @@ _DIRECT = {
     "shin.L": (Joint.LEFT_KNEE, Joint.LEFT_ANKLE),
     "thigh.R": (Joint.RIGHT_HIP, Joint.RIGHT_KNEE),
     "shin.R": (Joint.RIGHT_KNEE, Joint.RIGHT_ANKLE),
+    # one point per foot: the foot aims from the ankle at the big toe when
+    # it is seen, and rides the shin's matrix — today's behaviour — when not
+    "foot.L": (Joint.LEFT_ANKLE, Joint.LEFT_TOE),
+    "foot.R": (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE),
 }
 
 # Limb chains: (upper role, lower role, mid joint, end joint). When the mid
@@ -259,10 +263,11 @@ _IK_CHAINS = (
 #
 # For `upper_arm` and `thigh` the roll IS a measurement: the elbow and the knee
 # are hinges, so the plane the limb bends in genuinely fixes the parent bone's
-# spin. For `forearm` and `shin` it is a CONVENTION — forearm pronation and
-# shin twist are never observed (there are no hand or foot keypoints), so those
-# bones simply carry the hinge plane on. A future reader must not read a small
-# roll error on a forearm as accuracy.
+# spin. For `forearm`, `shin` and `foot` it is a CONVENTION — forearm pronation
+# and shin twist are never observed (there are no hand keypoints, and the
+# foot's one point fixes its aim, not its spin), so those bones simply carry
+# the hinge plane on. A future reader must not read a small roll error on a
+# forearm as accuracy.
 _SHOULDER_LINE = (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)
 _HIP_LINE = (Joint.LEFT_HIP, Joint.RIGHT_HIP)
 
@@ -286,6 +291,13 @@ _BEND_REF = {
                     Joint.RIGHT_ANKLE, _HIP_LINE),
     "shin.R":      (Joint.RIGHT_HIP, Joint.RIGHT_KNEE,
                     Joint.RIGHT_ANKLE, _HIP_LINE),
+    # the foot's own spin is not observable from one toe point, so it carries
+    # the leg's bend plane on exactly as the shin does — same three joints,
+    # same hemisphere fix, and the same silence when the leg is straight
+    "foot.L":      (Joint.LEFT_HIP, Joint.LEFT_KNEE,
+                    Joint.LEFT_ANKLE, _HIP_LINE),
+    "foot.R":      (Joint.RIGHT_HIP, Joint.RIGHT_KNEE,
+                    Joint.RIGHT_ANKLE, _HIP_LINE),
 }
 
 # role -> the captured line the bone's roll follows directly. The pelvis and
@@ -295,9 +307,9 @@ _BEND_REF = {
 #
 # `neck`/`head` are not here: the neck's roll is the FACE, which is a
 # different measurement (see `_FACE_REF` below), and the head bone rides the
-# neck. `clavicle.*`, `hand.*` and `foot.*` get no reference either — they
-# have no keypoints of their own, so once the parent's roll is right theirs is
-# inherited right.
+# neck. `clavicle.*` and `hand.*` get no reference — they have no keypoints of
+# their own, so once the parent's roll is right theirs is inherited right;
+# `foot.*` follows the leg's bend plane like the shin (see `_BEND_REF`).
 _LINE_REF = {"hips": _HIP_LINE, "spine": _HIP_LINE, "chest": _SHOULDER_LINE}
 
 # role -> the torso line its REST face direction is measured against. The
@@ -363,6 +375,12 @@ _JOINT_FROM_RIG = {
     Joint.RIGHT_KNEE: (("shin.R", "head"), ("thigh.R", "tail")),
     Joint.LEFT_ANKLE: (("foot.L", "head"), ("shin.L", "tail")),
     Joint.RIGHT_ANKLE: (("foot.R", "head"), ("shin.R", "tail")),
+    # the toes are the only canonical joints read off a TAIL: the foot bones
+    # are leaves, so their tails are where the rig's toes are — and reading
+    # them back here is what puts the toes in the 3D view, in `fitted3d` and
+    # inside the export-matches-view gate
+    Joint.LEFT_TOE: (("foot.L", "tail"),),
+    Joint.RIGHT_TOE: (("foot.R", "tail"),),
 }
 
 # Where HEAD is read back from, per head_source. A nose HEAD has no counterpart

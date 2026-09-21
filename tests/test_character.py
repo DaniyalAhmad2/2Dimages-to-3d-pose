@@ -80,6 +80,50 @@ def test_bones_stay_connected_when_posed():
 
 
 @needs_character()
+def test_the_foot_aims_at_the_toe_when_it_is_seen():
+    """One point per foot: the posed foot bone points from the ankle toward
+    the captured big toe (pitch and yaw measured; roll from the leg's bend
+    plane), rotation only, rest length kept."""
+    from pose3d.geometry.character import Character
+    ch = Character()
+    pose = sample_skeleton_3d()
+    ch.fit_to_subject(pose[None])
+    valid = ~np.isnan(pose).any(1)
+    j = ch.posed_joints(pose, valid)
+    for ankle, toe in ((Joint.LEFT_ANKLE, Joint.LEFT_TOE),
+                       (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE)):
+        want = pose[toe] - j[ankle]                 # from the posed ankle
+        got = j[toe] - j[ankle]
+        cos = np.dot(want, got) / (np.linalg.norm(want) * np.linalg.norm(got))
+        assert np.degrees(np.arccos(np.clip(cos, -1, 1))) < 1.0, (ankle, toe)
+    # the foot keeps the rig's own length: the toe is a bone tail, not the
+    # point. `rest_joints` is RIG space and `posed_joints` the caller's, and
+    # `_from_rig` DIVIDES by the fitted scale, so the rest length comes back
+    # over it (`_scale` is rig units per pose unit, ~8.5 on this rig).
+    rest = ch.rest_joints()
+    for ankle, toe in ((Joint.LEFT_ANKLE, Joint.LEFT_TOE),
+                       (Joint.RIGHT_ANKLE, Joint.RIGHT_TOE)):
+        assert np.linalg.norm(j[toe] - j[ankle]) == pytest.approx(
+            np.linalg.norm(rest[toe] - rest[ankle]) / ch._scale, rel=1e-6)
+
+
+@needs_character()
+def test_a_missing_toe_leaves_the_foot_exactly_as_before():
+    """No toe: the foot rides the shin's matrix verbatim, which is what every
+    take without feet got before the toes existed."""
+    from pose3d.geometry.character import Character
+    ch = Character()
+    pose = sample_skeleton_3d()
+    pose[[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+    valid = ~np.isnan(pose).any(1)
+    skin = ch._skin_matrices(pose, valid)[0]
+    for foot, shin in (("foot.L", "shin.L"), ("foot.R", "shin.R")):
+        assert np.allclose(skin[ch.role[foot]], skin[ch.role[shin]])
+    j = ch.posed_joints(pose, valid)
+    assert np.isfinite(j[Joint.LEFT_TOE]).all(), "the toe is read off the foot's tail"
+
+
+@needs_character()
 def test_pose_bone_matrices_reproduce_lbs():
     """The bone matrices sent to Blender must reproduce the live-view skinning
     exactly (setting pose_bone.matrix = M drives the identical deform), so the
