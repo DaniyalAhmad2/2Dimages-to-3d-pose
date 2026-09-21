@@ -15,8 +15,8 @@ from PySide6.QtWidgets import (
 )
 
 from pose3d.core.skeleton import (
-    BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS, face_kp_id,
-    face_kp_index)
+    BONES, EXTREMITY_PARENT, HEAD_KP_NAMES, JOINT_NAMES, Joint, NUM_HEAD_KP,
+    NUM_JOINTS, face_kp_id, face_kp_index)
 from pose3d.ui.model import STATE_OK
 from pose3d.ui.panels import (
     COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_label, accuracy_pct,
@@ -341,11 +341,27 @@ class CameraView(QGraphicsView):
 
         The last position this view had for the joint — for a dropout mid-take
         that is the previous frame's, a few pixels from where the limb really
-        is — else the middle of the image, the one point always on screen.
+        is. A toe never seen in this view parks just below its ankle (the
+        cursor is already there when a foot needs fixing). Else the middle of
+        the image, the one point always on screen.
+
+        That drop has to be a real distance. An unreadable frame still leaves
+        a pixmap item behind — an empty one, zero high — and a toe dropped
+        zero pixels sits exactly ON the ankle: two handles at one point, and
+        the one on top is the only one `itemAt` answers, so the ankle becomes
+        the joint the user cannot grab. With no image to measure, the centre
+        below.
         """
         prev = self._last_seen.get(j)
         if prev is not None:
             return QPointF(prev)
+        h = (self._pixmap_item.boundingRect().height()
+             if self._pixmap_item is not None else 0.0)
+        parent = EXTREMITY_PARENT.get(Joint(j))
+        if h and parent is not None:
+            anchor = self._joints[int(parent)]
+            if anchor.isVisible() and not anchor.is_placeholder:
+                return QPointF(anchor.pos().x(), anchor.pos().y() + 0.05 * h)
         if self._pixmap_item is not None:
             r = self._pixmap_item.boundingRect()
             if r.width() and r.height():
