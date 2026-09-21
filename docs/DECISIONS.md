@@ -230,3 +230,57 @@ against the delivered behaviour once they merge:
   rendered with `node build.js`). The PDF sent on 2026-09-04 existed only in his inbox and could
   not be corrected when the build changed. Cost if wrong: a build step outside CI that has to be
   run by hand when the text changes.
+
+
+## The toes: two joints, and nothing else moves (2026-09-22)
+
+The client's build-17 question — "does the program not detect toe position?" — answered with one
+point per foot. The design is `docs/superpowers/specs/2026-09-21-toe-joints-design.md`; below are
+the decisions it rests on, then the rulings made while it was implemented.
+
+- **The big toes are joints 15 and 16 — appended, one point per foot** (client, 2026-09-21: "does
+  the program not detect toe position?"). Halpe-26 detects them already; the skeleton now keeps
+  them so the rig's foot bone can aim. Small toes and heels stay out. Cost if wrong: two NaN
+  columns on a take without feet.
+- **The toes are extremities: no take-wide number or colour counts them.** Frame band, dial,
+  figure height and the joint-count messages run over the original 15 (`CORE_JOINTS`); a cropped
+  foot cannot turn a good take red or move the accuracy percentages. Cost if wrong: a wrong toe is
+  visible only on its own handle.
+- **Face-point ids have a fixed base (100), and old logs are migrated once.** They were
+  `NUM_JOINTS + k`, which appending a joint would have silently re-read as body joints in every
+  saved corrections.sqlite. The migration backs the file up beside itself first.
+- **The floor stays ankle-based** for this cut; a foot pointing straight down can dip below the
+  grid as it can today. The heel/toe floor is the next cut.
+- **The core-set rule is applied where a number is computed, not where it is shown** — so its data
+  half landed with the skeleton change rather than with the UI. `gap_stats` (all four counts),
+  `figure_height_px`, both the numerator and the denominator of `rejection_note`, the bone-length
+  fallback report, `character._frame_scale`, `subject_height` (head-to-ankle span by definition)
+  and the take-wide bone-CV, retarget and reprojection summaries all run over `CORE_JOINTS`;
+  per-joint and per-bone rows keep every joint, so a toe is still visible on its own row.
+  `body_epipolar` is the deliberate exception — it stays over all the joints because it reports the
+  gate as it was applied. Cost if wrong: the rule lives in two layers, so a new take-wide number
+  has to choose the core set in whichever layer computes it; and the sidebar's "height" stays
+  head-to-ankle, about 5 % under the true sole-to-head figure — the definition it already had.
+- **`quality.BONE_NAMES` gained the two foot bones**, because it is a rig-wide invariant with one
+  entry per `BONES` edge — the same kind of table as `bonefit._FALLBACK_LENGTHS` — not a take-wide
+  number. The per-bone rows therefore name the feet; only the summary over them is core-only. Cost
+  if wrong: two named rows a take without feet leaves empty.
+- **`PIPELINE_VERSION` stays 2.** The design proposed 3, but an older project is recomputed on
+  open (`model.py`) and a recompute cannot add toes: they come from the detector, not from the fit.
+  A bump would have promised a repair that opening the project does not perform. Cost if wrong: an
+  informational number that no longer separates a pre-toe pipeline from this one — the hint below
+  is what actually tells the client.
+- **The pre-toe hint is keyed on the data, not on a build stamp.** A take detected by THIS build
+  whose feet are out of frame in every photograph reads as predating the toes and shows the hint
+  too. Accepted: nothing in the file separates the two cases, and the hint costs one Run Detection.
+  Cost if wrong: a client with cropped feet runs detection once, gets the same NaN toes, and the
+  placeholders stay where they were.
+- **The two foot edges enter the uniform scale fit at weight 1.0**, though the ankles they hang
+  from carry 2.0: the ankle weight buys the leg length the floor datum depends on, while a foot
+  measured to a single toe point is the least reliable edge in the set. The client take's fitted
+  scale is bit-identical at 110.1025 with its toes NaN. Cost if wrong: a take with clean toes
+  scales a fraction differently from one without.
+- **The BVH reader keeps each End Site as `Joint.end_offset` on its parent**, not as a joint of
+  its own, so the export-matches-view gate can compare bone TAILS — which is where the foot's aim
+  shows. The written file is unchanged: 19 bones, Y-up, no toe bone, so the client's Blender
+  retarget sees exactly what it saw. Cost if wrong: a field on the reader that only the gate reads.

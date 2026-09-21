@@ -493,6 +493,7 @@ CLIENT_COMPLAINTS = {
     "P14 BVH imports lying flat in Blender": "upright",
     "P15 the accuracy dial's numbers are cut off": "accuracy dial",
     "P16 arrow keys even in a number box": "number box",
+    "P17 does the program not detect toe position?": "toe",
 }
 
 

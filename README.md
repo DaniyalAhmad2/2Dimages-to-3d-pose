@@ -158,7 +158,8 @@ Two cameras impose real limits, which are worth knowing up front:
   recoverable from joint positions alone.
 - Depth accuracy depends heavily on calibration quality. The cameras must be
   properly calibrated and must not move between shots.
-- The skeleton is 15 joints — no fingers or facial detail.
+- The skeleton is 17 joints — the 15 body joints plus one big-toe point per
+  foot; no fingers or facial detail.
 
 It does **not** reconstruct the subject's actual body surface, face or
 clothing. That is photogrammetry and needs many overlapping viewpoints
