@@ -237,3 +237,23 @@ def test_the_figure_height_denominator_does_not_move_when_a_foot_appears():
     kp[:, int(Joint.LEFT_TOE)] = (10.0, 900.0)   # a toe well below the bbox
     kp[:, int(Joint.RIGHT_TOE)] = (10.0, 900.0)
     assert figure_height_px(kp) == pytest.approx(without)
+
+
+def test_the_subject_height_is_head_to_ankle_whether_or_not_the_toes_are_seen():
+    """`subject_height` is THE denominator of every "% of body height" the
+    client reads, and the Set-scale math on top of it. A take that happens to
+    have its feet in frame must not measure a different subject."""
+    from pose3d.core.skeleton import NUM_JOINTS
+    from pose3d.quality import subject_height
+    from tests.synth import sample_skeleton_3d
+
+    with_toes = np.stack([sample_skeleton_3d() for _ in range(3)])
+    assert np.isfinite(with_toes[:, int(Joint.LEFT_TOE)]).all(), "fixture"
+    assert (with_toes[0, int(Joint.LEFT_TOE), 2]
+            < with_toes[0, int(Joint.LEFT_ANKLE), 2]), "the toes are lower"
+
+    cropped = with_toes.copy()
+    cropped[:, [int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]] = np.nan
+
+    assert subject_height(with_toes) == pytest.approx(subject_height(cropped))
+    assert with_toes.shape[1] == NUM_JOINTS

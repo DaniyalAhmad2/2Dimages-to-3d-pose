@@ -145,9 +145,12 @@ def subject_height(poses: np.ndarray) -> float:
     THE denominator for every "% of body height" in the repo. Not the full 3D
     span (which includes the subject's motion across the take) and not the
     nose-to-ankle distance; a per-frame vertical extent, taken at the median.
+
+    Head-to-ankle span by definition — the toes are extremities; height to the
+    sole belongs to the heel/toe floor cut.
     """
     heights = []
-    for p in de_tilted(poses):
+    for p in de_tilted(poses)[:, CORE_INDEX]:
         v = ~np.isnan(p).any(1)
         if v.sum() >= 2:
             heights.append(float(p[v, 2].max() - p[v, 2].min()))
