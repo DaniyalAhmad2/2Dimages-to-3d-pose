@@ -17,8 +17,8 @@ from pose3d.core.project import (
     CAM_LEFT, CAM_RIGHT, CAMERAS, PIPELINE_VERSION, ProjectData,
 )
 from pose3d.core.skeleton import (
-    DERIVED_MIDPOINT_PARENTS, Joint, NUM_JOINTS, derived_joints,
-    face_kp_index, is_face_kp,
+    CORE_INDEX, DERIVED_MIDPOINT_PARENTS, EXTREMITY_JOINTS, Joint, NUM_JOINTS,
+    derived_joints, face_kp_index, is_face_kp,
 )
 from pose3d.geometry.triangulate import (
     fundamental_matrix, reprojection_error, triangulate_one)
@@ -942,6 +942,17 @@ class ProjectModel(QObject):
                 for c in CAMERAS}
         return self._figure_h_px
 
+    def predates_toes(self) -> bool:
+        """True for a Halpe-26 project detected before the toe joints
+        existed: every toe of every frame is NaN in both views. Such a take
+        can gain its toes from Run Detection; a COCO-17 take cannot, and a
+        take that has any toe was detected by this build."""
+        idx = [int(j) for j in EXTREMITY_JOINTS]
+        if self.project.keypoint_model != "halpe26" or not self.project.frames:
+            return False
+        return all(np.isnan(f.kp2d[c][idx]).all()
+                   for f in self.project.frames for c in CAMERAS)
+
     def invalidate_readouts(self) -> None:
         """Drop the cached take-wide numbers (figure height, take quality).
 
@@ -1111,13 +1122,22 @@ def worst_per_joint(errors, stage: str):
 
 
 def frame_stat(per_joint):
-    """One number for a frame: the MEDIAN joint, not the worst.
+    """One number for a frame: the MEDIAN CORE joint, not the worst.
 
     The worst of 15 joints is a max over 15 samples; on a good take it is red
     almost every frame, which is how the old timeline managed to be red 21
     times out of 26 (and green never) and tell the user nothing.
+
+    Over CORE_JOINTS only: the toes are extremities that are often out of
+    frame, and a take whose feet are cropped must read exactly as it did
+    before they existed. They keep their own handle and dot colour.
+
+    A per-joint array that is not a whole skeleton is taken as given — a
+    caller that has already cut the set down is not cut down again.
     """
     a = np.asarray(per_joint, float)
+    if a.size == NUM_JOINTS:
+        a = a[CORE_INDEX]
     a = a[np.isfinite(a)]
     return float(np.median(a)) if a.size else float("nan")
 
