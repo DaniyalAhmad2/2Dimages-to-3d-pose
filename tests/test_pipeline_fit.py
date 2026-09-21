@@ -825,6 +825,60 @@ def test_a_shoulder_dragged_after_the_migration_keeps_its_neck():
         _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER)))
 
 
+def test_a_neck_confirmed_where_the_migration_put_it_survives_the_restore():
+    """(a), pinned on its own: the `corrected` guard, and nothing else.
+
+    (a) above ends with the neck somewhere the migration never put it, so the
+    "untouched since the migration" clause declines it anyway and the guard
+    is never what saves it — delete the guard and that test still passes. The
+    case only the guard covers is a correction that LANDS on the migrated
+    value: the user moves the neck, changes their mind and puts it back where
+    the app had it. It is a hand-placed point either way, and reverting it to
+    the legacy value would destroy it for good, since the midpoint rule
+    declines a `corrected` joint and nothing would ever heal it.
+    """
+    model, data, _ = _migrated_take_with_a_stale_neck()
+    f, neck = data.frames[1], int(Joint.NECK)
+    migrated = f.kp2d[CAM_LEFT][neck].copy()
+
+    model.set_joint_2d(CAM_LEFT, neck, 111.0, 222.0)         # moved...
+    model.set_joint_2d(CAM_LEFT, neck, *migrated)            # ...and put back
+
+    assert model.restore_stored_pose()
+    assert np.allclose(f.kp2d[CAM_LEFT][neck], migrated), \
+        "a hand-placed neck was reverted because it matched the migration"
+    assert f.corrected[CAM_LEFT][neck]
+
+
+def test_a_shoulder_dragged_with_auto_recalc_off_still_keeps_its_neck():
+    """(b), pinned on its own: the parents-moved re-derivation.
+
+    With "Auto Recalculate 3D" ON, the drag's own live re-solve has already
+    moved the NECK, so the "untouched since the migration" clause declines it
+    and (b) above passes with the re-derivation deleted. OFF — which is the
+    setting this whole midpoint rule exists for, because that is when nothing
+    else keeps a derived joint with its parents — the neck is still sitting
+    on the migrated value while its shoulders have moved, and reverting it
+    puts the take straight back into the neck-contradicting-shoulders state.
+    """
+    model, data, _ = _migrated_take_with_a_stale_neck()
+    model.auto_recalc = False
+    f, neck = data.frames[1], int(Joint.NECK)
+    shoulder = int(Joint.LEFT_SHOULDER)
+    migrated_neck = f.kp2d[CAM_LEFT][neck].copy()
+    xy = f.kp2d[CAM_LEFT][shoulder]
+    model.set_joint_2d(CAM_LEFT, shoulder, float(xy[0]) + 60.0, float(xy[1]))
+    assert np.allclose(f.kp2d[CAM_LEFT][neck], migrated_neck), \
+        "with auto-recalc off nothing has moved the neck yet — the setup"
+
+    assert model.restore_stored_pose()
+
+    assert np.allclose(
+        f.kp2d[CAM_LEFT][neck],
+        _midpoint(f, CAM_LEFT, (Joint.LEFT_SHOULDER, Joint.RIGHT_SHOULDER))), \
+        "the restore re-created the contradiction the migration removed"
+
+
 def test_a_project_with_no_calibration_is_left_alone():
     """Recomputing needs a rig. Without one the stored pose is untouched and
     the user is told why, rather than silently getting nothing.

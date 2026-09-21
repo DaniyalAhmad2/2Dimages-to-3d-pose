@@ -177,7 +177,7 @@ class _InfoRow(QWidget):
 class _StackedRow(QWidget):
     """An info row whose value is too long to sit beside its key.
 
-    The sidebar is 232 px wide and "50 mm · tag 15 · frame 0007" is not going
+    The sidebar is 232 px wide and "5.0 cm · tag 15 · frame 0007" is not going
     to share a line with a label. Stacked and word-wrapped, it fits at any
     width instead of pushing the column wider than the panel and eliding.
     """
@@ -772,13 +772,20 @@ def _pct1(v, nd: int = 1) -> str:
 
 
 def _marker_text(marker) -> str:
-    """"50 mm · tag 15 · frame 0007" from a calibration report."""
+    """"5.0 cm · tag 15 · frame 0007" from a calibration report.
+
+    CENTIMETRES, through `_cm` — the formatter the two rows above it use. The
+    client measures the black square with a ruler and types centimetres into
+    the import box; reading it back as "50 mm" gave the one number he entered
+    a third unit, in a panel whose whole purpose is facts he can check
+    against that ruler.
+    """
     if not marker:
         return "—"
     bits = []
     length = marker.get("marker_length_m")
     if length is not None and np.isfinite(length):
-        bits.append(f"{1000.0 * float(length):.0f} mm")
+        bits.append(_cm(length))
     tag = marker.get("world_tag_id")
     if tag is not None:
         bits.append(f"tag {tag}")

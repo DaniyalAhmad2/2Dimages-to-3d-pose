@@ -16,11 +16,10 @@ from PySide6.QtWidgets import (
 
 from pose3d.core.skeleton import (
     BONES, HEAD_KP_NAMES, JOINT_NAMES, NUM_HEAD_KP, NUM_JOINTS)
-from pose3d.ui.model import (
-    STATE_NOT_MEASURED, STATE_OK, STATE_REJECTED)
+from pose3d.ui.model import STATE_OK
 from pose3d.ui.panels import (
-    COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_band, acc_label,
-    accuracy_pct)
+    COL_AMBER, COL_GREEN, COL_PURPLE, COL_RED, acc_label, accuracy_pct,
+    joint_status)
 
 COL_GREY = QColor(140, 148, 166)
 
@@ -396,6 +395,19 @@ class CameraView(QGraphicsView):
     def _joint_status(self, j: int) -> tuple[str, str]:
         """(band key, tooltip html) for one joint.
 
+        The band itself comes from `panels.joint_status`, which is the rule —
+        stated once, in a module with no widget in it, so the 3D preview bands
+        by the same answer rather than by a second copy. This file used to
+        carry that copy; they agreed, which is precisely why nothing would
+        have caught the next edit to either, and "the two panels disagree
+        about which joints are flagged" is the client's own complaint.
+
+        Asked TWICE, deliberately: `base` is what the joint was MEASURED as,
+        which is what the sentence describes, and `status` is what it IS once
+        an interpolation or a hand correction has overruled the band, which is
+        what the dot is drawn in. Both are the same function, so there is
+        still only one rule.
+
         A joint that produced no 3D is NOT banded: it is painted as its own
         state, because "no reconstruction" is a different fact from "a poor
         one" and the two used to be drawn identically — the detector's
@@ -406,9 +418,12 @@ class CameraView(QGraphicsView):
         state = (self._states[j] if self._states is not None
                  and j < len(self._states) else STATE_OK)
         err = float(self._accuracy[j]) if self._accuracy is not None else np.nan
+        filled = bool(self._filled is not None and self._filled[j])
+        corrected = bool(self._corrected is not None and self._corrected[j])
+        base = joint_status(state, err)
+        status = joint_status(state, err, filled, corrected)
 
-        if state == STATE_REJECTED:
-            status = "rejected"
+        if base == "rejected":
             # The NUMBER is the diagnosis. A purple dot on its own is a new
             # kind of silence: the user cannot tell a hallucinated ankle from
             # a rig that is 12 deg out, and those want opposite responses
@@ -424,21 +439,18 @@ class CameraView(QGraphicsView):
                       f"disagree about where this joint is {how_far}, so it "
                       f"was not triangulated. The keypoints are still here: "
                       f"drag either one, or recalibrate")
-        elif state == STATE_NOT_MEASURED or not np.isfinite(err):
-            status = "unmeasured"
+        elif base == "unmeasured":
             detail = ("not measured — no 3D was reconstructed for this joint, "
                       "so there is no accuracy to report")
         else:
             pct = accuracy_pct(err)
-            status = acc_band(pct)
             detail = (f"accuracy {pct:.0f}% ({acc_label(pct)}) — "
                       f"{100.0 * err:.2f}% of the figure's height in this view")
 
-        # The extra lines FIRST, because two of them change what the joint is —
-        # and the headline is coloured with the joint's final state. Built the
-        # other way round, an interpolated or hand-corrected joint drew an
-        # amber/blue dot while its tooltip's first line kept the accuracy
-        # band's colour, so the dot and the words disagreed about what it is.
+        # The extra lines say what OVERRULED the band, and the headline is
+        # coloured with the joint's final state — which the rule above has
+        # already decided. They used to decide it here, which is what made
+        # this a second copy of the rule.
         more = []
         if self._delivered is not None and np.isfinite(self._delivered[j]):
             more.append(f"<span style='color:#8a91a3;'>pose shown: "
@@ -447,13 +459,11 @@ class CameraView(QGraphicsView):
         if self._scores is not None and np.isfinite(self._scores[j]):
             more.append(f"<span style='color:#8a91a3;'>detector confidence "
                         f"{100.0 * float(self._scores[j]):.0f}%</span>")
-        if self._filled is not None and self._filled[j]:
-            status = "filled"
+        if filled:
             more.append(f"<span style='color:{RAG_COLORS['filled'].name()};'>"
                         f"3D interpolated — this joint was missing for one "
                         f"frame</span>")
-        if self._corrected is not None and self._corrected[j]:
-            status = "corrected"
+        if corrected:
             more.append(f"<span style='color:{RAG_COLORS['corrected'].name()};'>"
                         f"corrected by hand</span>")
 

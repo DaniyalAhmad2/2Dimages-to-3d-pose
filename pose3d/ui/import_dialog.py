@@ -275,10 +275,18 @@ class ImportDialog(QDialog):
             # halpe26 project posed under the nose convention.
             from pose3d.pipeline import detect_project
 
+            # Every photo the detection could not read. A 0-byte OneDrive
+            # placeholder costs its own view of its own frame — the
+            # calibration above already skips the same file — and the user is
+            # told which pair it was in the summary below, because otherwise
+            # the only trace is a frame whose joints are all missing.
+            unread: list[dict] = []
+
             def detect(report, cancelled):
                 det = self._ensure_detector()      # loading the model is slow
                 return detect_project(project, det, read_image,
-                                      on_progress=report, cancelled=cancelled)
+                                      on_progress=report, cancelled=cancelled,
+                                      skipped=unread)
 
             # ... and this one IS cancellable: it is the long phase, and
             # `detect_project` commits every frame or none of them.
@@ -315,8 +323,12 @@ class ImportDialog(QDialog):
             save_project(project, folder)
             self.result_folder = str(folder)
             msg = f"Imported {len(project.frames)} frames.\n{cal.message}"
-            from pose3d.pipeline import rejection_note
-            notes = [rejection_note(dropped, len(project.frames))]
+            from pose3d.pipeline import rejection_note, summarise_unreadable
+            notes = [rejection_note(dropped, len(project.frames)),
+                     summarise_unreadable(
+                         unread,
+                         "the import kept the rest, and those frames are "
+                         "missing their keypoints in that view")]
             if fit_report is not None:
                 notes.append(fit_report.note())
             for note in notes:

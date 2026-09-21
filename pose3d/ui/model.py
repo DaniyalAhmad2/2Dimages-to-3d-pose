@@ -538,14 +538,24 @@ class ProjectModel(QObject):
         if detector is None:
             self.statusMessage.emit("No detector available in this build")
             return
-        from pose3d.pipeline import detect_project
+        from pose3d.pipeline import detect_project, summarise_unreadable
         self.statusMessage.emit("Running detection…")
+        # A photo the detector could not open costs that view of that frame
+        # and no more (`pipeline.read_frame_image`) — but never silently: it
+        # used to RAISE, so Run Detection at least failed loudly, and a
+        # "Detection complete" over a view nobody looked at is worse than the
+        # raise was.
+        unread: list[dict] = []
         detect_project(self.project, detector, load_image,
-                       on_progress=on_progress, cancelled=cancelled)
+                       on_progress=on_progress, cancelled=cancelled,
+                       skipped=unread)
         self.recompute_all(on_progress=on_progress)   # take-wide readouts too
+        note = summarise_unreadable(
+            unread, "those views keep the 2D they already had")
         self.statusMessage.emit(
             f"Detection complete ({len(self.project.frames)} frames); "
-            f"hand-corrected points were kept")
+            f"hand-corrected points were kept"
+            + (f". {note}" if note else ""))
 
     def redetect_head(self, detector, load_image,
                       on_progress=None, cancelled=None) -> None:
@@ -562,20 +572,34 @@ class ProjectModel(QObject):
         if self.rig is None:
             self.statusMessage.emit("No calibration loaded — cannot recompute 3D")
             return
-        from pose3d.pipeline import detect_project
+        from pose3d.pipeline import detect_project, summarise_unreadable
         self.statusMessage.emit("Re-detecting the nose and face points…")
+        unread: list[dict] = []          # see `redetect_all`: never silent
         wrote = detect_project(self.project, detector, load_image,
                                fields="head", on_progress=on_progress,
-                               cancelled=cancelled)
+                               cancelled=cancelled, skipped=unread)
         if not wrote:
-            # A build whose detector has no face points (the manual detector,
-            # or an RTMPose bundle without the face model) writes nothing —
-            # saying "re-detected" here would be a success message for work
-            # that did not happen, and the head would go on riding the neck.
+            # Nothing was written — and "the detector has none to give" is
+            # only ONE of the two reasons for that. The other is that no
+            # photo opened, so the detector was never asked: OneDrive evicts
+            # a FOLDER, not a file, which makes a take of 0-byte placeholders
+            # the likelier shape, and blaming the build for it sends the user
+            # to reinstall over a file problem.
+            asked = len(CAMERAS) * len(self.project.frames) - len(unread)
+            note = summarise_unreadable(
+                unread, "the detector was never asked to look at them")
+            if unread and asked <= 0:
+                self.statusMessage.emit(
+                    f"No face points could be re-detected. {note}")
+                return
+            # The detector WAS asked at least once and gave nothing back, so
+            # the build is the reason — but any photo that also failed to
+            # open is a second, separate fact and is not swept under it.
             self.statusMessage.emit(
                 "This build's detector does not produce face points (the nose, "
                 "the eyes and the ears), so nothing was changed — the head "
-                "keeps its nose-pitch estimate")
+                "keeps its nose-pitch estimate"
+                + (f". {note}" if note else ""))
             return
         # the same gate the batch recompute applies, from the same take-wide
         # threshold: a re-detect must not leave face points a recompute would
@@ -590,10 +614,13 @@ class ProjectModel(QObject):
             triangulate_face(f, self.rig, epi_thr, F, allow,
                              face_protect(f, self.project.head_source))
         self.set_frame(self.current)
+        note = summarise_unreadable(
+            unread, "those views keep the face points they already had")
         self.statusMessage.emit(
             f"Nose and face points re-detected on "
             f"{len(self.project.frames)} frames; the body pose and every "
-            f"correction were left alone")
+            f"correction were left alone"
+            + (f". {note}" if note else ""))
 
     def save(self) -> None:
         from pose3d.core.io_project import count_corrections, save_project
@@ -727,6 +754,16 @@ class ProjectModel(QObject):
             for c in (CAM_LEFT, CAM_RIGHT):
                 if not np.isnan(f.head2d[c]).all():     # cam has face points
                     f.head2d[c][0] = f.kp2d[c][joint]
+                    # ...and the nose inherits the joint's PROVENANCE with its
+                    # position, because it is the same physical detection.
+                    # Without this, "Re-detect face points only" overwrote a
+                    # nose the user had placed through the HEAD dot while
+                    # `kp2d[HEAD]` kept it: one point, two stored copies,
+                    # disagreeing, with the head basis built from the one the
+                    # user did not place. Mirrored rather than set True, so an
+                    # undo — which re-enters here after clearing the joint's
+                    # flag — takes this one back with it.
+                    f.head_corrected[c][0] = bool(f.corrected[c][joint])
             # and through the same gate as any other face edit: the synced
             # nose is a cross-view pair like the rest, and a drag that pulls
             # it off its epipolar line must lose its 3D here too — unless the
@@ -1177,11 +1214,13 @@ def _rescale_report(report: dict, factor: float) -> None:
     rule for what it contains, which is a decision for whoever adds one.
 
     `moved` is re-taken from the scaled displacement: it is a verdict about a
-    length against `resolve.MOTION_WARN_MM`, so leaving it as it was would
-    report "the cameras held still" about a wobble that is now over the
-    threshold (or the reverse).
+    length, so leaving it as it was would report "the cameras held still"
+    about a wobble that is now over the threshold (or the reverse). Re-taken
+    through `resolve.camera_moved`, which is the rule itself — the two
+    thresholds were compared here and in `camera_motion_check` separately,
+    and nothing made the two verdicts agree.
     """
-    from pose3d.calib.resolve import MOTION_WARN_DEG, MOTION_WARN_MM
+    from pose3d.calib import resolve
 
     for key, value in report.items():
         if isinstance(value, dict):
@@ -1192,9 +1231,8 @@ def _rescale_report(report: dict, factor: float) -> None:
                 and not any(w in key.lower() for w in _NOT_A_WORLD_LENGTH)):
             report[key] = float(value) * factor
     if report.get("max_centre_mm") is not None:
-        rot = report.get("max_rotation_deg") or 0.0
-        report["moved"] = bool(float(rot) > MOTION_WARN_DEG
-                               or report["max_centre_mm"] > MOTION_WARN_MM)
+        report["moved"] = resolve.camera_moved(report.get("max_rotation_deg"),
+                                               report["max_centre_mm"])
 
 
 def _report(on_progress, label: str) -> None:

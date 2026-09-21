@@ -69,11 +69,17 @@ def test_a_str_path_works_too(tmp_path):
     assert read_image(str(p)).shape == (48, 64, 3)
 
 
-def test_detect_project_refuses_a_none_image_by_name():
+def test_detect_project_names_an_image_it_could_not_read():
     """The old `cv2.imread` loader answers None on a path it cannot encode.
     `detect_project` used to pass that straight to the detector, where it
     surfaced as `'NoneType' object has no attribute 'shape'` with no mention
-    of the file that was unreadable."""
+    of the file that was unreadable.
+
+    It names it now instead of raising: raising cost the whole import (the
+    dialog's outer handler wrote no project at all), while one photo is worth
+    one view of one frame. The FILE still has to be named — that was the
+    point of the original fix, and it is what the user acts on.
+    """
     from pose3d.core.project import CAM_LEFT, CAM_RIGHT, Frame, ProjectData
     from pose3d.pipeline import detect_project
 
@@ -83,6 +89,9 @@ def test_detect_project_refuses_a_none_image_by_name():
                 CAM_RIGHT: "C:/Users/Müller/right.jpg"}
     data.frames.append(f)
 
-    with pytest.raises(ImageReadError) as e:
-        detect_project(data, object(), lambda p: None)
-    assert "Müller" in str(e.value)
+    skipped = []
+    detect_project(data, object(), lambda p: None, skipped=skipped)
+
+    assert [s["camera"] for s in skipped] == [CAM_LEFT, CAM_RIGHT]
+    assert all("Müller" in s["reason"] for s in skipped)
+    assert np.isnan(f.kp2d[CAM_LEFT]).all(), "no pose was invented for it"

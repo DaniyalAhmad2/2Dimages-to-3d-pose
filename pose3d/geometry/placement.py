@@ -97,6 +97,22 @@ def take_floor(seats, quantile: float = FLOOR_QUANTILE) -> float | None:
     return finite[min(k, len(finite) - 1)]
 
 
+def _widest_span(points) -> float:
+    """The largest distance between any two of these points.
+
+    Rotation-invariant, which is the whole reason it is here: it stands in
+    for a height on a take with no body axis to measure a height along, and a
+    measure that changed with the caller's frame would put the 3D view and
+    the export back on two different sizes. On a standing figure the widest
+    span IS head-to-foot.
+    """
+    p = np.asarray(points, float)
+    if len(p) < 2:
+        return 0.0
+    d = p[:, None, :] - p[None, :, :]
+    return float(np.sqrt((d * d).sum(-1)).max())
+
+
 def take_scale(character, poses):
     """(scale, note): ONE uniform size for the whole take, and why.
 
@@ -126,6 +142,16 @@ def take_scale(character, poses):
     orientation. Two callers, two sizes, one figure. Doing it here means they
     agree by construction rather than by call order; a take that arrives
     already upright is de-tilted by an identity and pays a matrix multiply.
+
+    When there is NO body axis to de-tilt by — too few joints reconstructed
+    for `sequence_up` to find a spine — the extent along z is the caller's
+    frame all over again, and skipping the de-tilt quietly reinstated the
+    very disagreement it removes. So the measure changes instead of being
+    dropped: the largest distance between any two reconstructed joints, which
+    is the same number whichever way the take is turned and is head-to-foot
+    on a standing figure, i.e. the height this is standing in for. A rougher
+    measurement again, on a take that already had nothing to measure — but
+    one number, and the same one in both callers.
     """
     scale = character.fit_to_subject(poses)
     if scale is not None:
@@ -138,7 +164,8 @@ def take_scale(character, poses):
     for pose in poses:
         seen = pose[~np.isnan(pose).any(1)]
         if len(seen) >= 2:
-            h = float(seen[:, 2].max() - seen[:, 2].min())
+            h = (float(seen[:, 2].max() - seen[:, 2].min()) if up is not None
+                 else _widest_span(seen))
             if h > 1e-9:
                 heights.append(h)
     if not heights:

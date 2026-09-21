@@ -51,6 +51,81 @@ class CalibratedRig:
         self.ext = {CAM_LEFT: ext_l, CAM_RIGHT: ext_r}
 
 
+def read_frame_image(frame, cam: str, load_image, skipped=None):
+    """This frame's image for `cam`, or None with the reason recorded.
+
+    A photo that cannot be read costs its own PAIR and nothing else — the
+    rule for every pass over a take's photographs, stated once here because
+    two passes each having their own was the defect: the calibration skipped
+    a 0-byte OneDrive placeholder and the detection right after it raised on
+    the same file, so the import ended with "Import failed" and no project
+    written, after the copy and after the calibration.
+
+    Every failure of the injected loader is caught, not just `ImageReadError`:
+    the loader is a parameter (the GUI passes `read_image`, the tools pass
+    `cv2.imread`, tests pass doubles), and a frame is the unit of loss
+    whatever it raises. A loader that ANSWERS None instead of raising is the
+    same fact — `cv2.imread` does that on a path it cannot encode in the
+    machine's ANSI code page — and `frame.images.get(cam)` returning None is
+    the same kind of accident, which used to be worse: `read_image(None)`
+    dies in `Path(None)` with a TypeError that names nothing.
+
+    `skipped` is an optional list; each entry is
+    `{"frame", "camera", "reason"}` — what the user is shown, so it must be
+    the reason this run actually MEASURED and not a fabricated one.
+    """
+    path = frame.images.get(cam)
+
+    def note(reason):
+        if skipped is not None:
+            skipped.append({"frame": frame.frame_id, "camera": cam,
+                            "reason": reason})
+
+    if path is None:
+        note("this frame has no photo for that camera")
+        return None
+    try:
+        img = load_image(path)
+    except Exception as e:
+        note(str(e) or f"{type(e).__name__}")
+        return None
+    if img is None:
+        note(f"'{path}' could not be read")
+    return img
+
+
+def summarise_unreadable(skipped, what: str) -> str:
+    """One sentence naming the frames `what` could not read ("" for none).
+
+    The sentence states only the fact every caller shares — these frames had
+    a photo that could not be read — and `what` states the COST, because the
+    cost differs: the calibration loses the whole frame (it needs both views
+    to see the same tag), while the detection keeps the view it could read
+    and leaves the other one missing. "N image pair(s) were skipped"
+    overstated that second case to the one person who has to decide whether
+    to re-import.
+    """
+    if not skipped:
+        return ""
+    frames = sorted({s["frame"] for s in skipped}, key=_frame_order)
+    shown = ", ".join(frames[:5]) + (", …" if len(frames) > 5 else "")
+    return (f"{len(frames)} frame(s) had a photo that could not be read "
+            f"({shown}); {what}. "
+            f"The first was: {skipped[0]['reason']}")
+
+
+def _frame_order(frame_id):
+    """Sort key for frame ids: numerically when they are numbers.
+
+    The ids the importer writes are zero-padded ("0007"), where lexicographic
+    and numeric order agree — but a project whose frames are named "9" and
+    "10" would be listed 10 before 9, in a sentence whose whole job is to let
+    the user find the photo.
+    """
+    s = str(frame_id)
+    return (0, int(s), "") if s.isdigit() else (1, 0, s)
+
+
 def _detector_keypoint_model(detector: KeypointDetector) -> str:
     """Which joint layout this detector emits.
 
@@ -143,7 +218,8 @@ def derive_midpoints(project: ProjectData) -> int:
 
 def detect_project(project: ProjectData, detector: KeypointDetector,
                    load_image, on_frame=None, respect_corrections: bool = True,
-                   fields: str = "all", on_progress=None, cancelled=None) -> int:
+                   fields: str = "all", on_progress=None, cancelled=None,
+                   skipped=None) -> int:
     """Populate each frame's 2D keypoints/scores via the detector.
 
     load_image(path) -> BGR ndarray. Mutates project in place.
@@ -159,6 +235,13 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
     answers and commits them, together with the provenance triple, in one
     post-loop step: a take half-detected under a new layout, still carrying
     the old `head_source`, is a project that lies about its own 2D.
+
+    skipped is an optional list collecting every (frame, camera) whose photo
+    could not be read, in the shape `read_frame_image` records — the same
+    shape `calib.resolve` reports its own skips in. A photo that cannot be
+    read costs that view of that frame and nothing else; it never stops the
+    detection, because one 0-byte placeholder used to abort the whole import
+    with nothing written.
 
     respect_corrections keeps hand-placed points: a correction is a human
     saying the detector was wrong there, and re-running detection used to
@@ -195,17 +278,21 @@ def detect_project(project: ProjectData, detector: KeypointDetector,
         if cancelled is not None and cancelled():
             raise Cancelled()
         for cam in (CAM_LEFT, CAM_RIGHT):
-            img = load_image(frame.images[cam])
+            img = read_frame_image(frame, cam, load_image, skipped)
             if img is None:
-                # `cv2.imread` answers None instead of raising — on a path it
-                # cannot encode in the machine's ANSI code page, or on a
-                # 0-byte OneDrive placeholder. Passed on, it reached the
-                # detector as `'NoneType' object has no attribute 'shape'`,
-                # naming nothing. See pose3d.imageio.read_image.
-                from pose3d.imageio import ImageReadError
-                raise ImageReadError(
-                    f"The image for frame {frame.frame_id} camera {cam} could "
-                    f"not be read: {frame.images[cam]}")
+                # This photo costs its own view of this frame and nothing
+                # else. It used to cost the take: `read_image` RAISES where
+                # `cv2.imread` returned None — 0-byte OneDrive placeholders
+                # being the case it was written for — and the raise reached
+                # the import dialog's outer handler, which reported "Import
+                # failed" and wrote no project at all. The calibration right
+                # before it had already learned to skip the same file.
+                #
+                # Nothing is staged for it, so the frame keeps whatever 2D it
+                # had — NaN on a fresh import, which the views draw as a
+                # missing joint the user can place by hand. Inventing a pose
+                # for a photo nobody could read is the one thing worse.
+                continue
             det = detector.detect(img)
             body = None
             if fields == "all":
@@ -577,8 +664,15 @@ def face_protect(frame, head_source: str) -> tuple[int, ...]:
 
     Under the skull convention the HEAD joint and the nose are different
     detections (~86 px apart on frame 0 of the client take) and `corrected`
-    says nothing about the nose, so nothing is protected. Face points have no
-    `corrected` flag of their own, which is why this reads the joint's.
+    says nothing about the nose, so nothing is protected.
+
+    The JOINT's flag and not the nose's own `head_corrected`, even though the
+    face points now have one: this gate is about the pair the CANONICAL HEAD
+    forms, and it must return the same answer as `cross_view_rejection` gives
+    that joint or the two disagree about one detection — which is the defect
+    it was written for. Under this convention a HEAD drag sets both flags
+    anyway (`ui.model._resolve_joint` syncs the nose with its provenance), so
+    the two readings agree on every path a user can take.
 
     A separate, pure function because all four callers of `triangulate_face`
     must reach the same `head3d` from the same 2D, and this is the only thing
@@ -606,10 +700,12 @@ def triangulate_face(frame, rig: CalibratedRig, epi_thr: float,
 
     What it does NOT do is write a mask. `Frame.rejected` is a per-JOINT array
     the bone fit and the camera views read; the face points have no entry in
-    it, no `corrected` flag of their own and no dot colour to explain it —
-    their one override is `protect`, which the nose borrows from the HEAD
-    joint it IS under the COCO-17 convention (see `face_protect`). The
-    verdict lives only in the 3D: a refused pair is NaN, and the
+    it and no dot colour to explain one — their one override is `protect`,
+    which the nose borrows from the HEAD joint it IS under the COCO-17
+    convention (see `face_protect`). They DO keep a `head_corrected` flag of
+    their own, but that records who placed a point, not whether the two views
+    agree about where it is, and a gate must not be overruled by the first of
+    those. The verdict lives only in the 3D: a refused pair is NaN, and the
     character falls back to the neck's own aim for that frame. `head2d` is
     left exactly as the detector and the user wrote it, so the next
     calibration — or a drag that reconciles the pair — reinstates the point

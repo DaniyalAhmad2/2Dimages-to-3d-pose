@@ -660,7 +660,9 @@ def test_the_sidebar_states_the_facts_a_ruler_can_check(qapp, tmp_path):
     assert win.sidebar.row_baseline._v.text() == f"{baseline_cm:.1f} cm"
     assert "cm" in win.sidebar.row_height._v.text()
     marker = win.sidebar.row_marker._v.text()
-    assert "50 mm" in marker and "tag 15" in marker and "0007" in marker
+    # centimetres, the unit the import box takes and a ruler reads — the same
+    # unit as the two rows above it
+    assert "5.0 cm" in marker and "tag 15" in marker and "0007" in marker
 
     # and the three rows reprojection cannot see
     for row in (win.sidebar.row_bone_cv, win.sidebar.row_epipolar,

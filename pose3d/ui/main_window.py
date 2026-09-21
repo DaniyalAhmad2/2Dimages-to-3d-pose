@@ -460,6 +460,15 @@ class MainWindow(QMainWindow):
             per = errors.get(cam, {})
             panel.set_accuracy(per.get("measured"), per.get("delivered"),
                                states.get(cam))
+        # ...and the 3D preview bands its joints by the same three inputs, so
+        # one joint is one colour whichever panel it is looked at in (the
+        # client's 2026-07-26 complaint). View3D does the merging itself.
+        # HERE and not beside `pose3dChanged`: the banding needs the residuals,
+        # and this is the signal that carries them — the pose and the colours
+        # arrive separately and `View3D._draw_joints` re-draws for whichever
+        # lands second.
+        self.view3d.set_joint_status(states, errors,
+                                     self.model.frame().corrected)
 
     def _on_character_error(self, message: str):
         self.view3d_error.setText(message)
@@ -1058,6 +1067,14 @@ class MainWindow(QMainWindow):
                 body += ("\n\nThe preview video could not be rendered on "
                          "this machine. The motion capture and character "
                          "files above are complete.")
+            # HOW the character was sized, when it was not the bone fit. The
+            # export returns it and nothing showed it, so the 3D view said
+            # the figure is sized the rougher way and the delivered file —
+            # the thing the client actually sends on — said nothing. It is a
+            # note on a SUCCESSFUL export: the right character, posed by the
+            # right rule, measured more crudely.
+            if res.fit_note:
+                body += "\n\n" + res.fit_note
             QMessageBox.information(self, "Export complete", "Wrote:\n\n" + body)
         else:
             # Say WHY, from the reason the export carries, instead of the

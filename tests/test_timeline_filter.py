@@ -33,7 +33,13 @@ def qapp():
 
 
 class _Frame:
-    """The three things `populate` reads off a frame."""
+    """The three things `populate` reads off a frame.
+
+    `has_corrections` among them, and not the raw `corrected` array: the
+    frame answers "did a human place any point here" itself, because the
+    answer has two halves (body joints and face points keep separate flags)
+    and a caller that reads one of them under-reports the other.
+    """
 
     def __init__(self, i: int, corrected: bool = False):
         self.frame_id = f"{i:04d}"
@@ -41,6 +47,10 @@ class _Frame:
         flags = np.zeros(NUM_JOINTS, bool)
         flags[0] = corrected
         self.corrected = {"left": flags, "right": np.zeros(NUM_JOINTS, bool)}
+
+    def has_corrections(self, cam: str | None = None) -> bool:
+        cams = self.corrected if cam is None else (cam,)
+        return any(bool(np.any(self.corrected[c])) for c in cams)
 
 
 def _timeline(qapp, n=14, corrected=()):

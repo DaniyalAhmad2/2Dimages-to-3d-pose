@@ -90,6 +90,14 @@ class _JobDialog(QProgressDialog):
     ordinary key press this class can swallow — Qt's documented way to take a
     shortcut over.
 
+    So `canceled` is NOT how to hear about a Cancel on this dialog, and a
+    future connector must not assume it is. `run_job` disconnects Qt's
+    `clicked -> canceled` wire (that signal is wired on to
+    `QProgressDialog::cancel()`, which is the hide), so `canceled` fires zero
+    times per Cancel click and once at teardown, from the `close()` that ends
+    the dialog after the job has already stopped. `on_stop` is the hook: it
+    is what all three dismissals call, and what `run_job` points at the job.
+
     `_job_running` in MainWindow is not a substitute: it keeps another JOB
     out, but not a joint edit, a frame change, a save or an Import, and those
     reach the same ProjectData the worker thread is rewriting.

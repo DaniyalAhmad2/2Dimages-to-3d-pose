@@ -30,7 +30,8 @@ from pose3d.calib.extrinsics import (
 )
 from pose3d.calib.intrinsics import Intrinsics
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
-from pose3d.pipeline import CalibratedRig
+from pose3d.pipeline import (
+    CalibratedRig, read_frame_image, summarise_unreadable)
 
 # ArUco dictionaries to try, most likely first (the client's tags are 6x6).
 _DICT_NAMES = [
@@ -59,6 +60,25 @@ BRANCH_RATIO_MIN = 2.0
 # client's take: 1.02 deg and 8.4 mm, both of which are noise).
 MOTION_WARN_DEG = 2.0
 MOTION_WARN_MM = 30.0
+
+
+def camera_moved(rot_deg, centre_mm) -> bool:
+    """Did a camera move during the take, given how far its pose wandered?
+
+    THE rule, stated once. `camera_motion_check` takes this verdict when the
+    rig is solved and `ui.model._rescale_report` re-takes it when a set-scale
+    changes the displacement — the number it judges is a LENGTH, so a rescale
+    really can carry a take over the threshold or back under it, and the two
+    places used to compare against the two constants separately. Nothing made
+    them agree, and a provenance record that says "the cameras held still"
+    about a wobble now over the threshold is worse than no record.
+
+    A missing measurement is not motion: `None` for either half reads as
+    zero, which is what a caller that could not measure an angle means.
+    """
+    rot = 0.0 if rot_deg is None else float(rot_deg)
+    cen = 0.0 if centre_mm is None else float(centre_mm)
+    return bool(rot > MOTION_WARN_DEG or cen > MOTION_WARN_MM)
 
 
 def _to_jsonable(o):
@@ -273,40 +293,12 @@ def _approx_intrinsics(image: np.ndarray) -> Intrinsics:
 # --------------------------------------------------------------------------
 # tag observations
 # --------------------------------------------------------------------------
-def _read_frame_image(frame, cam, load_image, skipped=None):
-    """This frame's image for `cam`, or None with the reason recorded.
-
-    A photo that cannot be read costs its own PAIR and nothing else. It used
-    to cost the take: `pose3d.imageio.read_image` raises `ImageReadError`
-    where `cv2.imread` returned None — 0-byte OneDrive placeholders being the
-    case it was written for — and the `is None` skip below was left over from
-    the old reader, so one bad file in 26 pairs aborted the whole import.
-
-    Every failure of the injected loader is caught, not just `ImageReadError`:
-    the loader is a parameter (the GUI passes `read_image`, the tools pass
-    `cv2.imread`, tests pass doubles), and a frame is the unit of loss
-    whatever it raises. `frame.images.get(cam)` returning None is the same
-    kind of accident and used to be worse — `read_image(None)` dies in
-    `Path(None)` with a TypeError that names nothing.
-    """
-    path = frame.images.get(cam)
-
-    def note(reason):
-        if skipped is not None:
-            skipped.append({"frame": frame.frame_id, "camera": cam,
-                            "reason": reason})
-
-    if path is None:
-        note("this frame has no photo for that camera")
-        return None
-    try:
-        img = load_image(path)
-    except Exception as e:
-        note(str(e) or f"{type(e).__name__}")
-        return None
-    if img is None:
-        note(f"'{path}' could not be read")
-    return img
+# `read_frame_image` — this frame's image for `cam`, or None with the reason
+# recorded — is imported from `pipeline`, where it is THE rule for every pass
+# over a take's photographs. Two passes each having their own is what the
+# import broke on: the calibration skipped a 0-byte OneDrive placeholder and
+# the detection right after it raised on the same file, so the import ended
+# with "Import failed" and nothing written.
 
 
 def first_readable_pair(project: ProjectData, load_image, skipped=None):
@@ -323,34 +315,24 @@ def first_readable_pair(project: ProjectData, load_image, skipped=None):
     `detect_all_tags` is about to look at every frame properly.
     """
     for frame in project.frames:
-        imgs = [_read_frame_image(frame, cam, load_image, skipped)
+        imgs = [read_frame_image(frame, cam, load_image, skipped)
                 for cam in CAMERAS]
         if all(img is not None for img in imgs):
             return imgs[0], imgs[1]
     return None
 
 
-def _frame_order(frame_id):
-    """Sort key for frame ids: numerically when they are numbers.
-
-    The ids the importer writes are zero-padded ("0007"), where lexicographic
-    and numeric order agree — but a project whose frames are named "9" and
-    "10" would be listed 10 before 9, in a sentence whose whole job is to let
-    the user find the photo.
-    """
-    s = str(frame_id)
-    return (0, int(s), "") if s.isdigit() else (1, 0, s)
-
-
 def summarise_skipped(skipped) -> str:
-    """One sentence naming the pairs a calibration could not read."""
-    if not skipped:
-        return ""
-    frames = sorted({s["frame"] for s in skipped}, key=_frame_order)
-    shown = ", ".join(frames[:5]) + (", …" if len(frames) > 5 else "")
-    return (f" {len(frames)} image pair(s) were skipped because a photo could "
-            f"not be read ({shown}); the calibration used the rest. "
-            f"The first was: {skipped[0]['reason']}")
+    """One sentence naming the frames a calibration could not read.
+
+    Appended to a message that is already a sentence, hence the leading
+    space. The naming itself is `pipeline.summarise_unreadable`, shared with
+    the detection, which skips the same photos for the same reason; the
+    clause here is the COST, and for a calibration it is the whole frame —
+    it needs both views to see the same tag.
+    """
+    note = summarise_unreadable(skipped, "the calibration used the rest")
+    return f" {note}" if note else ""
 
 
 def detect_all_tags(project: ProjectData, load_image, dictionaries=None,
@@ -377,7 +359,7 @@ def detect_all_tags(project: ProjectData, load_image, dictionaries=None,
     for frame in project.frames:
         images = {}
         for cam in CAMERAS:
-            images[cam] = _read_frame_image(frame, cam, load_image, skipped)
+            images[cam] = read_frame_image(frame, cam, load_image, skipped)
         if any(img is None for img in images.values()):
             continue
         for dict_id, detector in detectors:
@@ -637,7 +619,7 @@ def camera_motion_check(observations, frames, tag_id, intr, marker_length,
             "n_frames": len(Rs),
             "max_rotation_deg": float(rot),
             "max_centre_mm": cen,
-            "moved": bool(rot > MOTION_WARN_DEG or cen > MOTION_WARN_MM),
+            "moved": camera_moved(rot, cen),
         }
     return out
 
@@ -841,8 +823,12 @@ def resolve_calibration(
                 "No image pair could be read, so the cameras' image size — "
                 "which is what an uncalibrated take estimates the lenses "
                 "from — is not known. Check that the photos are on this "
-                "machine and not online-only placeholders."
-                + summarise_skipped(probed), skipped=probed)
+                "machine and not online-only placeholders. "
+                # NOT `summarise_skipped`: its sentence ends "the calibration
+                # used the rest", and on this branch there is no rest — the
+                # message said both things one after the other.
+                + summarise_unreadable(probed, "none could be used"),
+                skipped=probed)
         img_l, img_r = pair
         intr_left = intr_left or _approx_intrinsics(img_l)
         intr_right = intr_right or _approx_intrinsics(img_r)
