@@ -43,7 +43,9 @@ from pathlib import Path
 
 import numpy as np
 
-from pose3d.core.skeleton import BONES, Joint, NUM_HEAD_KP, NUM_JOINTS
+from pose3d.core.skeleton import (
+    BONES, CORE_INDEX, Joint, NUM_HEAD_KP, NUM_JOINTS,
+)
 
 _ASSET = Path(__file__).parent.parent / "assets" / "character.npz"
 
@@ -1152,10 +1154,18 @@ class Character:
 
     def _frame_scale(self, up_pose, valid):
         """The uniform scale for one frame: the take-wide fit once
-        `fit_to_subject` has run, else this frame's own height ratio."""
+        `fit_to_subject` has run, else this frame's own height ratio.
+
+        The height is measured over CORE_INDEX — this is the 3D twin of
+        `quality.figure_height_px`, and it is sized the same way for the same
+        reason. The toes sit below the ankles, so counting them made a take
+        whose feet are in frame size the character differently from the same
+        take with its feet cropped.
+        """
         if self._scale is not None:
             return self._scale
-        vpts = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[valid]
+        core = np.asarray(up_pose, float).reshape(NUM_JOINTS, 3)[CORE_INDEX]
+        vpts = core[np.asarray(valid, bool)[CORE_INDEX]]
         our_h = float(vpts[:, 2].max() - vpts[:, 2].min()) or 1.0
         return self.rig_h / our_h
 

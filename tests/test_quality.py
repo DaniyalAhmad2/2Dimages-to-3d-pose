@@ -184,3 +184,56 @@ def test_symmetry_flags_at_five_percent_not_three(baseline):
     loud = copy.copy(baseline)
     loud.symmetry = {"thigh": {"asym_pct": 5.6}}
     assert len(symmetry_notes(loud)) == 1
+
+
+# --- the toes are extremities: no take-wide number counts them -------------
+
+def test_a_never_detected_toe_is_not_a_gap_in_the_reconstruction():
+    """`gap_stats` is a take-wide readout, so it runs over CORE_INDEX.
+
+    Every project detected before the toes existed has two NaN toes in every
+    frame. Counting them would report 2 + 2*n_frames holes and an `undetected`
+    of 4*n_frames on a take the client has already accepted — a number that
+    moves the day a foot comes into frame, which is exactly what the core-set
+    rule exists to prevent.
+    """
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT, Frame, ProjectData
+    from pose3d.core.skeleton import CORE_INDEX, EXTREMITY_JOINTS
+    from pose3d.quality import gap_stats
+
+    p = ProjectData(name="pre-toes", keypoint_model="halpe26")
+    for fid in ("0001", "0002"):
+        f = Frame(frame_id=fid)
+        f.pose3d[CORE_INDEX] = 1.0               # every core joint reconstructed
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam][CORE_INDEX] = 1.0        # and detected in both views
+        p.frames.append(f)                       # the toes stay NaN throughout
+
+    g = gap_stats(p)
+    assert g["n_missing"] == 0 and g["missing"] == []
+    assert g["missing_pct"] == 0.0
+    assert g["undetected"] == 0
+
+    # and a CORE joint that is genuinely absent is still counted
+    p.frames[0].pose3d[int(Joint.LEFT_WRIST)] = np.nan
+    assert gap_stats(p)["n_missing"] == 1
+    # the denominator is the core set, not every joint
+    assert gap_stats(p)["missing_pct"] == 100.0 / (2 * len(CORE_INDEX))
+    assert len(EXTREMITY_JOINTS) == 2
+
+
+def test_the_figure_height_denominator_does_not_move_when_a_foot_appears():
+    """`figure_height_px` is the denominator of every px percentage the client
+    reads, so a foot coming into frame must not change it."""
+    from pose3d.core.skeleton import CORE_INDEX, NUM_JOINTS
+    from pose3d.quality import figure_height_px
+
+    kp = np.full((3, NUM_JOINTS, 2), np.nan)
+    kp[:, CORE_INDEX, 0] = 10.0
+    kp[:, CORE_INDEX, 1] = np.linspace(100.0, 400.0, len(CORE_INDEX))
+    without = figure_height_px(kp)
+    assert without == pytest.approx(300.0)
+
+    kp[:, int(Joint.LEFT_TOE)] = (10.0, 900.0)   # a toe well below the bbox
+    kp[:, int(Joint.RIGHT_TOE)] = (10.0, 900.0)
+    assert figure_height_px(kp) == pytest.approx(without)

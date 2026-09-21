@@ -34,7 +34,9 @@ from pose3d import pipeline as pl
 # `pose3d.app._load_rig` used to be a second copy of the same folder contract.
 from pose3d.calib.rigio import load_rig            # noqa: F401  (re-export)
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
-from pose3d.core.skeleton import BONES, JOINT_NAMES, NUM_JOINTS, Joint
+from pose3d.core.skeleton import (
+    BONES, CORE_INDEX, JOINT_NAMES, NUM_JOINTS, Joint,
+)
 from pose3d.geometry.bonefit import measure_bone_lengths
 from pose3d.geometry.character import PoseUnavailable
 from pose3d.geometry.orient import de_tilt_matrix, sequence_up
@@ -159,8 +161,11 @@ def figure_height_px(kp2d: np.ndarray) -> float:
     The two cameras are 2:1 apart in resolution, so a pixel error means twice
     as much in the right view as in the left. Every px figure is reported
     against this per-camera denominator as well as raw.
+
+    The toes are left out so the denominator, and every percentage built on
+    it, does not move when a foot comes into frame.
     """
-    kp2d = np.asarray(kp2d, float).reshape(-1, NUM_JOINTS, 2)
+    kp2d = np.asarray(kp2d, float).reshape(-1, NUM_JOINTS, 2)[:, CORE_INDEX]
     heights = []
     for f in kp2d:
         ys = f[np.isfinite(f).all(1), 1]
@@ -366,23 +371,30 @@ def gap_stats(project: ProjectData) -> dict:
     still counts as missing HERE — it is a hole the cameras left — while
     `filled` says how many of those holes the fit was nonetheless given a
     value for. The two are meant to be read together.
+
+    Every count here is over CORE_INDEX. A toe is an extremity: a project
+    detected before toe points existed has two NaN toes in every frame, and
+    they are not holes in a reconstruction that never claimed them. Counting
+    them would move this readout on a take the client has already accepted,
+    and move it again the day a foot comes into frame.
     """
     missing, rejected, undetected, filled = [], 0, 0, 0
     for f in project.frames:
         p = np.asarray(f.pose3d, float).reshape(NUM_JOINTS, 3)
-        for j in range(NUM_JOINTS):
+        for j in CORE_INDEX:
             if np.isnan(p[j]).all():
                 missing.append((f.frame_id, JOINT_NAMES[j]))
         for c in CAMERAS:
-            undetected += int(
-                np.isnan(np.asarray(f.kp2d[c], float)).any(1).sum())
+            undetected += int(np.isnan(
+                np.asarray(f.kp2d[c], float)[CORE_INDEX]).any(1).sum())
             mask = f.rejected.get(c) if hasattr(f, "rejected") else None
             if mask is not None:
-                rejected += int(np.count_nonzero(np.asarray(mask, bool)))
+                rejected += int(np.count_nonzero(
+                    np.asarray(mask, bool)[CORE_INDEX]))
         flags = getattr(f, "filled", None)
         if flags is not None:
-            filled += int(np.count_nonzero(flags))
-    total = max(1, len(project.frames) * NUM_JOINTS)
+            filled += int(np.count_nonzero(np.asarray(flags, bool)[CORE_INDEX]))
+    total = max(1, len(project.frames) * len(CORE_INDEX))
     return {
         "missing": missing,
         "n_missing": len(missing),

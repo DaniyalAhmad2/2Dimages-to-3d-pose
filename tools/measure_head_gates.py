@@ -462,6 +462,8 @@ def gate_table(base: dict, cand: dict) -> list[dict]:
     for name, after in cand["retarget_no_face_pct"].items():
         if name in _POLICY_JOINTS:
             continue                     # the policy joints are the change itself
+        if name not in base["retarget_no_face_pct"]:
+            continue                     # a joint the COCO-17 baseline cannot have
         delta = after - base["retarget_no_face_pct"][name]
         if delta > worst_delta:
             worst_joint, worst_delta = name, delta

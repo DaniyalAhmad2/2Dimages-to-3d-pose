@@ -1586,3 +1586,24 @@ def test_the_pose_and_face_points_share_one_space(mode):
             "the face basis is reading pelvis-relative position: revisit"
     assert np.array_equal(apart[hb], apart[nb]), \
         "the head bone drifted off the neck's matrix"
+
+
+def test_a_detected_toe_does_not_resize_the_character():
+    """`_frame_scale` is the 3D twin of `quality.figure_height_px`: a figure
+    height, and therefore over the core set.
+
+    The synthetic toes sit below the ankles, so measuring the subject's height
+    over every joint made a take whose feet are in frame size the character
+    ~4 % differently from the same take with its feet cropped — visible as the
+    head aim error (`test_head_source`) moving with nothing but the toes.
+    """
+    ch = _ch()
+    pose = sample_skeleton_3d()
+    valid = ~np.isnan(pose).any(1)
+
+    cropped = pose.copy()
+    cropped[[int(Joint.LEFT_TOE), int(Joint.RIGHT_TOE)]] = np.nan
+
+    assert ch._scale is None, "this measures the per-frame fallback"
+    assert ch._frame_scale(pose, valid) == pytest.approx(
+        ch._frame_scale(cropped, ~np.isnan(cropped).any(1)))

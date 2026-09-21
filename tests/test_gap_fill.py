@@ -9,7 +9,7 @@ appeared — and the reconstructed-joint count reported 15/15 for both frames.
 import numpy as np
 
 from pose3d.core.project import Frame, ProjectData
-from pose3d.core.skeleton import NUM_JOINTS, Joint
+from pose3d.core.skeleton import CORE_INDEX, NUM_JOINTS, Joint
 from pose3d.pipeline import fill_gaps, fit_project
 from tests.gates import needs_character
 from tests.synth import sample_skeleton_3d
@@ -289,8 +289,10 @@ def test_a_filled_joint_is_flagged_and_beats_holding_the_previous_frame():
 
     # every value the fill wrote is flagged, and every flag has a value
     assert n == 2
-    assert {(project.frames[t].frame_id, Joint(int(j)).name)
-            for t, j in np.argwhere(np.isnan(raw).any(2))} == {
+    # over the core set: this take was detected before toe points existed, so
+    # its two toes are NaN in every frame and are not holes the fill is about
+    assert {(project.frames[t].frame_id, Joint(CORE_INDEX[j]).name)
+            for t, j in np.argwhere(np.isnan(raw[:, CORE_INDEX]).any(2))} == {
         ("0013", "LEFT_ELBOW"), ("0021", "LEFT_ANKLE")}
     for t, (f, before) in enumerate(zip(project.frames, raw)):
         written = np.isnan(before).any(1) & ~np.isnan(poses[t]).any(1)
