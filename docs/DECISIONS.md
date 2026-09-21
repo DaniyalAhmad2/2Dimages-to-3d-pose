@@ -273,13 +273,16 @@ the decisions it rests on, then the rulings made while it was implemented.
   A bump would have promised a repair that opening the project does not perform. Cost if wrong: an
   informational number that no longer separates a pre-toe pipeline from this one — the hint below
   is what actually tells the client.
-- **A pre-toe project is OFFERED toe detection when it opens — never forced** (owner, 2026-09-22,
-  on seeing the empty toe handles: "why aren't they filled by default?"). One question after the
-  window is up: Yes runs the ordinary detection job with its progress dialog and cancel, No leaves
-  the status-bar hint. A detection rewrites every uncorrected 2D point and needs the detector
-  loaded, so it never starts uninvited; the question is asked through `guard.ask_yes_no`, the one
-  yes/no seam, which the test suite answers No for every test. Cost if wrong: one extra dialog on
-  opening an old project.
+- **A pre-toe project DETECTS its toes when it opens — by default, no question** (owner,
+  2026-09-22, twice: on seeing the empty toe handles, "why aren't they filled by default?", and on
+  seeing the Yes/No box that first answered it, "the toes should be detected by default"). The
+  ordinary detection job — progress dialog, Cancel, the all-or-nothing commit that keeps every
+  hand-corrected point — starts from the event loop once the window is up; a cancelled or failed
+  run leaves the project as it was (the job says so in the status bar) and the next open detects
+  again. `guard.ask_yes_no` stays as
+  the one yes/no seam (the export's sparse question and the import's calibration warning go
+  through it; the suite answers No), and a static test refuses any hand-rolled Yes/No box under
+  pose3d/ui. Cost if wrong: ~20 seconds of detection on opening an old project, cancellable.
 - **The pre-toe hint is keyed on the data, not on a build stamp.** A take detected by THIS build
   whose feet are out of frame in every photograph reads as predating the toes and shows the hint
   too. Accepted: nothing in the file separates the two cases, and the hint costs one Run Detection.

@@ -1,4 +1,4 @@
-# Pose3D — what changed in build-22
+# Pose3D — what changed in build-23
 
 Everything you reported is answered below: what you said, what changed, and the
 quickest way to check it for yourself. Nothing here needs a technical step.
@@ -70,9 +70,9 @@ me `pose3d-diagnostics.txt`. It names the exact file that is missing.
   foot, the big toe, so the character's foot points where the figure's toes
   point. A toe the detector could not see is a red dashed handle under the
   ankle that you can drag into place. A project made before this build has no
-  toe points yet: when you open it the app offers to detect them (a short
-  while — about 20 seconds for a 26-frame take; your corrections are kept), or
-  you can press Run Detection later.
+  toe points yet: the app detects them when you open it (a short while — about
+  20 seconds for a 26-frame take; your corrections are kept), with the usual
+  progress window you can cancel.
   *Check: a side-on frame — the foot follows the toe.*
 - **Corrections that vanished.** Your corrections are saved with the project
   and are still there when you reopen it, including after the 3D is

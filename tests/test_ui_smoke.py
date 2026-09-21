@@ -1836,6 +1836,9 @@ def test_a_project_detected_before_the_toes_gets_one_hint(qapp):
     model = ProjectModel(data, rig)
     assert model.predates_toes()
     win = MainWindow(model)
+    # the detection the window starts on its own is another test's subject:
+    # stub it before the first event pass, or a real detector loads here
+    win._on_run_detection = lambda: None
     win.show(); QApplication.processEvents()
     assert win.statusBar().currentMessage() == TOES_HINT
 
@@ -1877,9 +1880,12 @@ def test_the_recompute_banners_numbers_ignore_the_toes():
 
 
 def _pre_toe_window(n=3):
-    """A window over a Halpe-26 take whose toes were never detected."""
-    from PySide6.QtWidgets import QApplication
+    """A window over a Halpe-26 take whose toes were never detected.
 
+    NOT shown and no events processed here: the detection is scheduled on the
+    event loop at construction, and a test has to install its stub BEFORE the
+    first event pass starts a real detector.
+    """
     from pose3d.core.project import CAM_LEFT, CAM_RIGHT
     from pose3d.core.skeleton import Joint
     from pose3d.ui.main_window import MainWindow
@@ -1889,56 +1895,57 @@ def _pre_toe_window(n=3):
     for f in data.frames:
         for cam in (CAM_LEFT, CAM_RIGHT):
             f.kp2d[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
-    # NOT shown and no events processed here: the offer is scheduled on the
-    # event loop at construction, and a test has to install its own answer
-    # and its detection stub BEFORE the first event pass fires it.
     return MainWindow(ProjectModel(data, rig))
 
 
-def test_a_pre_toe_project_is_offered_toe_detection_once_the_window_is_up(
+def test_a_pre_toe_project_detects_its_toes_once_the_window_is_up(
         qapp, asked_questions, monkeypatch):
-    """Offered, never forced: the question comes from the event loop after
-    the window exists, No leaves the hint, and Yes runs the ordinary
-    detection job — nothing is detected behind the user's back."""
+    """By default, not on request (the owner, 2026-09-22, on seeing the
+    question this used to ask): the ordinary detection job starts from the
+    event loop after the window exists — never inside construction, never
+    twice, and without asking anything."""
     from PySide6.QtWidgets import QApplication
-
-    from pose3d.ui.main_window import TOES_HINT, TOES_OFFER
     runs = []
     win = _pre_toe_window()
     monkeypatch.setattr(win, "_on_run_detection", lambda: runs.append(1))
-    assert asked_questions == [], "nothing is asked inside construction"
+    assert runs == [], "nothing runs inside construction"
     win.show()
     QApplication.processEvents()
 
-    assert [t for t, _ in asked_questions] == ["Toe points"]
-    assert asked_questions[0][1] == TOES_OFFER and "toe" in TOES_OFFER
-    assert runs == [], "No must not start a detection"
-    assert win.statusBar().currentMessage() == TOES_HINT
+    assert runs == [1], "the detection job starts once the window is up"
+    assert asked_questions == [], "no question: it is the default"
     QApplication.processEvents()
-    assert len(asked_questions) == 1, "asked once, not on every event pass"
+    assert runs == [1], "once, not on every event pass"
 
 
-def test_answering_yes_runs_the_detection_job(qapp, asked_questions, monkeypatch):
+def test_a_pre_toe_window_torn_down_before_its_first_event_pass_runs_nothing(
+        qapp, monkeypatch):
+    """The receiver overload of singleShot: Qt drops the pending call with
+    the window, so a window that never showed never starts a detector."""
+    from PySide6.QtCore import QCoreApplication, QEvent
     from PySide6.QtWidgets import QApplication
-
-    from pose3d.ui import guard
-    monkeypatch.setattr(guard, "ask_yes_no",
-                        lambda parent, title, text: (asked_questions.append((title, text)), True)[1])
     runs = []
     win = _pre_toe_window()
     monkeypatch.setattr(win, "_on_run_detection", lambda: runs.append(1))
-    win.show()
-    QApplication.processEvents()
-    assert asked_questions and runs == [1]
+    win.close(); win.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+    QApplication.processEvents(); QApplication.processEvents()
+    assert runs == []
 
 
-def test_a_project_with_toes_is_never_asked(qapp, asked_questions):
+def test_a_project_with_toes_runs_no_detection_on_open(qapp, monkeypatch):
     from PySide6.QtWidgets import QApplication
-    win = _keyboard_window(n=3)           # sample_skeleton_3d carries toes
-    win.model.project.keypoint_model = "halpe26"
-    QApplication.processEvents()
-    QApplication.processEvents()
-    assert asked_questions == []
+    from pose3d.ui.main_window import MainWindow
+    runs = []
+    orig = MainWindow._on_run_detection
+    monkeypatch.setattr(MainWindow, "_on_run_detection", lambda self: runs.append(1))
+    try:
+        win = _keyboard_window(n=3)           # sample_skeleton_3d carries toes
+        win.model.project.keypoint_model = "halpe26"
+        QApplication.processEvents(); QApplication.processEvents()
+        assert runs == []
+    finally:
+        monkeypatch.setattr(MainWindow, "_on_run_detection", orig)
 
 
 def test_no_yes_no_question_bypasses_the_one_seam():

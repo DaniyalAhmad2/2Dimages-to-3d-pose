@@ -23,16 +23,12 @@ from PySide6.QtWidgets import (
 HEAD_MODE_ITEMS = (("nose", "Head: nose"),
                    ("face", "Head: face (nose + ears)"))
 
-#: Shown once on opening a Halpe-26 project whose toes were never detected —
-#: every project saved before the toe joints existed. Nothing is re-detected
-#: uninvited; Run Detection adds them.
+#: Shown on opening a Halpe-26 project whose toes were never detected — every
+#: project saved before the toe joints existed. The window then starts the
+#: detection itself (`_detect_toes_on_open`); this line is what remains if
+#: that run is cancelled or fails, and Run Detection is the way back.
 TOES_HINT = ("This project was detected before toe points existed — "
              "Run Detection adds them.")
-#: The question asked once, after such a project's window is up.
-TOES_OFFER = ("This project was made before the app detected toe points, so "
-              "its feet have no toes yet.\n\nDetect them now? It takes a "
-              "short while (about 20 seconds for a 26-frame take) and keeps "
-              "your corrections. You can also do it later with Run Detection.")
 
 
 from pose3d.core.names import safe_name
@@ -200,14 +196,14 @@ class MainWindow(QMainWindow):
         self.resize(*_initial_size())
         self.statusBar().showMessage(
             TOES_HINT if self.model.predates_toes() else "Ready", 15000)
-        # …and OFFER to detect them, once the window is up: the question is
-        # asked from the event loop, never inside construction, so a window
-        # is on screen behind it and a test can build one without answering.
+        # …and detect them, once the window is up: the job starts from the
+        # event loop, never inside construction, so the window is on screen
+        # behind its progress dialog and a test can build one without running
+        # a detector. The receiver overload: Qt drops the pending call with
+        # the window, so a window torn down before its first event pass never
+        # starts a job from beyond the grave.
         if self.model.predates_toes():
-            # the receiver overload: Qt drops the pending offer with the
-            # window, so a window torn down before its first event pass
-            # never asks from beyond the grave
-            QTimer.singleShot(0, self, self._offer_toes)
+            QTimer.singleShot(0, self, self._detect_toes_on_open)
 
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -675,20 +671,21 @@ class MainWindow(QMainWindow):
         return True
 
     @guarded
-    def _offer_toes(self):
-        """Ask, once per open, whether to detect the toes of a pre-toe project.
+    def _detect_toes_on_open(self):
+        """Detect the toes of a pre-toe project, once, when it opens.
 
-        Offered, never forced (the owner's ruling, 2026-09-22): a detection
-        rewrites every 2D point that was not hand-corrected and needs the
-        detector loaded, so it does not start behind the user's back — but
-        neither should the client have to find Run Detection to get feet that
-        point somewhere. Yes runs the ordinary detection job, with its
-        progress dialog and its cancel; No leaves the status-bar hint.
+        By default, not on request (the owner's ruling on seeing the
+        question this used to ask, 2026-09-22: "the toes should be detected
+        by default"). It is the ordinary detection job — the same progress
+        dialog, the same Cancel, the same all-or-nothing commit that keeps
+        every hand-corrected point — started from the event loop so the
+        window is already on screen. A run that is cancelled or fails leaves
+        the project as it was (the job says so in the status bar), and the
+        next open detects again.
         """
         if self._busy() or not self.model.predates_toes():
             return
-        if guard.ask_yes_no(self, "Toe points", TOES_OFFER):
-            self._on_run_detection()
+        self._on_run_detection()
 
     @guarded
     def _on_run_detection(self):
