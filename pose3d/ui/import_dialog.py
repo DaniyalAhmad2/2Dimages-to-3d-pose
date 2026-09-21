@@ -256,12 +256,13 @@ class ImportDialog(QDialog):
             # extrinsics were scaled by is not recoverable from anything else
             project.marker_length = marker_length
             if not cal.ok:
-                cont = QMessageBox.warning(
-                    self, "Calibration not successful",
-                    cal.message + "\n\nOpen the project for 2D review without "
-                    "3D reconstruction?",
-                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-                if cont != QMessageBox.StandardButton.Yes:
+                # through the one yes/no seam (`guard.ask_yes_no`): the test
+                # suite answers it, so no import test can park a modal in
+                # front of a CI job
+                if not guard.ask_yes_no(
+                        self, "Calibration not successful",
+                        cal.message + "\n\nOpen the project for 2D review "
+                        "without 3D reconstruction?"):
                     return
             elif cal.approximate:
                 QMessageBox.information(self, "Calibration", cal.message)

@@ -321,9 +321,10 @@ def test_an_unreadable_photo_does_not_abort_the_whole_import(
     monkeypatch.setattr(import_dialog, "run_job",
                         lambda parent, title, fn, cancellable=True:
                         fn(lambda *a, **k: None, lambda: False))
-    monkeypatch.setattr(QMessageBox, "warning",
-                        staticmethod(lambda *a, **k:
-                                     QMessageBox.StandardButton.Yes))
+    # the "open for 2D review anyway?" question goes through the one yes/no
+    # seam; answer Yes (the autouse fixture would say No)
+    from pose3d.ui import guard
+    monkeypatch.setattr(guard, "ask_yes_no", lambda parent, title, text: True)
     shown = []
     monkeypatch.setattr(QMessageBox, "information",
                         staticmethod(lambda *a, **k: shown.append(a[2])))

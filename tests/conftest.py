@@ -25,6 +25,27 @@ def recorded_errors(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def asked_questions(monkeypatch):
+    """Every yes/no question the app would put in a modal box, recorded as
+    (title, text) and answered NO — for every test, asked for or not, for the
+    same reason as `recorded_errors`: a question nobody is there to answer
+    parks a dialog in front of a CI job. `pose3d.ui.guard.ask_yes_no` is the
+    one place the app asks. A test that wants Yes replaces it itself; ask for
+    this fixture by name to assert on what the user would have been asked.
+    """
+    asked: list[tuple[str, str]] = []
+    try:
+        from pose3d.ui import guard
+    except ImportError:                    # a build without PySide6
+        yield asked
+        return
+    monkeypatch.setattr(
+        guard, "ask_yes_no",
+        lambda parent, title, text: (asked.append((title, text)), False)[1])
+    yield asked
+
+
+@pytest.fixture(autouse=True)
 def shown_message_boxes(monkeypatch):
     """Every native OS message box the app would draw, recorded as its text.
 

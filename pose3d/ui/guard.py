@@ -44,6 +44,18 @@ def report_error(parent, title: str, text: str) -> None:
     QMessageBox.critical(parent, title, text)
 
 
+def ask_yes_no(parent, title: str, text: str) -> bool:
+    """The ONE place the app asks the user a yes/no question with a modal
+    box, so a test can answer it (`tests/conftest.py` records the question
+    and answers No for every test, asked for or not) instead of parking a
+    dialog in front of a CI job. True for Yes."""
+    from PySide6.QtWidgets import QMessageBox
+    return QMessageBox.question(
+        parent, title, text,
+        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        QMessageBox.StandardButton.Yes) == QMessageBox.StandardButton.Yes
+
+
 def guarded(fn):
     """Decorate a slot so a failure inside it is reported, not swallowed.
 

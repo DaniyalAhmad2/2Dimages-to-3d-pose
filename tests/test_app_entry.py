@@ -93,18 +93,26 @@ def test_crash_handler_leaves_keyboard_interrupt_alone(monkeypatch):
 
 
 def _crash(monkeypatch):
-    """Fire the installed excepthook with a QApplication in the process."""
+    """Fire the installed excepthook with a QApplication in the process.
+
+    The fake `QApplication.instance` is undone on the way OUT, not at the end
+    of the test: the autouse `closed_windows` teardown asks the application
+    for its top-level windows, and a bare `object()` left in its place has
+    none to give — which surfaced the moment a fourth autouse fixture shifted
+    the teardown order.
+    """
     from PySide6.QtWidgets import QApplication
 
-    monkeypatch.setattr(QApplication, "instance", staticmethod(lambda: object()))
-    app.install_crash_handler()
-    try:
+    with monkeypatch.context() as m:
+        m.setattr(QApplication, "instance", staticmethod(lambda: object()))
+        app.install_crash_handler()
         try:
-            raise ValueError("rig went missing")
-        except ValueError:
-            sys.excepthook(*sys.exc_info())
-    finally:
-        sys.excepthook = sys.__excepthook__
+            try:
+                raise ValueError("rig went missing")
+            except ValueError:
+                sys.excepthook(*sys.exc_info())
+        finally:
+            sys.excepthook = sys.__excepthook__
 
 
 def test_the_crash_dialog_goes_through_the_error_sink(monkeypatch,

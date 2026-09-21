@@ -9,7 +9,7 @@ hub.
 from __future__ import annotations
 
 import numpy as np
-from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt
+from PySide6.QtCore import QCoreApplication, QEvent, QObject, Qt, QTimer
 from PySide6.QtWidgets import (
     QComboBox, QFrame, QHBoxLayout, QLabel, QMainWindow, QPushButton,
     QScrollArea, QSplitter, QToolButton, QVBoxLayout, QWidget,
@@ -28,6 +28,11 @@ HEAD_MODE_ITEMS = (("nose", "Head: nose"),
 #: uninvited; Run Detection adds them.
 TOES_HINT = ("This project was detected before toe points existed — "
              "Run Detection adds them.")
+#: The question asked once, after such a project's window is up.
+TOES_OFFER = ("This project was made before the app detected toe points, so "
+              "its feet have no toes yet.\n\nDetect them now? It takes a "
+              "short while (about 20 seconds for a 26-frame take) and keeps "
+              "your corrections. You can also do it later with Run Detection.")
 
 
 from pose3d.core.names import safe_name
@@ -195,6 +200,14 @@ class MainWindow(QMainWindow):
         self.resize(*_initial_size())
         self.statusBar().showMessage(
             TOES_HINT if self.model.predates_toes() else "Ready", 15000)
+        # …and OFFER to detect them, once the window is up: the question is
+        # asked from the event loop, never inside construction, so a window
+        # is on screen behind it and a test can build one without answering.
+        if self.model.predates_toes():
+            # the receiver overload: Qt drops the pending offer with the
+            # window, so a window torn down before its first event pass
+            # never asks from beyond the grave
+            QTimer.singleShot(0, self, self._offer_toes)
 
         central = QWidget(); self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -662,6 +675,22 @@ class MainWindow(QMainWindow):
         return True
 
     @guarded
+    def _offer_toes(self):
+        """Ask, once per open, whether to detect the toes of a pre-toe project.
+
+        Offered, never forced (the owner's ruling, 2026-09-22): a detection
+        rewrites every 2D point that was not hand-corrected and needs the
+        detector loaded, so it does not start behind the user's back — but
+        neither should the client have to find Run Detection to get feet that
+        point somewhere. Yes runs the ordinary detection job, with its
+        progress dialog and its cancel; No leaves the status-bar hint.
+        """
+        if self._busy() or not self.model.predates_toes():
+            return
+        if guard.ask_yes_no(self, "Toe points", TOES_OFFER):
+            self._on_run_detection()
+
+    @guarded
     def _on_run_detection(self):
         from pose3d.geometry.character import (
             default_head_source, set_default_head_source)
@@ -1015,15 +1044,16 @@ class MainWindow(QMainWindow):
             return
         avg = total / len(frames)
         if avg < 5:   # too few joints to look like a figure
-            go = QMessageBox.question(
-                self, "Sparse reconstruction",
-                f"Only about {avg:.0f} of {len(CORE_JOINTS)} joints were reconstructed "
-                "per frame, so the video will look almost empty.\n\n"
-                "This is a calibration/data issue — commonly approximate "
-                "intrinsics, or the two views being too different so joints get "
-                "dropped as inconsistent. Export anyway?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if go != QMessageBox.StandardButton.Yes:
+            # through the one yes/no seam, so a test that reaches this path
+            # gets an answer instead of a modal nobody is there to click
+            if not guard.ask_yes_no(
+                    self, "Sparse reconstruction",
+                    f"Only about {avg:.0f} of {len(CORE_JOINTS)} joints were "
+                    "reconstructed per frame, so the video will look almost "
+                    "empty.\n\nThis is a calibration/data issue — commonly "
+                    "approximate intrinsics, or the two views being too "
+                    "different so joints get dropped as inconsistent. Export "
+                    "anyway?"):
                 return
         out = filedialog.existing_directory(
             self, "Export results to folder", filedialog.writable_dir())

@@ -1874,3 +1874,88 @@ def test_the_recompute_banners_numbers_ignore_the_toes():
     assert (_recompute_note(stored, now)
             == _recompute_note(cropped_stored, cropped_now))
     assert "% of the figure's height" in _recompute_note(stored, now)
+
+
+def _pre_toe_window(n=3):
+    """A window over a Halpe-26 take whose toes were never detected."""
+    from PySide6.QtWidgets import QApplication
+
+    from pose3d.core.project import CAM_LEFT, CAM_RIGHT
+    from pose3d.core.skeleton import Joint
+    from pose3d.ui.main_window import MainWindow
+    from pose3d.ui.model import ProjectModel
+    data, rig, _ = _long_project(n)
+    data.keypoint_model = "halpe26"
+    for f in data.frames:
+        for cam in (CAM_LEFT, CAM_RIGHT):
+            f.kp2d[cam][[Joint.LEFT_TOE, Joint.RIGHT_TOE]] = np.nan
+    # NOT shown and no events processed here: the offer is scheduled on the
+    # event loop at construction, and a test has to install its own answer
+    # and its detection stub BEFORE the first event pass fires it.
+    return MainWindow(ProjectModel(data, rig))
+
+
+def test_a_pre_toe_project_is_offered_toe_detection_once_the_window_is_up(
+        qapp, asked_questions, monkeypatch):
+    """Offered, never forced: the question comes from the event loop after
+    the window exists, No leaves the hint, and Yes runs the ordinary
+    detection job — nothing is detected behind the user's back."""
+    from PySide6.QtWidgets import QApplication
+
+    from pose3d.ui.main_window import TOES_HINT, TOES_OFFER
+    runs = []
+    win = _pre_toe_window()
+    monkeypatch.setattr(win, "_on_run_detection", lambda: runs.append(1))
+    assert asked_questions == [], "nothing is asked inside construction"
+    win.show()
+    QApplication.processEvents()
+
+    assert [t for t, _ in asked_questions] == ["Toe points"]
+    assert asked_questions[0][1] == TOES_OFFER and "toe" in TOES_OFFER
+    assert runs == [], "No must not start a detection"
+    assert win.statusBar().currentMessage() == TOES_HINT
+    QApplication.processEvents()
+    assert len(asked_questions) == 1, "asked once, not on every event pass"
+
+
+def test_answering_yes_runs_the_detection_job(qapp, asked_questions, monkeypatch):
+    from PySide6.QtWidgets import QApplication
+
+    from pose3d.ui import guard
+    monkeypatch.setattr(guard, "ask_yes_no",
+                        lambda parent, title, text: (asked_questions.append((title, text)), True)[1])
+    runs = []
+    win = _pre_toe_window()
+    monkeypatch.setattr(win, "_on_run_detection", lambda: runs.append(1))
+    win.show()
+    QApplication.processEvents()
+    assert asked_questions and runs == [1]
+
+
+def test_a_project_with_toes_is_never_asked(qapp, asked_questions):
+    from PySide6.QtWidgets import QApplication
+    win = _keyboard_window(n=3)           # sample_skeleton_3d carries toes
+    win.model.project.keypoint_model = "halpe26"
+    QApplication.processEvents()
+    QApplication.processEvents()
+    assert asked_questions == []
+
+
+def test_no_yes_no_question_bypasses_the_one_seam():
+    """The question-side mirror of the error-sink rule: every yes/no modal in
+    the UI goes through `guard.ask_yes_no`, which the suite answers, so no
+    test can ever park a question in front of a CI job with nobody to click.
+    Hand-rolled `QMessageBox.question`/`.warning` with Yes|No buttons are
+    exactly what the seam exists to replace."""
+    import re
+    from pathlib import Path
+    ui = Path(__file__).resolve().parent.parent / "pose3d" / "ui"
+    offenders = []
+    for path in sorted(ui.glob("*.py")):
+        if path.name == "guard.py":
+            continue
+        text = path.read_text(encoding="utf-8")
+        if re.search(r"QMessageBox\.(question|warning)\(", text) and \
+                "StandardButton.Yes" in text:
+            offenders.append(path.name)
+    assert offenders == [], f"yes/no boxes outside guard.ask_yes_no: {offenders}"

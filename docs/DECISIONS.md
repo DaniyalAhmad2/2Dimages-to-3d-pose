@@ -273,6 +273,13 @@ the decisions it rests on, then the rulings made while it was implemented.
   A bump would have promised a repair that opening the project does not perform. Cost if wrong: an
   informational number that no longer separates a pre-toe pipeline from this one — the hint below
   is what actually tells the client.
+- **A pre-toe project is OFFERED toe detection when it opens — never forced** (owner, 2026-09-22,
+  on seeing the empty toe handles: "why aren't they filled by default?"). One question after the
+  window is up: Yes runs the ordinary detection job with its progress dialog and cancel, No leaves
+  the status-bar hint. A detection rewrites every uncorrected 2D point and needs the detector
+  loaded, so it never starts uninvited; the question is asked through `guard.ask_yes_no`, the one
+  yes/no seam, which the test suite answers No for every test. Cost if wrong: one extra dialog on
+  opening an old project.
 - **The pre-toe hint is keyed on the data, not on a build stamp.** A take detected by THIS build
   whose feet are out of frame in every photograph reads as predating the toes and shows the hint
   too. Accepted: nothing in the file separates the two cases, and the hint costs one Run Detection.
