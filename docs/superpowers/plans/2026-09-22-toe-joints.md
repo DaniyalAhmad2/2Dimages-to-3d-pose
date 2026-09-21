@@ -10,6 +10,8 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-21-toe-joints-design.md` — read it first; this plan argues from it. One deviation, ruled during planning: `PIPELINE_VERSION` stays 2 (`ui/model.py:178` recomputes any older project on open; a recompute cannot add toes, so a bump would only cost the client a wait). The foot's roll uses the leg's bend plane through the existing `_BEND_REF` machinery (the same reference the shin uses), which is what "keeps the shin's twist" means in this codebase.
 
+**Ruling during execution (2026-09-22):** appending the toes made eight take-wide statistics count them at once (`quality.gap_stats`, `rejection_note`'s denominator, the bone-length fallback report, `character._frame_scale`, the head-gates tool against a COCO baseline), so Task 2 could not be green alone. The DATA-LAYER half of the core-set rule (`quality.py` including `figure_height_px`, `pipeline.rejection_note`, `character._frame_scale`, `tools/measure_head_gates.py`) was executed inside Task 2; Task 3 keeps the UI half. `quality.BONE_NAMES` gained the two foot bones (a rig-wide invariant, like `_FALLBACK_LENGTHS`).
+
 ## Global Constraints
 
 - Worktree root: `/media/athena/hd3/Projects/pose3d-tool` (branch `fix/accuracy-audit`, base `16c1595`) or a per-task worktree the controller names. Never commit anything under `data/` (stale demo-project modifications live there).
