@@ -407,7 +407,10 @@ def test_bvh_keyframes_match_the_view(fresh):
     Forward kinematics off every captured keyframe of the BVH, against
     `Character.posed_joints` — the capture's own space, which is what the view
     draws — after ONE global similarity fit (one scale, one rotation, one
-    translation) for the whole take.
+    translation) for the whole take. Every rig point the view reads is
+    compared, bone HEADS and the leaf TAILS alike: the toes are the foot
+    bones' tails, so a foot that aimed differently in the file from the view
+    would show up here and nowhere else.
 
     One fit for the take, not one per keyframe, is the whole point: a per-frame
     fit re-places and re-orients each frame and would forgive both halves of
@@ -423,19 +426,44 @@ def test_bvh_keyframes_match_the_view(fresh):
     seq, bvh = fresh
     ch, upright, ref = _placement(seq)
     names = [b.name for b in bvh.joints]
-    mapping = {j: bvh.index(ch.bone_names[b])
-               for j, (b, which) in ch._joint_src.items()
-               if which == "head" and ch.bone_names[b] in names}
-    assert len(mapping) >= 10
+
+    def _point(b, which):
+        """(FK row, End Site offset or None) for one rig point, or None.
+
+        A bone's HEAD is its own joint's position in the file. Its TAIL — the
+        toes ARE the foot bones' tails — is the End Site the file writes under
+        a leaf bone; `parse` keeps that offset on the joint itself, because an
+        End Site has no channels and so no row of its own.
+        """
+        name = ch.bone_names[b]
+        if name not in names:
+            return None
+        bi = bvh.index(name)
+        if which == "head":
+            return bi, None
+        end = bvh.joints[bi].end_offset
+        if end is None or bvh.joints[bi].children:
+            return None             # not a leaf: its tail is a child's head
+        return bi, end
+
+    mapping = {j: p for j, (b, which) in ch._joint_src.items()
+               if which in ("head", "tail")
+               and (p := _point(b, which)) is not None}
+    assert len(mapping) >= 12
+    assert int(Joint.LEFT_TOE) in mapping and int(Joint.RIGHT_TOE) in mapping, \
+        "the toes must be inside the export-matches-view gate"
 
     src, dst = [], []
     for k, (row, _last) in enumerate(bvh_util.keyframe_rows(bvh, len(seq))):
         valid = ~np.isnan(upright[k]).any(1)
         app = ch.posed_joints(upright[k], valid)
-        fk = bvh.forward_kinematics(row)
-        for j, bi in mapping.items():
+        fk, rot = bvh.pose(row)
+        for j, (bi, end) in mapping.items():
             if valid[j] and np.isfinite(app[j]).all():
-                src.append(fk[bi]); dst.append(app[j])
+                # an End Site's offset is expressed in its parent joint's
+                # rotated frame, exactly as every other OFFSET is
+                src.append(fk[bi] if end is None else fk[bi] + rot[bi] @ end)
+                dst.append(app[j])
     err = bvh_util.similarity_error(np.asarray(src), np.asarray(dst))
     height = float(np.median([np.ptp(p[~np.isnan(p).any(1), 2]) for p in upright]))
     pct = 100.0 * float(err.max()) / height
