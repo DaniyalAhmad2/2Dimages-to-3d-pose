@@ -47,6 +47,8 @@ from pose3d.geometry.triangulate import (
 
 #: `EXTREMITY_JOINTS` as plain ints, to test a bone key's child against.
 _EXTREMITY_SET: frozenset[int] = frozenset(int(j) for j in EXTREMITY_JOINTS)
+#: `CORE_INDEX` as a membership test, for the per-joint loops below.
+_CORE_SET: frozenset[int] = frozenset(CORE_INDEX)
 
 # Human-readable name per canonical bone (audit table T1's row labels).
 BONE_NAMES: dict[tuple[int, int], str] = {
@@ -256,13 +258,11 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
     independent test of the extrinsics/intrinsics — but only of their mutual
     consistency: a focal error shared by both cameras largely cancels in F.
 
-    This is the ONE take-wide summary here that is NOT over the core set, and
-    deliberately: `threshold_px` and `frac_over_threshold` report the gate the
-    take was actually judged by, and `pipeline.epipolar_threshold` sizes that
-    gate from the median over EVERY joint. Narrowing this side alone would
-    make the row misreport the applied gate; narrowing both would change which
-    observations the gate rejects, which is a decision about the gate and not
-    about a readout. The pair moves together or not at all.
+    The per-joint rows cover every joint; the take-wide summary — and with it
+    `threshold_px` and `frac_over_threshold` — is over the core set, because
+    that is how the gate itself is sized (`pipeline.epipolar_threshold`: sized
+    from CORE, applied to all 17). The sidebar's gate line and the tooltip
+    have to read the number the gate used, so the two move together.
     """
     L = np.asarray(kp2d[CAM_LEFT], float)
     R = np.asarray(kp2d[CAM_RIGHT], float)
@@ -278,10 +278,12 @@ def body_epipolar(kp2d: dict[str, np.ndarray], rig) -> dict:
                                   rig.ext[CAM_LEFT], rig.ext[CAM_RIGHT])
             if np.isfinite(e):
                 vals.append(e)
-                dl, dr = _point_line_px(L[t, j], R[t, j], F)
-                d_left.append(dl)
-                d_right.append(dr)
-        allv.extend(vals)
+                if j in _CORE_SET:
+                    dl, dr = _point_line_px(L[t, j], R[t, j], F)
+                    d_left.append(dl)
+                    d_right.append(dr)
+        if j in _CORE_SET:
+            allv.extend(vals)
         per[JOINT_NAMES[j]] = {
             "n": len(vals),
             "median_px": _nanstat(vals, np.median),

@@ -438,8 +438,10 @@ def epipolar_threshold(rig: CalibratedRig,
                        project: ProjectData | None = None) -> float:
     """Pixels of epipolar disagreement tolerated by the cross-view gate.
 
-    Data-driven when a project is supplied: clip(6 x median Sampson, 25 px,
-    1.4 % of the SMALLER image's diagonal). The image-only rule this replaces
+    Data-driven when a project is supplied: clip(6 x median Sampson over the
+    CORE joints, 25 px, 1.4 % of the SMALLER image's diagonal) — sized from
+    the core set and applied to every joint, see the loop below. The
+    image-only rule this replaces
     was 71.5 px on the client take against an observed median of 4.91 px —
     14.6x the data, 3x its p99, and provably inert: it rejected 0 of 388 pairs
     and caught the ankle-on-knee hallucination its own docstring names in only
@@ -455,9 +457,16 @@ def epipolar_threshold(rig: CalibratedRig,
     ceiling = min(per_image_allowances(rig).values())
     if project is None or not project.frames:
         return float(ceiling)
+    # SIZED from the core set, APPLIED to all 17. A big toe is the noisiest
+    # point the detector produces — small, often motion-blurred, frequently
+    # half out of frame — and this median decides which CORE keypoints get
+    # dropped. On the client take, Run Detection alone moved the threshold
+    # 28.049 -> 28.998 px with nothing else changed. The toes are still gated
+    # (`validate_cross_view` judges every joint); they just do not buy the
+    # body a looser gate first.
     dists = []
     for frame in project.frames:
-        for j in range(NUM_JOINTS):
+        for j in CORE_INDEX:
             e = epipolar_distance(
                 frame.kp2d[CAM_LEFT][j], frame.kp2d[CAM_RIGHT][j],
                 rig.intr[CAM_LEFT], rig.intr[CAM_RIGHT],

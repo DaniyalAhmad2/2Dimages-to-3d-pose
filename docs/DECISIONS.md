@@ -257,9 +257,12 @@ the decisions it rests on, then the rulings made while it was implemented.
   fallback report, `character._frame_scale`, `subject_height` (head-to-ankle span by definition)
   and the take-wide bone-CV, retarget and reprojection summaries all run over `CORE_JOINTS`;
   per-joint and per-bone rows keep every joint, so a toe is still visible on its own row.
-  `body_epipolar` is the deliberate exception — it stays over all the joints because it reports the
-  gate as it was applied. Cost if wrong: the rule lives in two layers, so a new take-wide number
-  has to choose the core set in whichever layer computes it; and the sidebar's "height" stays
+  The cross-view gate is the one place the rule has two halves: it is SIZED from the core set
+  (`epipolar_threshold`, and `body_epipolar` with it, so the sidebar states the number the gate
+  used) and APPLIED to every joint, so a toe past the gate is still rejected — it just cannot
+  widen the gate the body is judged by first. Cost if wrong: the rule lives in two layers, so a
+  new take-wide number has to choose the core set in whichever layer computes it; and the
+  sidebar's "height" stays
   head-to-ankle, about 5 % under the true sole-to-head figure — the definition it already had.
 - **`quality.BONE_NAMES` gained the two foot bones**, because it is a rig-wide invariant with one
   entry per `BONES` edge — the same kind of table as `bonefit._FALLBACK_LENGTHS` — not a take-wide
