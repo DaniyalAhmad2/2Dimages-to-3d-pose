@@ -505,7 +505,7 @@ def test_the_release_note_answers_every_complaint_the_client_made():
 
 #: The GitHub release the note describes. Bump it with every resubmission, so
 #: a note that still names the previous build fails here before it is sent.
-RELEASE_BUILD = "build-20"
+RELEASE_BUILD = "build-21"
 
 
 def test_the_release_note_names_the_build_that_carries_it():

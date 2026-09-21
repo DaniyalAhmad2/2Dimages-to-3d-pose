@@ -38,13 +38,19 @@ GL_DRAWN_FRACTION = 0.001
 GL_DIFF_CHANNEL = 8
 
 #: A short standing pose, and the same pose with one arm raised, so the export
-#: has actual movement to bake rather than two identical frames.
+#: has actual movement to bake rather than two identical frames. One row per
+#: canonical joint, in `Joint` order — the toes last, forward of the ankles on
+#: the ground. `tests/test_selftest.py` pins the row count to NUM_JOINTS: the
+#: build-20 release gate failed on "cannot reshape array of size 90 into shape
+#: (17, 3)" because this literal stayed at 15 rows when the toes were added,
+#: and every test of `check_export` mocks the export away.
 _POSE = np.array([
     [0.00, 0.00, 1.70], [0.00, 0.00, 1.50], [-0.18, 0.00, 1.48],
     [0.18, 0.00, 1.48], [-0.20, 0.02, 1.20], [0.20, 0.02, 1.20],
     [-0.22, 0.05, 0.95], [0.22, 0.05, 0.95], [0.00, 0.00, 0.95],
     [-0.10, 0.00, 0.95], [0.10, 0.00, 0.95], [-0.11, 0.02, 0.52],
-    [0.11, 0.02, 0.52], [-0.12, 0.03, 0.08], [0.12, 0.03, 0.08]])
+    [0.11, 0.02, 0.52], [-0.12, 0.03, 0.08], [0.12, 0.03, 0.08],
+    [-0.12, 0.20, 0.02], [0.12, 0.20, 0.02]])
 
 
 class Skip(Exception):

@@ -7,7 +7,10 @@ not.
 import io
 from pathlib import Path
 
+import numpy as np
 import pytest
+
+from tests.gates import needs_blender, needs_character
 
 from pose3d import selftest
 
@@ -177,6 +180,26 @@ def test_a_failed_render_degrades_but_a_failed_export_does_not(monkeypatch):
         selftest.check_video()
     with pytest.raises(AssertionError):
         selftest.check_export()
+
+
+def test_the_self_test_pose_has_one_row_per_joint():
+    """The release gate runs `check_export` on the extracted bundle with this
+    pose. It is a literal, so it does not follow the skeleton by itself: the
+    build-20 gate failed on "cannot reshape array of size 90 into shape
+    (17, 3)" the day the toes were added. Every test of `check_export` below
+    mocks the export away, which is why nothing here caught it."""
+    from pose3d.core.skeleton import NUM_JOINTS
+    assert selftest._POSE.shape == (NUM_JOINTS, 3)
+    assert np.isfinite(selftest._POSE).all()
+
+
+@needs_blender()
+@needs_character()
+def test_the_bundles_own_export_check_really_runs():
+    """The same call the release gate makes on the client's zip, against the
+    real Blender: the one test in this file that does NOT mock the export."""
+    out = selftest.check_export()
+    assert "bvh" in out.lower() and "fbx" in out.lower(), out
 
 
 def test_video_is_a_separate_check_that_can_be_skipped_entirely():
