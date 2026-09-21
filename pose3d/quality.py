@@ -35,7 +35,7 @@ from pose3d import pipeline as pl
 from pose3d.calib.rigio import load_rig            # noqa: F401  (re-export)
 from pose3d.core.project import CAM_LEFT, CAM_RIGHT, CAMERAS, ProjectData
 from pose3d.core.skeleton import (
-    BONES, CORE_INDEX, JOINT_NAMES, NUM_JOINTS, Joint,
+    BONES, CORE_INDEX, EXTREMITY_JOINTS, JOINT_NAMES, NUM_JOINTS, Joint,
 )
 from pose3d.geometry.bonefit import measure_bone_lengths
 from pose3d.geometry.character import PoseUnavailable
@@ -44,6 +44,9 @@ from pose3d.geometry.placement import ground_datum, take_floor
 from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, reprojection_error,
 )
+
+#: `EXTREMITY_JOINTS` as plain ints, to test a bone key's child against.
+_EXTREMITY_SET: frozenset[int] = frozenset(int(j) for j in EXTREMITY_JOINTS)
 
 # Human-readable name per canonical bone (audit table T1's row labels).
 BONE_NAMES: dict[tuple[int, int], str] = {
@@ -218,7 +221,12 @@ def bone_length_stats(poses: np.ndarray) -> dict:
             "asym_pct": (float(100.0 * abs(lm - rm) / ((lm + rm) / 2))
                          if ok else float("nan")),
         }
-    finite = [v["cv_pct"] for v in bones.values() if np.isfinite(v["cv_pct"])]
+    # The per-bone rows cover every edge; the take-wide summary is the core
+    # ones. An edge into an extremity is one badly detected toe away from
+    # reporting a rigid mannequin as a wobbling one, and it is absent
+    # altogether on every take detected before toe points existed.
+    finite = [v["cv_pct"] for key, v in bones.items()
+              if np.isfinite(v["cv_pct"]) and key[1] not in _EXTREMITY_SET]
     return {
         "bones": bones,
         "symmetry": sym,

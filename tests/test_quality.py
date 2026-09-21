@@ -257,3 +257,28 @@ def test_the_subject_height_is_head_to_ankle_whether_or_not_the_toes_are_seen():
 
     assert subject_height(with_toes) == pytest.approx(subject_height(cropped))
     assert with_toes.shape[1] == NUM_JOINTS
+
+
+def test_a_wild_foot_bone_does_not_move_the_take_wide_bone_cv():
+    """`median_cv_pct`/`max_cv_pct` are the sidebar's bone-spread row — a
+    take-wide summary, so over core edges only. The foot bone keeps its own
+    row in the table (the toes colour their own dot), but one badly detected
+    toe must not be able to report a rigid mannequin as a wobbling one."""
+    from pose3d.core.skeleton import NUM_JOINTS
+    from pose3d.quality import bone_length_stats
+    from tests.synth import sample_skeleton_3d
+
+    rigid = np.stack([sample_skeleton_3d() for _ in range(6)])
+    steady = bone_length_stats(rigid)
+
+    wobbly = rigid.copy()
+    for i in range(len(wobbly)):                 # a foot that changes length
+        wobbly[i, int(Joint.LEFT_TOE), 1] += 0.15 * i
+        wobbly[i, int(Joint.RIGHT_TOE), 1] += 0.15 * i
+    got = bone_length_stats(wobbly)
+
+    foot = (int(Joint.LEFT_ANKLE), int(Joint.LEFT_TOE))
+    assert got["bones"][foot]["cv_pct"] > 20.0, "the row must still report it"
+    assert got["median_cv_pct"] == pytest.approx(steady["median_cv_pct"])
+    assert got["max_cv_pct"] == pytest.approx(steady["max_cv_pct"])
+    assert rigid.shape[1] == NUM_JOINTS
