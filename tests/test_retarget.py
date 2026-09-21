@@ -29,10 +29,11 @@ def _assert_rig_joints_finite(ch, joints):
     """Every joint the rig can SOURCE comes back finite.
 
     `pose_and_joints` states its own contract — "entries the rig cannot supply
-    are NaN" — and the toes are the first canonical joints that answers: they
-    hang off `foot.L/R`, which `_JOINT_FROM_RIG` does not read. So the check is
+    are NaN" — and the toes were the first canonical joints that answered: a
+    rig without `foot.L/R` has nowhere to read them from. So the check is
     against the rig's own rest pose rather than against all NUM_JOINTS, and it
-    widens by itself the day the rig gains a source for them.
+    widened by itself the day the bundled rig gained a source for them (the
+    foot bones' tails), which is why it now covers the toes too.
     """
     assert joints is not None
     sourced = ~np.isnan(np.asarray(ch.rest_joints(), float)).any(1)
@@ -1107,9 +1108,9 @@ def test_bake_reproduces_the_shipped_asset(tmp_path):
     vb, _, jb = Character(out).pose_and_joints(pose, valid)
     h = float(va[:, 2].max() - va[:, 2].min())
     assert np.abs(va - vb).max() / h < 1e-3
-    # over the joints the rig SOURCES: the toes hang off `foot.L/R`, which
-    # `_JOINT_FROM_RIG` does not read, so both rigs report them NaN — that is
-    # the two agreeing, but a NaN in the difference poisons the max.
+    # over the joints the rig SOURCES, whatever they are on the rig in hand:
+    # a rig without `foot.L/R` reports the toes NaN, and two rigs agreeing on
+    # NaN still poison the max of the difference.
     sourced = ~np.isnan(np.asarray(ca.rest_joints(), float)).any(1)
     assert np.abs(ja[sourced] - jb[sourced]).max() / h < 1e-6
 
