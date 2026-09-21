@@ -32,6 +32,9 @@ from pose3d.geometry.triangulate import (
     epipolar_distance, fundamental_matrix, triangulate_points,
 )
 
+#: `CORE_INDEX` as a membership test, for the per-joint loops below.
+_CORE_SET: frozenset[int] = frozenset(CORE_INDEX)
+
 
 class Cancelled(Exception):
     """The user stopped a long job before it finished.
@@ -603,7 +606,12 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
     back. The mask is rebuilt from scratch here on every call, so a recompute
     with a better rig reinstates every observation it no longer objects to.
 
-    Returns the number of observations rejected.
+    Returns the number of CORE observations rejected. Every rejection is
+    masked, toes included — the mask is what colours a handle — but the count
+    is the one the user is told (`rejection_note`, whose denominator is the
+    core set, and `quality.gap_stats["rejected"]`, which is core-only for the
+    same reason). A take whose toes the gate refuses must not read as a worse
+    calibration than the same take with its feet out of frame.
     """
     if epi_thr is None:
         epi_thr = epipolar_threshold(rig, project)
@@ -618,7 +626,9 @@ def validate_cross_view(project: ProjectData, rig: CalibratedRig,
         for c in (CAM_LEFT, CAM_RIGHT):
             frame.rejected[c][:] = False
         for j in range(NUM_JOINTS):
-            dropped += _judge(frame, j, rig, F, epi_thr, allow)
+            # judged on every joint, counted on the core ones
+            n = _judge(frame, j, rig, F, epi_thr, allow)
+            dropped += n if j in _CORE_SET else 0
     return dropped
 
 

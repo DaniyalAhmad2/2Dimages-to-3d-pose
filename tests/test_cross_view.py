@@ -97,6 +97,32 @@ def test_triangulate_reports_what_it_threw_away(geo):
     assert triangulate_project(data, rig) == 1
 
 
+def test_a_rejected_toe_is_not_in_the_number_the_user_reads(geo):
+    """The note's numerator and its denominator must be the same set.
+
+    The denominator is the core set (`rejection_note`), and
+    `quality.gap_stats["rejected"]` is core-only too, so a rejected toe
+    counted into the numerator would both inflate the percentage and make the
+    two readouts disagree about the same take. The MASK still records it: the
+    handle goes red, which is the toe colouring its own dot and nothing else.
+    """
+    from pose3d.core.skeleton import CORE_INDEX
+    from pose3d.pipeline import rejection_note
+
+    rig, data, _ = _rig_and_project(geo)
+    f = data.frames[0]
+    toe = int(Joint.LEFT_TOE)
+    f.kp2d[CAM_LEFT][toe] = f.kp2d[CAM_LEFT][int(Joint.LEFT_KNEE)]
+    f.scores[CAM_LEFT][toe] = 0.3
+
+    dropped = validate_cross_view(data, rig)
+
+    assert f.rejected[CAM_LEFT][toe], "the gate must still mask the toe"
+    assert not f.rejected[CAM_LEFT][CORE_INDEX].any()
+    assert dropped == 0
+    assert rejection_note(dropped, len(data.frames)) == ""
+
+
 def test_the_rejection_note_only_fires_when_it_matters():
     """One note, owned by the pipeline that owns the policy, so the import
     dialog and the recalculate status line cannot drift apart."""
